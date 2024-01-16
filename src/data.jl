@@ -69,10 +69,10 @@ saved_variables(data::ArmonData) = map(f -> getfield(data, f), saved_variables()
 """
     memory_required(params::ArmonParameters)
 
-Compute the number of bytes needed on the device to allocate all data arrays
+Compute the number of bytes needed on the device to allocate all data arrays.
 
 While the result is precise, it does not account for additional memory required by MPI buffers and
-the solver.
+the solver, as well as resources shared among MPI processes (i.e. CPU memory).
 """
 memory_required(params::ArmonParameters{T}) where T = memory_required(params.nbcell, T)
 

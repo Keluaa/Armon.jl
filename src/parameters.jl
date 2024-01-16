@@ -176,6 +176,9 @@ function init_MPI(params::ArmonParameters;
         solver_error(:config, "The dimensions of the global domain ($nx x $ny) are not divisible by the number of processors ($px x $py)")
     end
 
+    params.use_MPI = use_MPI
+    params.reorder_grid = reorder_grid
+
     if use_MPI
         !MPI.Initialized() && solver_error(:config, "'use_MPI=true' but MPI has not yet been initialized")
 

@@ -10,7 +10,7 @@ Controls which multi-threading library to use.
 macro threads(expr)
     if use_std_lib_threads
         return esc(quote
-            Threads.@threads $(expr)
+            Threads.@threads :static $(expr)
         end)
     else
         return esc(quote
@@ -765,7 +765,6 @@ function transform_kernel(func::Expr)
         $(use_1D_lin     ? :($var_1D_lin = $var_global_lin + i_0)      : Expr(:block))
         $(use_2D_lin ? :(
                 $var_2D_lin = let
-                    # We don't use multi-dimensional kernels since they are very in
                     ix, iy = divrem($var_global_lin - 1, __ranges_info[4])
                     j = __ranges_info[1] + ix * __ranges_info[2] - 1  # first index in of the row
                     i = __ranges_info[3] + iy + j  # cell index
