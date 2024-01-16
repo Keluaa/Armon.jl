@@ -101,7 +101,7 @@ function Armon.init_backend(params::ArmonParameters, ::Kokkos.ExecutionSpace;
     option!(armon_cpp, "USE_SINGLE_PRECISION", Armon.data_type(params) == Float32; prefix="")
     option!(armon_cpp, "TRY_ALL_CALLS", debug_kernels; prefix="")
     option!(armon_cpp, "CHECK_VIEW_ORDER", debug_kernels; prefix="")
-    option!(armon_cpp, "USE_SIMD_KERNELS", params.use_simd; prefix="")
+    option!(armon_cpp, "USE_SIMD_KERNELS", use_md_iter == 0 && params.use_simd; prefix="")
     option!(armon_cpp, "USE_2D_ITER", use_md_iter == 1; prefix="")
     option!(armon_cpp, "USE_MD_ITER", use_md_iter >= 2; prefix="")
     option!(armon_cpp, "BALANCE_MD_ITER", use_md_iter == 3; prefix="")
@@ -156,7 +156,14 @@ end
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:Kokkos.ExecutionSpace})
     Armon.print_parameter(io, pad, "use_kokkos", true)
-    Armon.print_parameter(io, pad, "device", nameof(Kokkos.main_space_type(p.device)))
+
+    device_str = Kokkos.main_space_type(p.device) |> nameof |> string
+    if p.device isa Kokkos.Cuda || p.device isa Kokkos.HIP
+        device_id = Kokkos.BackendFunctions.device_id(p.device)
+        device_str *= " (GPU index: $device_id)"
+    end
+    Armon.print_parameter(io, pad, "device", device_str)
+
     Armon.print_parameter(io, pad, "memory", nameof(Kokkos.main_space_type(Kokkos.memory_space(p.device))))
 end
 
