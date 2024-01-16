@@ -1,7 +1,7 @@
 name = "Armon"
 uuid = "b773a7a3-b593-48d6-82f6-54bf745a629b"
 authors = ["Luc Briand <luc.briand35@gmail.com> and contributors"]
-version = "0.4.0"
+version = "0.4.1"
 
 [deps]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
@@ -31,10 +31,10 @@ ArmonKokkos = "Kokkos"
 ArmonNVTX = "NVTX"
 
 [compat]
-AMDGPU = "0.4, 0.5"
-CUDA = "≥ 4.1.0"
+AMDGPU = "0.6, 0.7, 0.8"
+CUDA = "4.1 - 5, 5"
 KernelAbstractions = "0.9"
-julia = "1.9"
+julia = ">= 1.9"
 
 [extras]
 AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
