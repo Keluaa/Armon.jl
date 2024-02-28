@@ -38,11 +38,11 @@ end
 
 function make_threaded_loop(expr::Expr; choice=:dynamic)
     with = :(@inbounds Armon.@threads $(expr))
-    without = :($(expr))
+    without = :(@inbounds $(expr))
 
     if choice == :dynamic
         return quote
-            if params.use_threading
+            if params.use_threading || !params.use_cache_blocking
                 $(with)
             else
                 $(without)
@@ -725,7 +725,7 @@ function transform_kernel(func::Expr)
 
     # Compute the switches before calling the cpu kernel
     setup_cpu_call = quote
-        threading = (!no_threading && params.use_threading) ? KernelWithThreading() : KernelWithoutThreading()
+        threading = (!no_threading && !params.use_cache_blocking && params.use_threading) ? KernelWithThreading() : KernelWithoutThreading()
         simd      = params.use_simd ? KernelWithSIMD() : KernelWithoutSIMD()
     end
 

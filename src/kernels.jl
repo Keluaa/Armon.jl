@@ -217,17 +217,36 @@ end
 end
 
 
-@fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock, dx, dy) where T
-    # Reduction exploiting multithreading from the caller
+@fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock, dx, dy) where {T}
+    # CPU reduction
     (; u, v, c) = blk
     range = block_domain_range(blk.size, params.steps_ranges.real_domain)
 
-    res = typemax(T)
-    for j in range.col, i in range.row .+ (j - 1)
-        cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], dx, dy)
-        res = min(res, cell_dt)
+    if params.use_cache_blocking
+        # Reduction exploiting multithreading from the caller
+        res = typemax(T)
+        for j in range.col, i in range.row .+ (j - 1)
+            cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], dx, dy)
+            res = min(res, cell_dt)
+        end
+        return res
+    else
+        # Reduction using explicit multithreading, since the caller isn't multithreaded
+        threads_res = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_res .= typemax(T)
+
+        @threads for j in range.col
+            tid = Threads.threadid()
+            res = threads_res[tid]
+            for i in range.row .+ (j - 1)
+                cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], dx, dy)
+                res = min(res, cell_dt)
+            end
+            threads_res[tid] = res
+        end
+
+        return minimum(threads_res)
     end
-    return res
 end
 
 
@@ -241,6 +260,7 @@ end
 
 
 function dtCFL_kernel(params::ArmonParameters, blk::LocalTaskBlock, dx, dy)
+    # GPU generic reduction
     range = block_domain_range(blk.size, params.steps_ranges.full_domain)
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction result. This is inefficient but can
@@ -258,13 +278,14 @@ function dtCFL_kernel(params::ArmonParameters, blk::LocalTaskBlock, dx, dy)
         u_v    = @view blk.u[lin_range]
         v_v    = @view blk.v[lin_range]
         mask_v = @view blk.mask[lin_range]
-        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, dx, dy)
+        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, dx, dy)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
     end
 end
 
 
-function dtCFL_kernel(params::ArmonParameters{T}, grid::BlockGrid, dx, dy) where T
-    threads_res = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+function dtCFL_kernel(params::ArmonParameters{T}, grid::BlockGrid, dx, dy) where {T}
+    mt_reduction = params.use_threading && params.use_cache_blocking
+    threads_res = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
     threads_res .= typemax(T)
 
     @iter_blocks for blk in device_blocks(grid)
@@ -356,15 +377,39 @@ end
 end
 
 
-@fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where T
-    # Reduction exploiting multithreading from the caller
+@fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
+    # CPU reduction
     (; ρ, E) = blk
     range = block_domain_range(blk.size, params.steps_ranges.real_domain)
 
-    res_mass = zero(T)
-    res_energy = zero(T)
-    for j in range.col, i in range.row .+ (j - 1)
-        (res_mass, res_energy) = (res_mass, res_energy) .+ conservation_vars_kernel_reduction(ρ[i], E[i])
+    if params.use_cache_blocking
+        # Reduction exploiting multithreading from the caller
+        res_mass = zero(T)
+        res_energy = zero(T)
+        for j in range.col, i in range.row .+ (j - 1)
+            (res_mass, res_energy) = (res_mass, res_energy) .+ conservation_vars_kernel_reduction(ρ[i], E[i])
+        end
+    else
+        # Reduction using explicit multithreading, since the caller isn't multithreaded
+        threads_mass   = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_energy = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_mass   .= 0
+        threads_energy .= 0
+
+        @threads for j in range.col
+            tid = Threads.threadid()
+            thread_mass = threads_mass[tid]
+            thread_energy = threads_energy[tid]
+            for i in range.row .+ (j - 1)
+                cell_mass, cell_energy = conservation_vars_kernel_reduction(ρ[i], E[i])
+                thread_mass += cell_mass
+                thread_energy += cell_energy
+            end
+            threads_mass[tid] = thread_mass
+            threads_energy[tid] = thread_energy
+        end
+
+        (res_mass, res_energy) = sum(threads_mass), sum(threads_energy)
     end
 
     ds = params.dx^2
@@ -385,6 +430,7 @@ end
 
 
 function conservation_vars(params::ArmonParameters{T}, blk::LocalTaskBlock) where {T}
+    # GPU generic reduction
     range = block_domain_range(blk.size, params.steps_ranges.full_domain)
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction results.
@@ -412,8 +458,9 @@ end
 
 
 function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T}
-    threads_mass   = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
-    threads_energy = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+    mt_reduction = params.use_threading && params.use_cache_blocking
+    threads_mass   = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
+    threads_energy = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
     threads_mass   .= 0
     threads_energy .= 0
 

@@ -34,6 +34,12 @@ MPI config. The MPI domain will be a process grid of size `P`.
 `reorder_grid` is passed to `MPI.Cart_create`.
 
 
+    gpu_aware = true
+
+Store MPI buffers on the device. This requires to use a GPU-aware MPI implementation. Does nothing
+when using the CPU only.
+
+
 ## Kernels
 
     use_threading = true, use_simd = true
@@ -445,18 +451,21 @@ function init_device(params::ArmonParameters;
     params.use_cache_blocking = use_cache_blocking
     params.use_two_step_reduction = use_two_step_reduction
 
-    if isnothing(block_size)
-        if use_cache_blocking
-            # Estimate the optimal block size, given the solver's stencils
-            # TODO
-            block_size = (64, 64)
-        elseif use_gpu
-            # TODO: GPU block size ?? 1024? but how?
-            block_size = (32, 32)
-            block_size = (1024, 1)
+    if !use_cache_blocking
+        if use_gpu
+            # The literal block size for GPU kernels
+            block_size = something(block_size, 1024)
         else
             # Disable cache blocking by using an empty block size
             block_size = (0, 0)
+        end
+    elseif isnothing(block_size)
+        # TODO: Estimate the optimal block size, given the solver's stencils
+        if !use_gpu
+            block_size = (64, 64)
+        else
+            # TODO: GPU block size ?? 1024? but how?
+            block_size = (32, 32)
         end
     end
 
