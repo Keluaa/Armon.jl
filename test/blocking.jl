@@ -1,14 +1,24 @@
 @testset "Blocking" begin
 
 @testset "BlockGrid" begin
-    @testset "$block_size" for block_size in ((32, 32), (16, 48), (110, 110), #= no blocking =# (0, 0))
-        ref_params = get_reference_params(:Sod, Float64; N=(100, 100), block_size)
+    @testset "$block_size" for block_size in (
+            ( 32,  32),  # Normal mix of static and edge blocks
+            ( 16,  48),  # Uneven mix of static and edge blocks
+            ( 57,  57),  # Edge blocks too small, merged with closest static blocks
+            ( 64,  57),  # Same but uneven
+            (106, 106),  # Edge blocks too small, merged with closest static blocks (only edge blocks left)
+            (108, 108),  # Perfect match: only a single static block
+            (  0,   0),  # No blocking, only edge blocks
+        )
+        nghost = 4
+        ref_params = get_reference_params(:Sod, Float64; N=(100, 100), block_size, nghost)
         grid = Armon.BlockGrid(ref_params)
 
         @testset "Grid" begin
             if prod(block_size) > 0
-                @test !isempty(grid.device_blocks)
                 @test prod(grid.grid_size) == length(grid.device_blocks) + length(grid.device_edge_blocks)
+                grid_size, static_grid, remainder_size = Armon.grid_dimensions(ref_params)
+                @test all(remainder_size .> nghost .|| remainder_size .== 0)
             else
                 @test isempty(grid.device_blocks)
                 @test !isempty(grid.device_edge_blocks)

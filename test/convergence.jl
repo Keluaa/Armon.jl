@@ -52,7 +52,7 @@ function axis_invariance(test::Symbol, type::Type, axis::Axis; options...)
             v_data = getfield(blk, var)
             v_data = reshape(v_data, blk_size)  # 1D to n-D array
             v_data = view(v_data, real_blk_range...)  # the real (non-ghost) data
-    
+
             # Substract each axis with its neighbour => if the axis invariance is ok it should be 0
             errors_count = count((!isapprox).(v_data[r...], v_data[r_offset...]; atol, rtol))
             vars_errors[var] += errors_count
@@ -107,6 +107,10 @@ end
         @testset "$test with $type" for type in (Float32, Float64),
                                         test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
             cmp_cpu_with_reference(test, type; use_threading=false, use_simd=false)
+        end
+
+        @testset "$test - No blocking" for test in (:Sod_circ, :Bizarrium, :Sedov)
+            cmp_cpu_with_reference(test, Float64; use_threading=false, use_simd=false, use_cache_blocking=false)
         end
     end
 

@@ -32,6 +32,7 @@ data_type
 
 ```@docs
 BlockGrid
+grid_dimensions
 TaskBlock
 LocalTaskBlock
 RemoteTaskBlock

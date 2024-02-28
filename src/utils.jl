@@ -108,3 +108,4 @@ end
 
 disp_blk(blk, var) = reshape(getfield(blk, var), block_size(blk))'
 disp_real_blk(blk, var) = view(disp_blk(blk, var)', (.+).(Base.oneto.(real_block_size(blk.size)), ghosts(blk.size))...)'
+disp_mirror_y(A) = view(A, size(A, 1):-1:1, :)  # places the bottom-left cell at the bottom-left of the display

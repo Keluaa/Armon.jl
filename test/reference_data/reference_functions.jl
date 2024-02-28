@@ -8,7 +8,7 @@ function get_reference_params(test::Symbol, type::Type; overriden_options...)
     ref_options = Dict(
         :data_type => type,
         :test => test, :scheme => :GAD, :projection => :euler_2nd, :riemann_limiter => :minmod,
-        :nghost => 5, :N => (100, 100),
+        :nghost => 4, :N => (100, 100),
         :cfl => 0,
         :maxcycle => 1000, :maxtime => 0,  # Run until reaching the default maximum time of the test by default
         :silent => 5, :write_output => false, :measure_time => false,

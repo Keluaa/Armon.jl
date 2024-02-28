@@ -9,6 +9,8 @@ Stores [`TaskBlock`](@ref)s on the `Device` and host memory, in a grid.
 `device_edge_blocks` or `host_edge_blocks`).
 
 Blocks have `Ghost` cells padding their real cells. This is included in their [`block_size`](@ref).
+A block cannot have a number of real cells along an axis smaller than the number of ghost cells,
+unless there is only a single block in the grid along that axis.
 
 `DeviceA` and `HostA` are `AbstractArray` types for the device and host respectively.
 If `DeviceA == HostA`, then `device_blocks === host_blocks`.
@@ -188,6 +190,23 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 end
 
 
+"""
+    grid_dimensions(params::ArmonParameters)
+    grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}, ghost::Int) where {D}
+
+Returns the dimensions of the grid in the form `(grid_size, static_sized_grid, remainder_block_size)`
+from the `block_size` (the size of blocks in the `static_sized_grid`), the `domain_size` (number of
+real cells) and the number of `ghost` cells, common to all blocks.
+
+`grid_size` is the `static_sized_grid` including the edge blocks.
+Edge blocks along the axis `d` have a size of `remainder_block_size[d]` along `d`, and `block_size`
+for the other axes.
+
+`block_size` includes the `ghost` cells in its dimensions, which must all be greater than `2*ghost`.
+
+If `prod(block_size) == 0`, then `block_size` is ignored and the grid is made of only a single block
+of size `domain_size`.
+"""
 grid_dimensions(params::ArmonParameters) = grid_dimensions(params.block_size, params.N, params.nghost)
 
 function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}, ghost::Int) where {D}
@@ -197,16 +216,25 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
     end
 
     # `block_size` includes the number of ghost cells, while `domain_size` is in real cells.
-    real_blocks = block_size .- 2*ghost  # number of real cells in a block in each dim
-    if prod(real_blocks) < 1
-        solver_error(:config, "block size $block_size is too small with $ghost ghost cells: $real_blocks")
+    real_block_size = block_size .- 2*ghost  # number of real cells in a block in each dim
+    if prod(real_block_size) < 1
+        solver_error(:config, "block size $block_size is too small with $ghost ghost cells: $real_block_size")
     end
 
-    grid_size = domain_size .÷ real_blocks
-    remainder = domain_size .% real_blocks
+    grid_size = domain_size .÷ real_block_size
+    remainder = domain_size .% real_block_size
 
-    if prod(grid_size) == 0
-        grid_size = ntuple(Returns(0), D)
+    prod(grid_size) == 0 && (grid_size = ntuple(Returns(0), D))
+
+    # Edge-case: the remainder is smaller than the number of ghost cells. This creates problems during
+    # the halo-exchange since ghosts cells at the edge of the static sized grid depend on all real cells
+    # of the neighbouring edge block BUT ALSO the ghosts of that same edge block, themselves depending
+    # on a remote block (or on the global border conditions).
+    # To solve this, those remaining cells are merged with the neighbouring static sized blocks.
+    remainder_too_small = 0 .< remainder .< ghost .&& grid_size .> 0
+    if any(remainder_too_small)
+        remainder = remainder .+ real_block_size .* remainder_too_small
+        grid_size = grid_size .- 1 .* remainder_too_small
     end
 
     static_sized_grid = grid_size  # Grid of blocks with a static size
@@ -467,7 +495,7 @@ function memory_required(
     domain_perimeter = sum(N) * 2
     MPI_buffer_byte_count = domain_perimeter * #= send+recv =# 2 * length(comm_vars()) * ghost * sizeof(T)
 
-    return arrays_byte_count, MPI_buffer_byte_count, host_overhead
+    return arrays_byte_count, MPI_buffer_byte_count, blocks_overhead
 end
 
 memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
@@ -553,7 +581,7 @@ function print_grid_dimensions(
         print_parameter(io, pad, "static grid", "$static_grid_str static blocks \
             ($static_block_count total, $static_block_ratio)")
         print_parameter(io, pad, "static block",
-            "$real_size cells ($real_count total), \
+            "$real_size real cells ($real_count total), \
             with $ghost ghost cells ($ghost_count total, $real_ghost_ratio of the block)")
         print_parameter(io, pad, "edge grid", "$edge_block_count edge blocks ($edge_block_ratio)")
         print_parameter(io, pad, "edge blocks", "$edge_pos_str, containing $edge_cell_ratio of all real cells")

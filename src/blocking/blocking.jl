@@ -45,7 +45,7 @@ The number of `Ghost` cells is still embedded in the type, as it can simplify so
 and for coherency.
 """
 struct DynamicBSize{Ghost} <: BlockSize
-    s::NTuple{2, UInt16}
+    s::NTuple{2, UInt16}  # TODO: should it really be UInt16? What about 1D?
 
     DynamicBSize{G}(s) where {G} = new{G}(s)
 end
