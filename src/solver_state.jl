@@ -34,19 +34,16 @@ mutable struct GlobalTimeStep{T}
     expected_count :: Int
     MPI_reduction  :: MPI.AbstractRequest
     MPI_buffer     :: MPI.RBuffer
-end
 
-
-function GlobalTimeStep(params::ArmonParameters{T}, grid::BlockGrid) where {T}
-    init_dt = params.cst_dt ? params.Dt : zero(T)
-    blocks_count = prod(grid.grid_size)
-    return GlobalTimeStep{T}(
-        Atomic(TimeStepState.Ready),
-        0, zero(T),
-        init_dt, typemax(T), Atomic(typemax(T)),
-        Atomic(0), blocks_count,
-        MPI.Request(), MPI.RBuffer(Ref{T}(), Ref{T}())
-    )
+    function GlobalTimeStep{T}() where {T}
+        return new{T}(
+            Atomic(TimeStepState.Ready),
+            0, zero(T),
+            zero(T), typemax(T), Atomic(typemax(T)),
+            Atomic(0), 0,
+            MPI.Request(), MPI.RBuffer(Ref{T}(), Ref{T}())
+        )
+    end
 end
 
 
@@ -55,6 +52,18 @@ time_step_state!(global_dt::GlobalTimeStep, state::TimeStepState.T) = @atomic gl
 function replace_time_step_state!(global_dt::GlobalTimeStep, transition::Pair{TimeStepState.T, TimeStepState.T})
     _, ok = @atomicreplace global_dt.state.x transition
     return ok
+end
+
+
+function reset!(global_dt::GlobalTimeStep{T}, params::ArmonParameters{T}, block_count) where {T}
+    time_step_state!(global_dt, TimeStepState.Ready)
+    global_dt.cycle = 0
+    global_dt.time = zero(T)
+    global_dt.current_dt = params.cst_dt ? params.Dt : zero(T)
+    global_dt.next_cycle_dt = typemax(T)
+    @atomic global_dt.next_dt.x = typemax(T)
+    @atomic global_dt.contributions.x = 0
+    global_dt.expected_count = block_count
 end
 
 
@@ -97,7 +106,7 @@ function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where
         if params.use_MPI
             global_dt.MPI_buffer.senddata[] = local_dt
             global_dt.MPI_buffer.recvdata[] = typemax(T)
-            IAllreduce!(global_dt.MPI_buffer, MPI.Op(min, T), params.cart_comm, global_dt.MPI_reduction)
+            IAllreduce!(global_dt.MPI_buffer, MPI.MIN, params.cart_comm, global_dt.MPI_reduction)
             time_step_state!(global_dt, TimeStepState.DoingMPI)
             return TimeStepState.DoingMPI
         else
@@ -152,6 +161,21 @@ function next_cycle!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) wher
 end
 
 
+@enumx SolverStep begin
+    NewCycle
+    TimeStep
+    InitTimeStep
+    NewSweep
+    EOS
+    Exchange
+    Fluxes
+    CellUpdate
+    Remap
+    EndCycle
+    ErrorState
+end
+
+
 """
     SolverState
 
@@ -162,17 +186,19 @@ This object is local to a block (or set of blocks): multiple blocks could be at 
 the solver at once.
 """
 mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, TestCase}
-    dx::T  # Space step along the current axis
-    dt::T  # Scaled time step for the current cycle
-    axis::Axis
-    axis_splitting_idx::Int
-    splitting::Splitting
-    riemann_scheme::Riemann
-    riemann_limiter::RiemannLimiter
-    projection_scheme::Projection
-    test_case::TestCase
-    global_dt::GlobalTimeStep{T}
-    steps_ranges::StepsRanges
+    step               :: SolverStep.T  # Solver step the associated block is at. Unused if `params.async_cycle == false`
+    dx                 :: T    # Space step along the current axis
+    dt                 :: T    # Scaled time step for the current cycle
+    axis               :: Axis
+    axis_splitting_idx :: Int
+    cycle              :: Int  # Local cycle of the block
+    splitting          :: Splitting
+    riemann_scheme     :: Riemann
+    riemann_limiter    :: RiemannLimiter
+    projection_scheme  :: Projection
+    test_case          :: TestCase
+    global_dt          :: GlobalTimeStep{T}
+    steps_ranges       :: StepsRanges
 
     function SolverState{T}(
         splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC, global_dt, steps_ranges
@@ -180,7 +206,7 @@ mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, Te
         T, S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
     }
         return new{T, S, R, RL, P, TC}(
-            zero(T), zero(T), X_axis, 1,
+            SolverStep.NewCycle, zero(T), zero(T), X_axis, 1, 0,
             splitting, riemann, limiter, projection, test_case,
             global_dt, steps_ranges
         )
@@ -224,4 +250,28 @@ function update_solver_state!(params::ArmonParameters, state::SolverState, axis:
     state.dt = state.global_dt.current_dt * dt_factor
     state.axis = axis
     state.steps_ranges = params.steps_ranges[i_ax]
+end
+
+
+function start_cycle(state::SolverState)
+    # If `cycle > global_dt.cycle` then we must wait for the other blocks to finish the previous cycle.
+    return state.cycle == state.global_dt.cycle
+end
+
+
+function end_cycle!(state::SolverState)
+    state.cycle += 1
+end
+
+
+finished_cycle(state::SolverState) = state.cycle == state.global_dt.cycle && state.step == NewCycle
+
+
+function reset!(state::SolverState{T}) where {T}
+    state.step = SolverStep.NewCycle
+    state.dx = zero(T)
+    state.dt = zero(T)
+    state.axis = X_axis
+    state.axis_splitting_idx = 1
+    state.cycle = 0
 end

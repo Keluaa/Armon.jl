@@ -1,6 +1,6 @@
 
 """
-    BlockGrid{DeviceA, HostA, BufferA, Ghost, BlockSize, Device}
+    BlockGrid{T, DeviceA, HostA, BufferA, Ghost, BlockSize, Device, SolverState}
 
 Stores [`TaskBlock`](@ref)s on the `Device` and host memory, in a grid.
 
@@ -19,21 +19,24 @@ If `DeviceA == HostA`, then `device_blocks === host_blocks`.
 all on the host or all on the device.
 """
 struct BlockGrid{
-    DeviceArray <: AbstractArray,
-    HostArray   <: AbstractArray,
-    BufferArray <: AbstractArray,
+    T,
+    DeviceArray <: AbstractArray{T},
+    HostArray   <: AbstractArray{T},
+    BufferArray <: AbstractArray{T},
     Ghost,
     BS          <: StaticBSize{<:Any, Ghost},
+    SState      <: SolverState,
     Device
 }
     grid_size          :: NTuple{2, Int}  # Size of the grid, including all local blocks
     static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
     cell_size          :: NTuple{2, Int}  # Number of cells in each direction
     device             :: Device
-    device_blocks      :: Vector{LocalTaskBlock{DeviceArray, BS}}
-    device_edge_blocks :: Vector{LocalTaskBlock{DeviceArray, DynamicBSize{Ghost}}}
-    host_blocks        :: Vector{LocalTaskBlock{HostArray, BS}}
-    host_edge_blocks   :: Vector{LocalTaskBlock{HostArray, DynamicBSize{Ghost}}}
+    global_dt          :: GlobalTimeStep{T}
+    device_blocks      :: Vector{LocalTaskBlock{DeviceArray, BS, SState}}
+    device_edge_blocks :: Vector{LocalTaskBlock{DeviceArray, DynamicBSize{Ghost}, SState}}
+    host_blocks        :: Vector{LocalTaskBlock{HostArray, BS, SState}}
+    host_edge_blocks   :: Vector{LocalTaskBlock{HostArray, DynamicBSize{Ghost}, SState}}
     remote_blocks      :: Vector{RemoteTaskBlock{BufferArray}}
 end
 
@@ -52,11 +55,14 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     host_array = Core.Compiler.return_type(host_array, Tuple{UndefInitializer, Int})
     device_is_host = host_array == device_array
 
+    global_dt = GlobalTimeStep{T}()
+    state_type = typeof(SolverState(params, global_dt))
+
     ghost = params.nghost
 
     # Containers for blocks with a static size
     static_size = StaticBSize(params.block_size, ghost)
-    device_blocks = Vector{LocalTaskBlock{device_array, typeof(static_size)}}(undef, static_sized_block_count)
+    device_blocks = Vector{LocalTaskBlock{device_array, typeof(static_size), state_type}}(undef, static_sized_block_count)
     if device_is_host
         host_blocks = device_blocks
     else
@@ -64,7 +70,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     end
 
     # Containers for blocks on the edges, with a non-uniform size
-    device_edge_blocks = Vector{LocalTaskBlock{device_array, DynamicBSize{ghost}}}(undef, dyn_sized_block_count)
+    device_edge_blocks = Vector{LocalTaskBlock{device_array, DynamicBSize{ghost}, state_type}}(undef, dyn_sized_block_count)
     if device_is_host
         host_edge_blocks = device_edge_blocks
     else
@@ -77,8 +83,12 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
 
     # Main grid container
-    grid = BlockGrid{device_array, host_array, buffer_array, ghost, typeof(static_size), typeof(params.device)}(
-        grid_size, static_sized_grid, cell_size, params.device,
+    grid = BlockGrid{
+        T, device_array, host_array, buffer_array,
+        ghost, typeof(static_size),
+        state_type, typeof(params.device)
+    }(
+        grid_size, static_sized_grid, cell_size, params.device, global_dt,
         device_blocks, device_edge_blocks,
         host_blocks, host_edge_blocks,
         remote_blocks
@@ -102,9 +112,11 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
             blk_size = DynamicBSize(ifelse.(Tuple(pos) .== grid_size, remainder_block_size, params.block_size), ghost)
         end
 
-        device_blks[idx] = eltype(device_blks)(blk_size, pos; device_kwargs...)
+        blk_state = SolverState(params, global_dt)
+
+        device_blks[idx] = eltype(device_blks)(blk_size, pos, blk_state; device_kwargs...)
         if !device_is_host
-            host_blks[idx] = eltype(host_blks)(blk_size, pos; host_kwargs...)
+            host_blks[idx] = eltype(host_blks)(blk_size, pos, blk_state; host_kwargs...)
         end
     end
 
@@ -352,11 +364,11 @@ function host_block(grid::BlockGrid, idx::CartesianIndex{2}; remote_on_host=true
 end
 
 
-device_array_type(::ObjOrType{BlockGrid{D}}) where {D} = D
-host_array_type(::ObjOrType{BlockGrid{<:Any, H}}) where {H} = H
-buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, B}}) where {B} = B
-ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
-static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, G, BS}}) where {G, BS} = BS
+device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
+host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
+buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
+ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
+static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = BS
 
 
 """
@@ -376,12 +388,12 @@ host_blocks(grid::BlockGrid) = Iterators.flatten((grid.host_blocks, grid.host_ed
 
 
 """
-    device_is_host(::BlockGrid{D, H})
-    device_is_host(::Type{<:BlockGrid{D, H}})
+    device_is_host(::BlockGrid{T, D, H})
+    device_is_host(::Type{<:BlockGrid{T, D, H}})
 
 `true` if the device is the host, i.e. device blocks and host blocks are the same (and `D == H`).
 """
-device_is_host(::ObjOrType{BlockGrid{D, H}}) where {D, H} = D === H
+device_is_host(::ObjOrType{BlockGrid{<:Any, D, H}}) where {D, H} = D === H
 
 
 """
@@ -391,7 +403,24 @@ device_is_host(::ObjOrType{BlockGrid{D, H}}) where {D, H} = D === H
 `true` if the communication buffers are stored on the device, allowing direct transfers without
 passing through the host (GPU-aware communication).
 """
-buffers_on_device(::ObjOrType{BlockGrid{D, H, B}}) where {D, H, B} = D === B
+buffers_on_device(::ObjOrType{BlockGrid{<:Any, D, H, B}}) where {D, H, B} = D === B
+
+
+function reset!(grid::BlockGrid, params::ArmonParameters)
+    reset!(grid.global_dt, params, prod(grid.grid_size))
+    for blk in Iterators.flatten((device_blocks(grid), !device_is_host(grid) ? host_blocks(grid) : ()))
+        reset!(blk)
+    end
+end
+
+
+"""
+    first_state(grid::BlockGrid)
+
+A [`SolverState`](@ref) which can be used as a global state when outside of a solver cycle.
+It belongs to the first device block.
+"""
+first_state(grid::BlockGrid) = first(device_blocks(grid)).state
 
 
 """
@@ -502,15 +531,15 @@ memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
     memory_required(N, block_size, ghost, Vector{T}, Vector{T}, Vector{T})
 
 
-device_to_host!(::BlockGrid{D, D}) where {D} = nothing
-host_to_device!(::BlockGrid{D, D}) where {D} = nothing
+device_to_host!(::BlockGrid{<:Any, D, D}) where {D} = nothing
+host_to_device!(::BlockGrid{<:Any, D, D}) where {D} = nothing
 
 """
     device_to_host!(grid::BlockGrid)
 
 Copies all device data to the host blocks. A no-op if the device is the host.
 """
-function device_to_host!(grid::BlockGrid{D, H}) where {D, H}
+function device_to_host!(grid::BlockGrid{<:Any, D, H}) where {D, H}
     for (host_blk, dev_blk) in zip(host_blocks(grid), device_blocks(grid))
         copyto!(host_blk, dev_blk)
     end
@@ -522,7 +551,7 @@ end
 
 Copies all host data to the device blocks. A no-op if the device is the host.
 """
-function host_to_device!(grid::BlockGrid{D, H}) where {D, H}
+function host_to_device!(grid::BlockGrid{<:Any, D, H}) where {D, H}
     for (dev_blk, host_blk) in zip(device_blocks(grid), host_blocks(grid))
         copyto!(dev_blk, host_blk)
     end
@@ -587,24 +616,27 @@ function print_grid_dimensions(
         print_parameter(io, pad, "edge blocks", "$edge_pos_str, containing $edge_cell_ratio of all real cells")
     end
     print_parameter(io, pad, "remote grid", "$remote_block_count remote blocks, \
-        containing $remote_buffers_size cells (total)")
+        containing $remote_buffers_size cells (total)"; nl=false)
 end
 
 
-function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{D, H, B, Ghost, BS, Device}; pad=16) where {D, H, B, Ghost, BS, Device}
+function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, D, H, B, Ghost, BS, Device};
+    pad=16
+) where {T, D, H, B, Ghost, BS, Device}
     println(io, "BlockGrid:")
     print_grid_dimensions(io, grid.grid_size, grid.static_sized_grid, block_size(BS), grid.cell_size, Ghost; pad)
+    println()
 
     remote_dev_str = buffers_on_device(grid) ? "device" : "host"
     print_parameter(io, pad, "remote buffers", "stored on the $remote_dev_str")
     print_parameter(io, pad, "device", grid.device)
     print_parameter(io, pad, "device array", D)
-    print_parameter(io, pad, "host array", D == H ? "same as device" : H)
+    print_parameter(io, pad, "host array", D == H ? "same as device" : H; nl=false)
 end
 
 
-function Base.show(io::IO, grid::BlockGrid{D, H, B, G, BS}) where {D, H, B, G, BS}
+function Base.show(io::IO, grid::BlockGrid{T, D, H, B, G, BS}) where {T, D, H, B, G, BS}
     grid_str = join(grid.grid_size, '×')
     bs_str = join(block_size(BS), '×')
-    print(io, "BlockGrid{$D, $H, $B}($grid_str, bs: $bs_str, ghost: $G)")
+    print(io, "BlockGrid{$T, $D, $H, $B}($grid_str, bs: $bs_str, ghost: $G)")
 end

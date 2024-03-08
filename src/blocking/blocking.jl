@@ -236,26 +236,6 @@ function (::Type{Neighbours})(f::Base.Callable, default)
 end
 
 
-"""
-    BlockSolverState
-
-Solver step at which a block is at. `block_state_machine` advances this state.
-"""
-@enumx BlockSolverState begin
-    NewCycle
-    TimeStep
-    InitTimeStep
-    NewSweep
-    EOS
-    Exchange
-    Fluxes
-    CellUpdate
-    Remap
-    EndCycle
-    ErrorState
-end
-
-
 @enumx BlockExchangeState::UInt8 begin
     "There are steps to do before border cells are ready"
     NotReady=0

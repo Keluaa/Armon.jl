@@ -22,11 +22,11 @@ end
 
 function Base.show(io::IO, ::MIME"text/plain", stats::SolverStats)
     println(io, "Solver stats:")
-    println(io, " - final time:  ", @sprintf("%.18f", stats.final_time), " sec")
-    println(io, " - last Δt:     ", @sprintf("%.18f", stats.last_dt), " sec")
+    println(io, " - final time:  ", @sprintf("%.18f", stats.final_time))
+    println(io, " - last Δt:     ", @sprintf("%.18f", stats.last_dt))
     println(io, " - cycles:      ", stats.cycles)
     println(io, " - performance: ",
-        round(stats.giga_cells_per_sec * 1e3, digits=3), " ×10⁶ cells-cycles/sec ",
+        round(stats.giga_cells_per_sec * 1e3, digits=3), " ×10⁶ cell-cycles/sec ",
         "(", round(stats.solve_time, digits=3), " sec, ", stats.cell_count, " cells)")
     if !isnothing(stats.timer)
         println(io, "Steps time breakdown:")
@@ -40,9 +40,10 @@ macro checkpoint(step_label)
 end
 
 
-function block_state_machine(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     @label next_step
-    blk_state = block_state(blk)
+    state = blk.state
+    blk_state = state.step
     new_state = blk_state
     stop_processing = false
 
@@ -61,74 +62,82 @@ function block_state_machine(params::ArmonParameters, state::SolverState, blk::L
         cell_update!(params, state, blk)
         projection_remap!(params, state, blk)
     end
+    # Yield to other blocks until all blocks have finished processing this cycle
     ```
     =#
 
     # TODO: put `init_test` here too in order to maximize first-touch accuracy and ease of use
 
-    if blk_state == BlockSolverState.NewCycle
-        if state.global_dt.cycle == 0
-            update_EOS!(params, state, blk)
+    if blk_state == SolverStep.NewCycle
+        if start_cycle(state)
+            if state.global_dt.cycle == 0
+                update_EOS!(params, state, blk)
+            end
+            new_state = SolverStep.TimeStep
+        else
+            # Wait for the other blocks to finish the previous cycle
+            stop_processing = true
+            new_state = SolverStep.NewCycle
         end
-        new_state = BlockSolverState.TimeStep
 
-    elseif blk_state in (BlockSolverState.TimeStep, BlockSolverState.InitTimeStep)
+    elseif blk_state in (SolverStep.TimeStep, SolverStep.InitTimeStep)
         # If not given at config-time, the time step of the first cycle will be the same as the
         # second cycle, requiring all blocks to finish computing the time step before starting the
         # first cycle, hence the `InitTimeStep` state.
-        already_contributed = blk_state == BlockSolverState.InitTimeStep
+        already_contributed = blk_state == SolverStep.InitTimeStep
         must_wait = next_time_step(params, state, blk; already_contributed)
         if must_wait
             stop_processing = true
             if state.dt == 0
-                new_state = BlockSolverState.InitTimeStep
+                new_state = SolverStep.InitTimeStep
             end
         else
-            new_state = BlockSolverState.NewSweep
+            new_state = SolverStep.NewSweep
         end
 
-    elseif blk_state == BlockSolverState.NewSweep
+    elseif blk_state == SolverStep.NewSweep
         if next_axis_sweep!(params, state)
-            new_state = BlockSolverState.EndCycle
+            new_state = SolverStep.EndCycle
         else
-            new_state = BlockSolverState.EOS
+            new_state = SolverStep.EOS
         end
 
-    elseif blk_state == BlockSolverState.EOS
+    elseif blk_state == SolverStep.EOS
         update_EOS!(params, state, blk)
-        new_state = BlockSolverState.Exchange
+        new_state = SolverStep.Exchange
 
-    elseif blk_state == BlockSolverState.Exchange
+    elseif blk_state == SolverStep.Exchange
         must_wait = block_ghost_exchange(params, state, blk)
         if must_wait
             stop_processing = true
         else
-            new_state = BlockSolverState.Fluxes
+            new_state = SolverStep.Fluxes
         end
 
-    elseif blk_state == BlockSolverState.Fluxes
+    elseif blk_state == SolverStep.Fluxes
         numerical_fluxes!(params, state, blk)
-        new_state = BlockSolverState.CellUpdate
+        new_state = SolverStep.CellUpdate
 
-    elseif blk_state == BlockSolverState.CellUpdate
+    elseif blk_state == SolverStep.CellUpdate
         cell_update!(params, state, blk)
-        new_state = BlockSolverState.Remap
+        new_state = SolverStep.Remap
 
-    elseif blk_state == BlockSolverState.Remap
+    elseif blk_state == SolverStep.Remap
         projection_remap!(params, state, blk)
-        new_state = BlockSolverState.NewSweep
+        new_state = SolverStep.NewSweep
 
-    elseif blk_state == BlockSolverState.EndCycle
+    elseif blk_state == SolverStep.EndCycle
+        end_cycle!(state)
         stop_processing = true
-        new_state = BlockSolverState.NewCycle
+        new_state = SolverStep.NewCycle
 
     else
         error("unknown state: $blk_state")
     end
 
-    block_state!(blk, new_state)
+    state.step = new_state
     !stop_processing && @goto next_step
-    return new_state == BlockSolverState.NewCycle
+    return new_state == SolverStep.NewCycle
 end
 
 
@@ -164,9 +173,7 @@ function test_distrib(f, T, GS)
 end
 
 
-function solver_cycle_async(
-    params::ArmonParameters, block_states::Vector{SState}, grid::BlockGrid, max_step_count=typemax(Int)
-) where {SState <: SolverState}
+function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_count=typemax(Int))
     # TODO: use meta-blocks, one for each core/thread, containing a set of `LocalTaskBlock`,
     # with a predefined repartition and device
 
@@ -178,25 +185,31 @@ function solver_cycle_async(
         # TODO: thread block iteration should be done along the current axis
 
         tid = Threads.threadid()
-        thread_blocks = simple_block_distribution(tid, threads_count, grid.grid_size)
-
-        states = @view block_states[thread_blocks]
-        blocks = device_block.(Ref(grid), CartesianIndices(grid.grid_size)[thread_blocks])
-        reached_end_of_cycle = zeros(Bool, length(thread_blocks))
+        thread_blocks_idx = simple_block_distribution(tid, threads_count, grid.grid_size)
 
         t_start = time_ns()
         step_count = 0
-        while !all(reached_end_of_cycle) && step_count < max_step_count
+        while step_count < max_step_count
             if time_ns() - t_start > timeout
-                blocks_pos = Tuple.(CartesianIndices(grid.grid_size)[thread_blocks])
-                eoc_str = join(string.(blocks_pos) .* ": " .* string.(reached_end_of_cycle), ", ")
+                blocks_pos = Tuple.(CartesianIndices(grid.grid_size)[thread_blocks_idx])
+                blocks = device_block.(Ref(grid), blocks_pos)
+                eoc_str = join(string.(blocks_pos) .* ": " .* string.(finished_cycle.(blocks)), ", ")
                 solver_error(:timeout, "cycle took too long in thread $tid, blocks: $eoc_str")
             end
 
-            for (i, (state, blk)) in enumerate(zip(states, blocks))
-                reached_end_of_cycle[i] && continue
-                reached_end_of_cycle[i] |= block_state_machine(params, state, blk)
+            all_finished_cycle = true
+            for blk_idx in thread_blocks_idx
+                blk_pos = CartesianIndices(grid.grid_size)[blk_idx]
+                # One path for each type of block to avoid runtime dispatch
+                if in_grid(blk_pos, grid.static_sized_grid)
+                    blk = grid.device_blocks[block_idx(grid, blk_pos)]
+                    all_finished_cycle &= block_state_machine(params, blk)
+                else
+                    blk = grid.device_edge_blocks[edge_block_idx(grid, blk_pos)]
+                    all_finished_cycle &= block_state_machine(params, blk)
+                end
             end
+            all_finished_cycle && break
 
             step_count += 1
         end
@@ -204,13 +217,15 @@ function solver_cycle_async(
 
     # We cannot use checkpoints for each individual blocks, as it would require barriers.
     # Therefore we only rely on the last one at the end of a cycle as well as the time step.
-    step_checkpoint(params, first(block_states), grid, "time_step")        && return true
-    step_checkpoint(params, first(block_states), grid, "projection_remap") && return true
+    step_checkpoint(params, first_state(grid), grid, "time_step")        && return true
+    step_checkpoint(params, first_state(grid), grid, "projection_remap") && return true
     return false
 end
 
 
-function solver_cycle(params::ArmonParameters, state::SolverState, data::BlockGrid)
+function solver_cycle(params::ArmonParameters, data::BlockGrid)
+    state = first_state(data)
+
     if state.global_dt.cycle == 0
         @checkpoint("init_test") && return true
         @section "EOS_init" update_EOS!(params, state, data)
@@ -246,13 +261,8 @@ end
 function time_loop(params::ArmonParameters, grid::BlockGrid)
     (; maxtime, maxcycle, silent, animation_step, is_root, initial_mass, initial_energy) = params
 
-    global_dt = GlobalTimeStep(params, grid)
-
-    if params.async_cycle
-        states = map(_ -> SolverState(params, global_dt), 1:prod(grid.grid_size))
-    else
-        state = SolverState(params, global_dt)
-    end
+    reset!(grid, params)
+    (; global_dt) = grid
 
     total_cycles_time = 0.
     t1 = time_ns()
@@ -264,9 +274,9 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
         stop = @section "solver_cycle" begin
             try
                 if params.async_cycle
-                    solver_cycle_async(params, states, grid)
+                    solver_cycle_async(params, grid)
                 else
-                    solver_cycle(params, state, grid)
+                    solver_cycle(params, grid)
                 end
             catch e
                 if e isa SolverException && !params.is_root

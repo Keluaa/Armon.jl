@@ -11,13 +11,15 @@ Base.eltype(::TaskBlock{V}) where {V} = eltype(V)
 
 
 """
-    LocalTaskBlock{V, Size} <: TaskBlock{V}
+    LocalTaskBlock{V, Size, SolverState} <: TaskBlock{V}
 
-Container of `Size` and variables of type `V`, part of a [`BlockGrid`](@ref). One block can run all
-solver steps independantly of all other blocks, apart from those which require updating ghost cells.
+Container of `Size` and variables of type `V`, part of a [`BlockGrid`](@ref).
+
+The block stores its own solver state, allowing it to run all solver steps independantly of all
+other blocks, apart from steps requiring synchronization.
 """
-mutable struct LocalTaskBlock{V, Size <: BlockSize} <: TaskBlock{V}
-    state        :: Atomic{BlockSolverState.T}  # Solver step the block is at
+mutable struct LocalTaskBlock{V, Size <: BlockSize, SState <: SolverState} <: TaskBlock{V}
+    state        :: SState             # Solver state for the block
     exchange_age :: Atomic{Int}        # Incremented every time an exchange is completed
     exchanges    :: Neighbours{Atomic{BlockExchangeState.T}}  # State of ghost cells exchanges for each side
     size         :: Size               # Size (in cells) of the block
@@ -25,7 +27,6 @@ mutable struct LocalTaskBlock{V, Size <: BlockSize} <: TaskBlock{V}
     neighbours   :: Neighbours{TaskBlock}
     mirror       :: LocalTaskBlock     # Host/Device mirror of this block. If device is host, then it is a self reference
     # TODO: remove the `mirror` and replace it by two vars `host_data`, `device_data` which contains the data + some info to know which one is up-to-date
-    # TODO: store the SolverState here
     # TODO: device? storing the associated GPU stream, or CPU cores (or maybe not, to allow relocations?)
     # Cells variables
     x      :: V
@@ -45,12 +46,12 @@ mutable struct LocalTaskBlock{V, Size <: BlockSize} <: TaskBlock{V}
     work_4 :: V
     mask   :: V  # TODO: remove ??
 
-    function LocalTaskBlock{V, Size}(size::Size, pos; kwargs...) where {V, Size}
+    function LocalTaskBlock{V, Size, SState}(size::Size, pos, blk_state::SState; kwargs...) where {V, Size, SState}
         # `neighbours` and `mirror` are set afterwards, when all blocks are created.
-        block = new{V, Size}(
-            Atomic(BlockSolverState.NewCycle), Atomic(0),
+        block = new{V, Size, SState}(
+            blk_state, Atomic(0),
             Neighbours(Atomic{BlockExchangeState.T}, BlockExchangeState.NotReady),
-            size, pos
+            size, pos #= undef =#
         )
 
         b_size = block_size(size)
@@ -69,6 +70,7 @@ block_size(blk::LocalTaskBlock) = block_size(blk.size)
 real_block_size(blk::LocalTaskBlock) = real_block_size(blk.size)
 ghosts(blk::LocalTaskBlock) = ghosts(blk.size)
 
+
 block_vars() = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ, :work_1, :work_2, :work_3, :work_4, :mask)
 main_vars()  = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ)  # Variables synchronized between host and device
 saved_vars() = (:x, :y, :ρ, :u, :v,     :p                  )  # Variables saved to/read from I/O
@@ -81,9 +83,6 @@ saved_vars(blk::LocalTaskBlock) = get_vars(blk, saved_vars())
 comm_vars(blk::LocalTaskBlock)  = get_vars(blk, comm_vars())
 
 
-block_state(blk::LocalTaskBlock) = @atomic blk.state.x
-block_state!(blk::LocalTaskBlock, state::BlockSolverState.T) = @atomic blk.state.x = state
-
 exchange_age(blk::LocalTaskBlock) = @atomic blk.exchange_age.x
 incr_exchange_age!(blk::LocalTaskBlock) = @atomic blk.exchange_age.x += 1
 
@@ -92,6 +91,15 @@ exchange_state!(blk::LocalTaskBlock, side::Side, state::BlockExchangeState.T) = 
 function replace_exchange_state!(blk::LocalTaskBlock, side::Side, transition::Pair{BlockExchangeState.T, BlockExchangeState.T})
     _, ok = @atomicreplace blk.exchanges[Int(side)].x transition
     return ok
+end
+
+
+function reset!(blk::LocalTaskBlock)
+    reset!(blk.state)
+    @atomic blk.exchange_age.x = 0
+    for exchange_state in blk.exchanges
+        @atomic exchange_state.x = BlockExchangeState.NotReady
+    end
 end
 
 
@@ -158,8 +166,7 @@ end
 function Base.show(io::IO, blk::LocalTaskBlock)
     pos_str = join(Tuple(blk.pos), ',')
     size_str = join(block_size(blk), '×')
-    cell_count = prod(block_size(blk))
-    print(io, "LocalTaskBlock(at ($pos_str) of size $size_str (total: $cell_count), state: $(block_state(blk)))")
+    print(io, "LocalTaskBlock(at ($pos_str) of size $size_str, state: $(blk.state.step))")
 end
 
 #

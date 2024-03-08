@@ -36,7 +36,6 @@ grid_dimensions
 TaskBlock
 LocalTaskBlock
 RemoteTaskBlock
-BlockState
 device_to_host!
 host_to_device!
 buffers_on_device
