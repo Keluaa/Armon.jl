@@ -1,6 +1,6 @@
 
 import Armon: shift, expand, prepend, inflate, shift_dir, inflate_dir, X_axis, Y_axis
-import Armon: DomainRange, StepsRanges, update_steps_ranges, update_axis_parameters, connect_ranges
+import Armon: DomainRange
 
 
 @testset "Domains" begin

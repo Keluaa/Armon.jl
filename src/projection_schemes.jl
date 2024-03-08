@@ -41,19 +41,19 @@ end
 end
 
 
-function euler_projection!(params::ArmonParameters, blk::LocalTaskBlock)
-    projection_range = block_domain_range(blk.size, params.steps_ranges.projection)
-    s = stride_along(blk.size, params.current_axis)
+function euler_projection!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    projection_range = block_domain_range(blk.size, state.steps_ranges.projection)
+    s = stride_along(blk.size, state.axis)
     euler_projection!(
-        params, blk, projection_range, s, params.cycle_dt,
+        params, blk, projection_range, s, state.dx, state.dt,
         blk.work_1, blk.work_2, blk.work_3, blk.work_4
     )
 end
 
 
-function euler_projection!(params::ArmonParameters, grid::BlockGrid)
+function euler_projection!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @section "Projection" @iter_blocks for blk in device_blocks(grid)
-        euler_projection!(params, blk)
+        euler_projection!(params, state, blk)
     end
 end
 
@@ -77,11 +77,11 @@ end
 end
 
 
-function advection_fluxes!(params::ArmonParameters, blk::LocalTaskBlock, ::EulerProjection)
-    advection_range = block_domain_range(blk.size, params.steps_ranges.advection)
-    s = stride_along(blk.size, params.current_axis)
+function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::EulerProjection)
+    advection_range = block_domain_range(blk.size, state.steps_ranges.advection)
+    s = stride_along(blk.size, state.axis)
     advection_first_order!(
-        params, blk, advection_range, s, params.cycle_dt,
+        params, blk, advection_range, s, state.dt,
         blk.work_1, blk.work_2, blk.work_3, blk.work_4
     )
 end
@@ -122,33 +122,33 @@ end
 end
 
 
-function advection_fluxes!(params::ArmonParameters, blk::LocalTaskBlock, ::Euler2ndProjection)
-    advection_range = block_domain_range(blk.size, params.steps_ranges.advection)
-    s = stride_along(blk.size, params.current_axis)
+function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Euler2ndProjection)
+    advection_range = block_domain_range(blk.size, state.steps_ranges.advection)
+    s = stride_along(blk.size, state.axis)
     advection_second_order!(
-        params, blk, advection_range, s, params.cycle_dt,
+        params, blk, advection_range, s, state.dx, state.dt,
         blk.work_1, blk.work_2, blk.work_3, blk.work_4
     )
 end
 
 
-advection_fluxes!(params::ArmonParameters, blk::LocalTaskBlock) =
-    advection_fluxes!(params::ArmonParameters, blk::LocalTaskBlock, params.projection_scheme)
+advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock) =
+    advection_fluxes!(params::ArmonParameters, state, blk::LocalTaskBlock, state.projection_scheme)
 
-function advection_fluxes!(params::ArmonParameters, grid::BlockGrid)
+function advection_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @section "Advection" @iter_blocks for blk in device_blocks(grid)
-        advection_fluxes!(params, blk)
+        advection_fluxes!(params, state, blk)
     end
 end
 
 
-function projection_remap!(params::ArmonParameters, blk::LocalTaskBlock)
-    advection_fluxes!(params, blk)
-    euler_projection!(params, blk)
+function projection_remap!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    advection_fluxes!(params, state, blk)
+    euler_projection!(params, state, blk)
 end
 
 
-function projection_remap!(params::ArmonParameters, grid::BlockGrid)
-    advection_fluxes!(params, grid)
-    euler_projection!(params, grid)
+function projection_remap!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
+    advection_fluxes!(params, state, grid)
+    euler_projection!(params, state, grid)
 end

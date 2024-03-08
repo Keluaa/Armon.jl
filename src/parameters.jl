@@ -65,6 +65,11 @@ Separate the domain into semi-independant blocks, improving the cache-locality o
 and therefore memory throughput.
 
 
+    async_cycle = false
+
+Apply all steps of the solver to all blocks asynchronously, fully taking advantage of cache blocking.
+
+
     block_size = 1024
 
 Size of blocks for cache blocking. Can be a tuple. If `use_cache_blocking == false`, this option
@@ -121,7 +126,7 @@ Scheme for the Eulerian remap step:
 
 Axis splitting to use:
  - `:Sequential`: X then Y
- - `:SequentialSym`: X and Y then Y and X, alternating
+ - `:SequentialSym` (or `:Godunov`): X and Y then Y and X, alternating
  - `:Strang`: ½X, Y, ½X then ½Y, X, ½Y, alternating (½ is for halved time step)
  - `:X_only`
  - `:Y_only`
@@ -235,31 +240,22 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     riemann_scheme::RiemannScheme
     riemann_limiter::Limiter
     projection_scheme::ProjectionScheme
+    axis_splitting::SplittingMethod
 
     # Domain parameters
     nghost::Int
     N::NTuple{2, Int}
-    dx::Flt_T
     domain_size::NTuple{2, Flt_T}
     origin::NTuple{2, Flt_T}
     cfl::Flt_T
     Dt::Flt_T
     cst_dt::Bool
     dt_on_even_cycles::Bool
-    axis_splitting::Symbol
+    steps_ranges::Vector{StepsRanges}
 
     # Bounds
     maxtime::Flt_T
     maxcycle::Int
-
-    # Current solver state
-    cycle::Int
-    time::Flt_T
-    cycle_dt::Flt_T  # Time step used by kernels, scaled according to the axis splitting
-    curr_cycle_dt::Flt_T  # Current unscaled time step
-    next_cycle_dt::Flt_T  # Time step of the next cycle
-    current_axis::Axis
-    steps_ranges::StepsRanges
 
     # Output
     silent::Int
@@ -284,6 +280,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     use_kokkos::Bool
     use_cache_blocking::Bool
     use_two_step_reduction::Bool
+    async_cycle::Bool
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
     block_size::NTuple{2, Int}
@@ -340,9 +337,6 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
             isdefined(params, field) && continue
             error("Uninitialized field: $field")
         end
-
-        update_axis_parameters(params, first(split_axes(params))[1])
-        update_steps_ranges(params)
 
         # TODO: this is ugly, but allows to circumvent a circular dependency between `init_device`,
         # `ArmonParameters` and the Kokkos backend of `@generic_kernel`: this way we can access the
@@ -440,7 +434,7 @@ end
 function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
-    block_size = nothing, use_cache_blocking = true,
+    block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     options...
 )
@@ -450,6 +444,7 @@ function init_device(params::ArmonParameters;
     params.use_gpu = use_gpu
     params.use_cache_blocking = use_cache_blocking
     params.use_two_step_reduction = use_two_step_reduction
+    params.async_cycle = async_cycle
 
     if !use_cache_blocking
         if use_gpu
@@ -511,13 +506,19 @@ function init_scheme(params::ArmonParameters{T};
     if projection isa Symbol
         projection = scheme_from_name(projection)
     elseif !(projection isa ProjectionScheme)
-        solver_error(:config, "Expected a ProjectionScheme type or a Symbol, got: $scheme")
+        solver_error(:config, "Expected a ProjectionScheme type or a Symbol, got: $projection")
     end
 
     if scheme isa Symbol
         scheme = scheme_from_name(scheme)
     elseif !(scheme isa RiemannScheme)
         solver_error(:config, "Expected a RiemannScheme type or a Symbol, got: $scheme")
+    end
+
+    if axis_splitting isa Symbol
+        axis_splitting = splitting_from_name(axis_splitting)
+    elseif !(axis_splitting isa SplittingMethod)
+        solver_error(:config, "Expected a SplittingMethod type or a Symbol, got: $axis_splitting")
     end
 
     if riemann_limiter isa Symbol
@@ -597,8 +598,7 @@ function init_indexing(params::ArmonParameters; options...)
     # Dimensions of an array of the sub-domain
     params.N = params.N .÷ params.proc_dims
 
-    params.dx = 0
-    params.steps_ranges = StepsRanges()
+    compute_steps_ranges(params)
 
     return options
 end
@@ -635,11 +635,6 @@ end
 
 
 function init_solver_state(params::ArmonParameters{T}; options...) where {T}
-    params.cycle = 0
-    params.time = zero(T)
-    params.cycle_dt = zero(T)
-    params.curr_cycle_dt = zero(T)
-    params.next_cycle_dt = zero(T)
     params.initial_mass = zero(T)
     params.initial_energy = zero(T)
     return options
@@ -729,20 +724,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     end
     println(io, ", ", p.projection_scheme)
 
-    print_parameter(io, pad, "axis splitting", "", nl=false)
-    if p.axis_splitting === :Sequential
-        println(io, "X, Y ; X, Y")
-    elseif p.axis_splitting === :SequentialSym
-        println(io, "X, Y ; Y, X")
-    elseif p.axis_splitting === :Strang
-        println(io, "½X, Y, ½X ; ½Y, X, ½Y")
-    elseif p.axis_splitting === :X_only
-        println(io, "X ; X")
-    elseif p.axis_splitting === :Y_only
-        println(io, "Y ; Y")
-    else
-        println(io, "<unknown>")
-    end
+    print_parameter(io, pad, "axis splitting", p.axis_splitting)
     print_parameter(io, pad, "time step", "", nl=false)
     print(io, p.Dt != 0 ? "starting at $(p.Dt), " :  "initialized automatically, ")
     if p.cst_dt
@@ -854,11 +836,6 @@ neighbour_count(params::ArmonParameters) = count(≠(MPI.PROC_NULL), values(para
 neighbour_count(params::ArmonParameters, dir::Axis) = count(≠(MPI.PROC_NULL), neighbour_at.(params, sides_along(dir)))
 
 
-function grid_coord_along(params::ArmonParameters, dir::Axis = params.current_axis)
-    dir == X_axis ? params.cart_coords[1] : params.cart_coords[2]
-end
-
-
 # Default copy method
 function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
@@ -896,72 +873,31 @@ function alloc_array_kwargs(; label, kwargs...)
 end
 
 #
-# Axis splitting
-#
-
-function split_axes(params::ArmonParameters{T}) where T
-    axis_1, axis_2 = X_axis, Y_axis
-    if iseven(params.cycle)
-        axis_1, axis_2 = axis_2, axis_1
-    end
-
-    if params.axis_splitting == :Sequential
-        return [
-            (X_axis, T(1.0)),
-            (Y_axis, T(1.0)),
-        ]
-    elseif params.axis_splitting == :SequentialSym
-        return [
-            (axis_1, T(1.0)),
-            (axis_2, T(1.0)),
-        ]
-    elseif params.axis_splitting == :Strang
-        return [
-            (axis_1, T(0.5)),
-            (axis_2, T(1.0)),
-            (axis_1, T(0.5)),
-        ]
-    elseif params.axis_splitting == :X_only
-        return [(X_axis, T(1.0))]
-    elseif params.axis_splitting == :Y_only
-        return [(Y_axis, T(1.0))]
-    else
-        solver_error(:config, "Unknown axis splitting method: $(params.axis_splitting)")
-    end
-end
-
-
-function update_axis_parameters(params::ArmonParameters{T}, axis::Axis) where T
-    i_ax = Int(axis)
-    params.current_axis = axis
-    params.dx = params.domain_size[i_ax] / params.global_grid[i_ax]
-end
-
-#
 # Steps indexing
 #
 
-function update_steps_ranges(params::ArmonParameters)
-    nghost = params.nghost
-    steps = params.steps_ranges
+function compute_steps_ranges(params::ArmonParameters)
+    params.steps_ranges = collect(compute_steps_ranges.(instances(Axis), params.nghost, Ref(params.projection_scheme)))
+end
 
+function compute_steps_ranges(axis::Axis, ghosts::Int, projection::ProjectionScheme)
     # Extra cells to compute in each step for the projection
-    extra_FLX = stencil_width(params.projection_scheme)
-    extra_UP = stencil_width(params.projection_scheme)
+    extra_FLX = stencil_width(projection)
+    extra_UP = stencil_width(projection)
 
     # Real domain
     bl_corner = (0, 0)  # Bottom-Left corner offset
     tr_corner = (0, 0)  # Top-Right   corner offset
     real_range = (bl_corner, tr_corner)
-    steps.real_domain = real_range
+    real_domain = real_range
 
     # Full domain (real + ghosts), for initialization + first-touch
-    steps.full_domain = (bl_corner .- nghost, bl_corner .+ nghost)
+    full_domain = (bl_corner .- ghosts, bl_corner .+ ghosts)
 
     # Steps ranges, computed so that there is no need for an extra BC step before the projection
-    steps.EOS = real_range  # The BC overwrites any changes to the ghost cells right after
+    EOS = real_range  # The BC overwrites any changes to the ghost cells right after
 
-    if params.current_axis == X_axis
+    if axis == X_axis
         # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes
         fluxes_bl  = (extra_FLX, 0); fluxes_tr  = (extra_FLX+1, 0)
         cell_up_bl = (extra_UP,  0); cell_up_tr = (extra_UP,    0)
@@ -972,12 +908,20 @@ function update_steps_ranges(params::ArmonParameters)
         advec_bl   = (0, 0        ); advec_tr   = (0, 1          )
     end
 
-    steps.fluxes      = (bl_corner .- fluxes_bl,  tr_corner .+ fluxes_tr )
-    steps.cell_update = (bl_corner .- cell_up_bl, tr_corner .+ cell_up_tr)
-    steps.advection   = (bl_corner .- advec_bl,   tr_corner .+ advec_tr  )
-    steps.projection  = real_range
+    fluxes      = (bl_corner .- fluxes_bl,  tr_corner .+ fluxes_tr )
+    cell_update = (bl_corner .- cell_up_bl, tr_corner .+ cell_up_tr)
+    advection   = (bl_corner .- advec_bl,   tr_corner .+ advec_tr  )
+    projection  = real_range
+
+    return StepsRanges(
+        axis, real_domain, full_domain,
+        EOS, fluxes, cell_update, advection, projection
+    )
 end
 
+#
+# Synchronisation
+#
 
 function Base.wait(::ArmonParameters{<:Any, <:Union{CPU, CPU_HP}})
     # CPU backends are synchronous

@@ -82,7 +82,7 @@ function uninit_vars_propagation(test, type; options...)
         end
     end
 
-    dt, cycles, _, _ = Armon.time_loop(ref_params, data)
+    _, dt, cycles, _, _ = Armon.time_loop(ref_params, data)
 
     ref_data = BlockGrid(ref_params)
     differences_count, max_diff = compare_with_reference_data(
@@ -104,13 +104,19 @@ end
 
 @testset "Convergence" begin
     @testset "Reference" begin
-        @testset "$test with $type" for type in (Float32, Float64),
-                                        test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov)
-            cmp_cpu_with_reference(test, type; use_threading=false, use_simd=false)
+        @testset "$test with $type - $(join(block_size, '×'))" for
+                type in (Float32, Float64),
+                test in (:Sod, :Sod_y, :Sod_circ, :Bizarrium, :Sedov),
+                block_size in ((57, 57), (24, 24), (17, 63))
+            cmp_cpu_with_reference(test, type; block_size, use_threading=false, use_simd=false)
         end
 
         @testset "$test - No blocking" for test in (:Sod_circ, :Bizarrium, :Sedov)
             cmp_cpu_with_reference(test, Float64; use_threading=false, use_simd=false, use_cache_blocking=false)
+        end
+
+        @testset "$test - Async cycles" for test in (:Sod_circ, :Bizarrium, :Sedov)
+            cmp_cpu_with_reference(test, Float64; use_threading=false, use_simd=false, async_cycle=true)
         end
     end
 

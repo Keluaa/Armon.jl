@@ -229,19 +229,43 @@ in_grid(start, idx, grid, axis::Axis) = (Tuple(start) .≤ Tuple(idx) .≤ Tuple
 
 const Neighbours = @NamedTuple{left::T, right::T, bottom::T, top::T} where {T}
 
+function (::Type{Neighbours})(f::Base.Callable, default)
+    # Default constructor, e.g: `Neighbours(Int, 0)` => Neighbours{Int}(left=0, right=0, ...)
+    values = ntuple(_ -> f(default), fieldcount(Neighbours))
+    return Neighbours{eltype(values)}(values)
+end
+
 
 """
-    BlockState
+    BlockSolverState
 
- - `Done`:    data is up-do-date with the current solver's state
- - `Working`: one thread is working on the block's data
- - `Waiting`: waiting for the completion of another block(s) before continuing work
-
-At any state, host and device memory are not guarenteed to be synced.
-
-Two blocks `Waiting` for each other are able to exchange their neighbouring regions.
+Solver step at which a block is at. `block_state_machine` advances this state.
 """
-@enum BlockState Done=0 Working=1 Waiting=2
+@enumx BlockSolverState begin
+    NewCycle
+    TimeStep
+    InitTimeStep
+    NewSweep
+    EOS
+    Exchange
+    Fluxes
+    CellUpdate
+    Remap
+    EndCycle
+    ErrorState
+end
+
+
+@enumx BlockExchangeState::UInt8 begin
+    "There are steps to do before border cells are ready"
+    NotReady=0
+    "Border cells are ready, waiting for the other side to be `Ready` as well"
+    Ready=1
+    "One of the blocks is performing the exchange"
+    InProgress=2
+    "The exchange is done"
+    Done=3
+end
 
 
 include("blocks.jl")
@@ -290,8 +314,6 @@ macro iter_blocks(expr)
     else
         error("wrong style of block iteration: $block_range")
     end
-
-    # TODO: efficient workload distribution
 
     return esc(quote
         Armon.@section "Inner blocks" begin

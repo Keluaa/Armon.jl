@@ -97,28 +97,9 @@ mutable struct StepsRanges
     direction       :: Axis
     real_domain     :: NTuple{2, Dims{2}}
     full_domain     :: NTuple{2, Dims{2}}
-
     EOS             :: NTuple{2, Dims{2}}
     fluxes          :: NTuple{2, Dims{2}}
     cell_update     :: NTuple{2, Dims{2}}
     advection       :: NTuple{2, Dims{2}}
     projection      :: NTuple{2, Dims{2}}
-
-    outer_lb_EOS    :: NTuple{2, Dims{2}}
-    outer_rt_EOS    :: NTuple{2, Dims{2}}
-    outer_lb_fluxes :: NTuple{2, Dims{2}}
-    outer_rt_fluxes :: NTuple{2, Dims{2}}
-    inner_EOS       :: NTuple{2, Dims{2}}
-    inner_fluxes    :: NTuple{2, Dims{2}}
-end
-
-
-function StepsRanges()
-    default_dim = ((0, 0), (0, 0))
-    return StepsRanges(
-        X_axis,
-        default_dim, default_dim,
-        default_dim, default_dim, default_dim, default_dim, default_dim,
-        default_dim, default_dim, default_dim, default_dim, default_dim, default_dim,
-    )
 end

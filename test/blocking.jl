@@ -175,7 +175,7 @@ end
             use_MPI=false, data_type=Float64
         )
         params.nghost = g  # We must do this after the constructor to avoid checks with the schemes
-        Armon.update_steps_ranges(params)
+        Armon.compute_steps_ranges(params)
         grid = Armon.BlockGrid(params)
         Armon.init_test(params, grid)
 

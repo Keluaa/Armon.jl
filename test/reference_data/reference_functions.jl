@@ -22,7 +22,7 @@ end
 function run_armon_reference(ref_params::ArmonParameters)
     data = BlockGrid(ref_params)
     Armon.init_test(ref_params, data)
-    dt, cycles, _, _ = Armon.time_loop(ref_params, data)
+    _, dt, cycles, _, _ = Armon.time_loop(ref_params, data)
     Armon.device_to_host!(data)
     return dt, cycles, data
 end

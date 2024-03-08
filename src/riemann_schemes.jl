@@ -43,10 +43,10 @@ end
 end
 
 
-function numerical_fluxes!(params::ArmonParameters, blk::LocalTaskBlock, ::RiemannGodunov)
-    range = block_domain_range(blk.size, params.steps_ranges.fluxes)
-    u = params.current_axis == X_axis ? blk.u : blk.v
-    s = stride_along(blk.size, params.current_axis)
+function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGodunov)
+    range = block_domain_range(blk.size, state.steps_ranges.fluxes)
+    u = state.axis == X_axis ? blk.u : blk.v
+    s = stride_along(blk.size, state.axis)
     return acoustic!(params, blk, range, s, blk.uˢ, blk.pˢ, u)
 end
 
@@ -103,19 +103,19 @@ end
 end
 
 
-function numerical_fluxes!(params::ArmonParameters, blk::LocalTaskBlock, ::RiemannGAD)
-    range = block_domain_range(blk.size, params.steps_ranges.fluxes)
-    u = params.current_axis == X_axis ? blk.u : blk.v
-    s = stride_along(blk.size, params.current_axis)
-    return acoustic_GAD!(params, blk, range, s, params.cycle_dt, u, params.riemann_limiter)
+function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGAD)
+    range = block_domain_range(blk.size, state.steps_ranges.fluxes)
+    u = state.axis == X_axis ? blk.u : blk.v
+    s = stride_along(blk.size, state.axis)
+    return acoustic_GAD!(params, blk, range, s, state.dt, state.dx, u, state.riemann_limiter)
 end
 
 
-numerical_fluxes!(params::ArmonParameters, blk::LocalTaskBlock) =
-    numerical_fluxes!(params, blk, params.riemann_scheme)
+numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock) =
+    numerical_fluxes!(params, state, blk, state.riemann_scheme)
 
-function numerical_fluxes!(params::ArmonParameters, grid::BlockGrid)
+function numerical_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @iter_blocks for blk in device_blocks(grid)
-        numerical_fluxes!(params, blk)
+        numerical_fluxes!(params, state, blk)
     end
 end

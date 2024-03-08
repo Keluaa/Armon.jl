@@ -17,11 +17,15 @@ Container of `Size` and variables of type `V`, part of a [`BlockGrid`](@ref). On
 solver steps independantly of all other blocks, apart from those which require updating ghost cells.
 """
 mutable struct LocalTaskBlock{V, Size <: BlockSize} <: TaskBlock{V}
-    @atomic state :: BlockState  # TODO: atomic??
-    size   :: Size               # Size (in cells) of the block
-    pos    :: CartesianIndex{2}  # Position in the local block grid
-    neighbours :: Neighbours{TaskBlock}
-    mirror :: LocalTaskBlock     # Host/Device mirror of this block. If device is host, then it is a self reference
+    state        :: Atomic{BlockSolverState.T}  # Solver step the block is at
+    exchange_age :: Atomic{Int}        # Incremented every time an exchange is completed
+    exchanges    :: Neighbours{Atomic{BlockExchangeState.T}}  # State of ghost cells exchanges for each side
+    size         :: Size               # Size (in cells) of the block
+    pos          :: CartesianIndex{2}  # Position in the local block grid
+    neighbours   :: Neighbours{TaskBlock}
+    mirror       :: LocalTaskBlock     # Host/Device mirror of this block. If device is host, then it is a self reference
+    # TODO: remove the `mirror` and replace it by two vars `host_data`, `device_data` which contains the data + some info to know which one is up-to-date
+    # TODO: store the SolverState here
     # TODO: device? storing the associated GPU stream, or CPU cores (or maybe not, to allow relocations?)
     # Cells variables
     x      :: V
@@ -43,7 +47,11 @@ mutable struct LocalTaskBlock{V, Size <: BlockSize} <: TaskBlock{V}
 
     function LocalTaskBlock{V, Size}(size::Size, pos; kwargs...) where {V, Size}
         # `neighbours` and `mirror` are set afterwards, when all blocks are created.
-        block = new{V, Size}(Done, size, pos)
+        block = new{V, Size}(
+            Atomic(BlockSolverState.NewCycle), Atomic(0),
+            Neighbours(Atomic{BlockExchangeState.T}, BlockExchangeState.NotReady),
+            size, pos
+        )
 
         b_size = block_size(size)
         for var in block_vars()
@@ -60,23 +68,35 @@ end
 block_size(blk::LocalTaskBlock) = block_size(blk.size)
 real_block_size(blk::LocalTaskBlock) = real_block_size(blk.size)
 ghosts(blk::LocalTaskBlock) = ghosts(blk.size)
-state(blk::LocalTaskBlock) = blk.state
 
 block_vars() = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ, :work_1, :work_2, :work_3, :work_4, :mask)
 main_vars()  = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ)  # Variables synchronized between host and device
 saved_vars() = (:x, :y, :ρ, :u, :v,     :p                  )  # Variables saved to/read from I/O
 comm_vars()  = (        :ρ, :u, :v, :E, :p, :c, :g          )  # Variables exchanged between ghost cells
 
-block_vars(blk::LocalTaskBlock) = getfield.(Ref(blk), block_vars())
-main_vars(blk::LocalTaskBlock)  = getfield.(Ref(blk), main_vars())
-saved_vars(blk::LocalTaskBlock) = getfield.(Ref(blk), saved_vars())
-comm_vars(blk::LocalTaskBlock)  = getfield.(Ref(blk), comm_vars())
+get_vars(blk::LocalTaskBlock, vars) = getfield.(Ref(blk), vars)
+block_vars(blk::LocalTaskBlock) = get_vars(blk, block_vars())
+main_vars(blk::LocalTaskBlock)  = get_vars(blk, main_vars())
+saved_vars(blk::LocalTaskBlock) = get_vars(blk, saved_vars())
+comm_vars(blk::LocalTaskBlock)  = get_vars(blk, comm_vars())
+
+
+block_state(blk::LocalTaskBlock) = @atomic blk.state.x
+block_state!(blk::LocalTaskBlock, state::BlockSolverState.T) = @atomic blk.state.x = state
+
+exchange_age(blk::LocalTaskBlock) = @atomic blk.exchange_age.x
+incr_exchange_age!(blk::LocalTaskBlock) = @atomic blk.exchange_age.x += 1
+
+exchange_state(blk::LocalTaskBlock, side::Side) = @atomic blk.exchanges[Int(side)].x
+exchange_state!(blk::LocalTaskBlock, side::Side, state::BlockExchangeState.T) = @atomic blk.exchanges[Int(side)].x = state
+function replace_exchange_state!(blk::LocalTaskBlock, side::Side, transition::Pair{BlockExchangeState.T, BlockExchangeState.T})
+    _, ok = @atomicreplace blk.exchanges[Int(side)].x transition
+    return ok
+end
 
 
 function Base.copyto!(dst_blk::LocalTaskBlock{V, Size}, src_blk::LocalTaskBlock{V, Size}) where {V, Size}
-    if state(dst_blk) != Done || state(src_blk) != Done
-        error("Both destination and source blocks must be `Done` to copy")
-    elseif block_size(dst_blk) != block_size(src_blk)
+    if block_size(dst_blk) != block_size(src_blk)
         error("Destination and source blocks have different sizes: $(block_size(dst_blk)) != $(block_size(src_blk))")
     end
 
@@ -88,9 +108,7 @@ end
 
 
 function Base.copyto!(dst_blk::LocalTaskBlock{A, Size}, src_blk::LocalTaskBlock{B, Size}) where {A, B, Size}
-    if state(dst_blk) != Done || state(src_blk) != Done
-        error("Both destination and source blocks must be `Done` to copy")
-    elseif block_size(dst_blk) != block_size(src_blk)
+    if block_size(dst_blk) != block_size(src_blk)
         error("Destination and source blocks have different sizes: $(block_size(dst_blk)) != $(block_size(src_blk))")
     end
 
@@ -141,7 +159,7 @@ function Base.show(io::IO, blk::LocalTaskBlock)
     pos_str = join(Tuple(blk.pos), ',')
     size_str = join(block_size(blk), '×')
     cell_count = prod(block_size(blk))
-    print(io, "LocalTaskBlock(at ($pos_str) of size $size_str (total: $cell_count), state: $(state(blk)))")
+    print(io, "LocalTaskBlock(at ($pos_str) of size $size_str (total: $cell_count), state: $(block_state(blk)))")
 end
 
 #
@@ -155,7 +173,6 @@ Block located at the border of a [`BlockGrid`](@ref), containing MPI buffer of t
 communication with other [`BlockGrid`](@ref)s.
 """
 mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
-    @atomic state :: BlockState      # `Waiting` if comms are in progress, `Done` otherwise. TODO: atomic??
     pos        :: CartesianIndex{2}  # Position in the local block grid
     neighbour  :: LocalTaskBlock     # Remote blocks are on the edges of the sub-domain: there can only be one real neighbour
     rank       :: Int
@@ -167,7 +184,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
 
     function RemoteTaskBlock{B}(size, pos, rank, global_pos, comm) where {B}
         # `neighbour` is set afterwards, when all blocks are created.
-        block = new{B}(Done, pos)
+        block = new{B}(pos)
         block.rank = rank
         block.global_pos = global_pos
         block.send_buf = MPI.Buffer(B(undef, size))
@@ -180,7 +197,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
     function RemoteTaskBlock{B}(pos) where {B}
         # Constructor for an non-existant task block, found at the edges of the global domain, where
         # there is no MPI rank.
-        block = new{B}(Done, pos)
+        block = new{B}(pos)
         block.rank = -1
         block.global_pos = CartesianIndex(0, 0)
         block.send_buf = MPI.Buffer(B(undef, 0))
@@ -191,14 +208,13 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
     end
 end
 
-state(block::RemoteTaskBlock) = block.state
 
 function Base.show(io::IO, blk::RemoteTaskBlock)
     pos_str = join(Tuple(blk.pos), ',')
     if blk.rank == -1
-        print(io, "RemoteTaskBlock(at ($pos_str), to: nowhere, state: $(state(blk)))")
+        print(io, "RemoteTaskBlock(at ($pos_str), to: nowhere")
     else
         global_str = join(Tuple(blk.global_pos), ',')
-        print(io, "RemoteTaskBlock(at ($pos_str), to: process $(blk.rank) at ($global_str), state: $(state(blk)))")
+        print(io, "RemoteTaskBlock(at ($pos_str), to: process $(blk.rank) at ($global_str)")
     end
 end

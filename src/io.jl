@@ -68,8 +68,8 @@ function write_sub_domain_file(
 )
     output_file_path = build_file_path(params, file_name)
     open(output_file_path, "w") do file
-        global_ghosts = params.write_ghosts
-        write_blocks_to_file(params, data, file; global_ghosts, options...)
+        all_ghosts = params.write_ghosts
+        write_blocks_to_file(params, data, file; all_ghosts, options...)
     end
 
     if !no_msg && params.is_root && params.silent < 2
@@ -83,20 +83,20 @@ function read_sub_domain_file!(
 )
     output_file_path = build_file_path(params, file_name)
     open(output_file_path, "r") do file
-        global_ghosts = params.write_ghosts
-        read_data_from_file(params, data, file; global_ghosts, options...)
+        all_ghosts = params.write_ghosts
+        read_data_from_file(params, data, file; all_ghosts, options...)
     end
 end
 
 
-function write_time_step_file(params::ArmonParameters, file_name::String)
+function write_time_step_file(params::ArmonParameters, state::SolverState, file_name::String)
     file_path = build_file_path(params, file_name)
 
     p = params.output_precision
     format = Printf.Format("%#$(p+7).$(p)e\n")
 
     open(file_path, "w") do file
-        Printf.format(file, format, params.curr_cycle_dt)
+        Printf.format(file, format, state.global_dt.current_dt)
     end
 end
 
@@ -119,6 +119,9 @@ function compare_block(
 )
     different = false
 
+    real_static_bsize = params.block_size .- 2*params.nghost
+    blk_global_pos = params.cart_coords .* params.N .+ (Tuple(our_blk.pos) .- 1) .* real_static_bsize
+
     for var in vars
         ref_var = getfield(ref_blk, var)
         our_var = getfield(our_blk, var)
@@ -138,14 +141,16 @@ function compare_block(
             for (idx, mask) in enumerate(diff_mask)
                 !mask && continue
                 I = position(our_blk.size, idx)
+                gI = I .+ blk_global_pos .- 1
 
                 val_diff = ref_var[idx] - our_var[idx]
                 diff_ulp = val_diff / eps(ref_var[idx])
                 abs(diff_ulp) > 1e10 && (diff_ulp = Inf)
 
-                pos_str = join((@sprintf("%3d", i) for i in I), ',')
-                @printf("   - %5d (%s): %12.5g ≢ %12.5g (%12.5g, ulp: %8g)\n",
-                    idx, pos_str, ref_var[idx], our_var[idx], val_diff, diff_ulp)
+                pos_str  = join((@sprintf("%3d", i) for i in I ), ',')
+                gpos_str = join((@sprintf("%3d", i) for i in gI), ',')
+                @printf("   - %5d (%s | %s): %12.5g ≢ %12.5g (%12.5g, ulp: %8g)\n",
+                    idx, pos_str, gpos_str, ref_var[idx], our_var[idx], val_diff, diff_ulp)
             end
         else
             println()
@@ -183,19 +188,24 @@ function compare_with_file(
 end
 
 
-function step_checkpoint(params::ArmonParameters, grid::BlockGrid, step_label::String)
+function step_checkpoint(params::ArmonParameters, state::SolverState, grid::BlockGrid, step_label::String)
     !params.compare && return false
 
     wait(params)
     device_to_host!(grid)
     wait(params)
 
-    step_file_name = params.output_file * @sprintf("_%03d_%s", params.cycle, step_label)
-    step_file_name *= "_" * string(params.current_axis)[1]
+    step_file_name = params.output_file * @sprintf("_%03d_%s", state.global_dt.cycle, step_label)
+    if state.global_dt.cycle == 0 && step_label == "time_step"
+        axis = X_axis
+    else
+        axis = state.axis
+    end
+    step_file_name *= "_" * string(axis)[1]
 
     if params.is_ref
         if step_label == "time_step"
-            write_time_step_file(params, step_file_name)
+            write_time_step_file(params, state, step_file_name)
         else
             write_sub_domain_file(params, grid, step_file_name; no_msg=true)
         end
@@ -204,10 +214,10 @@ function step_checkpoint(params::ArmonParameters, grid::BlockGrid, step_label::S
     else
         if step_label == "time_step"
             ref_dt = read_time_step_file(params, step_file_name)
-            different = !isapprox(ref_dt, params.curr_cycle_dt; rtol=params.comparison_tolerance)
+            different = !isapprox(ref_dt, state.dt; rtol=params.comparison_tolerance)
             if different
                 @printf("Time step difference: ref Δt = %.18f, Δt = %.18f, diff = %.18f\n",
-                        ref_dt, params.curr_cycle_dt, ref_dt - params.curr_cycle_dt)
+                        ref_dt, state.dt, ref_dt - state.dt)
             end
         else
             different = compare_with_file(params, grid, step_file_name, step_label)

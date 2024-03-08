@@ -29,10 +29,10 @@
 end
 
 
-function boundary_conditions!(params::ArmonParameters{T}, blk::LocalTaskBlock, side::Side) where {T}
-    (u_factor::T, v_factor::T) = boundary_condition(params.test, side)
+function boundary_conditions!(params::ArmonParameters{T}, state::SolverState, blk::LocalTaskBlock, side::Side) where {T}
+    (u_factor::T, v_factor::T) = boundary_condition(state.test_case, side)
     domain = border_domain(blk.size, side)
-    boundary_conditions!(params, blk, domain, blk.size, params.current_axis, side, u_factor, v_factor)
+    boundary_conditions!(params, blk, domain, blk.size, state.axis, side, u_factor, v_factor)
 end
 
 
@@ -97,17 +97,74 @@ end
 end
 
 
+"""
+    check_block_ready_for_exchange(blk₁, blk₂, side)
+
+Check if `blk₂` is ready to exchange its border cells with `blk₁` along `side` (relative to `blk₁`).
+
+Returns `true` if the exchange can proceed.
+"""
+function check_block_ready_for_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side)
+    side₁_state = exchange_state(blk₁, side₁)
+    if side₁_state == BlockExchangeState.NotReady
+        exchange_state!(blk₁, side₁, BlockExchangeState.Ready)
+    elseif side₁_state in (BlockExchangeState.InProgress, BlockExchangeState.Done)
+        return false
+    end
+    # `side₁_state` is `Ready`
+
+    side₂ = opposite_of(side₁)
+    side₂_state = exchange_state(blk₂, side₂)
+    if side₂_state in (BlockExchangeState.NotReady, BlockExchangeState.InProgress)
+        return false
+    elseif side₂_state == BlockExchangeState.Done
+        error("unexpected `Done` exchange state for block $(blk₂.pos)")
+    end
+    # `side₂_state` is `Ready`
+
+    age₁ = exchange_age(blk₁)
+    age₂ = exchange_age(blk₂)
+    if age₁ > age₂
+        return false
+    elseif age₁ < age₂
+        error("invalid exchange age between blocks $(blk₁.pos) and $(blk₂.pos): `$age₁ < $age₂`")
+    end
+    # `age₁ == age₂`: `blk₁` and `blk₂` are at the same exchange step.
+
+    # Try to start the exchange (`blk₂` might get here before `blk₁`). To be sure this decision is
+    # made on the same value, we do it on the Left/Bottom-most block.
+    choice_side, choice_blk = side₁ in first_sides() ? (side₁, blk₁) : (side₂, blk₂)
+    if !replace_exchange_state!(choice_blk, choice_side, BlockExchangeState.Ready => BlockExchangeState.InProgress)
+        return false  # `blk₂` does the exchange
+    end
+
+    other_side, other_blk = side₁ in first_sides() ? (side₂, blk₂) : (side₁, blk₁)
+    exchange_state!(other_blk, other_side, BlockExchangeState.InProgress)  # No async issues here
+
+    return true  # `blk₁` does the exchange
+end
+
+
+function post_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side)
+    exchange_state!(blk₁, side₁, BlockExchangeState.Done)
+    exchange_state!(blk₂, opposite_of(side₁), BlockExchangeState.Done)
+    return BlockExchangeState.Done
+end
+
+
 function block_ghost_exchange(
-    params::ArmonParameters, blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side
+    params::ArmonParameters, state::SolverState, blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side
 ) where {V, Size <: StaticBSize}
+    !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
+
     # Exchange between two blocks with the same dimensions
     domain = border_domain(blk₁.size, side)
-    # println()
-    # @show blk.pos params.current_axis side domain blk.size stride_along(blk.size, params.current_axis) (side in first_sides())
     block_ghost_exchange(params, domain,
         comm_vars(blk₁), comm_vars(blk₂),
-        blk₁.size, params.current_axis, side
+        blk₁.size, state.axis, side
     )
+
+    return post_exchange(blk₁, blk₂, side)
 end
 
 
@@ -162,15 +219,19 @@ end
 
 
 function block_ghost_exchange(
-    params::ArmonParameters, blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side
+    params::ArmonParameters, state::SolverState, blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side
 ) where {V}
+    !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
+
     # Exchange between two blocks with (possibly) different dimensions, but the same length along `side`
     domain = border_domain(blk₁.size, side)
     block_ghost_exchange(params, domain,
         comm_vars(blk₁), blk₁.size,
         comm_vars(blk₂), blk₂.size,
-        params.current_axis, side
+        state.axis, side
     )
+
+    return post_exchange(blk₁, blk₂, side)
 end
 
 
@@ -207,59 +268,98 @@ end
 
 
 function block_ghost_exchange(
-    params::ArmonParameters, blk::LocalTaskBlock{V}, other_blk::RemoteTaskBlock{B}, side::Side
+    params::ArmonParameters, state::SolverState, blk::LocalTaskBlock{V}, other_blk::RemoteTaskBlock{B}, side::Side
 ) where {V, B}
     if other_blk.rank == -1
         # `other_blk` is fake, this is the border of the global domain
-        return boundary_conditions!(params, blk, side)
+        boundary_conditions!(params, state, blk, side)
+        return BlockExchangeState.Done
     end
 
     # Exchange between one local block and a remote block from another sub-domain
-    # TODO: use RMA with processes local to the node.
-
-    if V !== B
-        # MPI buffers are not on the device. We first need to copy them to the host memory.
-        device_to_host!(blk)
-    end
-
     send_domain = border_domain(blk.size, side)
     recv_domain = shift_dir(send_domain, axis_of(side), side in first_sides() ? -ghosts(blk.size) : ghosts(blk.size))
 
-    vars = comm_vars(blk)
-    pack_to_array!(params, blk, send_domain, blk.size, side, other_blk.send_buf.data, vars)
+    if exchange_state(blk, side) == BlockExchangeState.NotReady
+        if V !== B
+            # MPI buffers are not on the device. We first need to copy them to the host memory.
+            device_to_host!(blk)
+        end
 
-    wait(params)  # Wait for the copy to complete
+        vars = comm_vars(blk)
+        pack_to_array!(params, blk, send_domain, blk.size, side, other_blk.send_buf.data, vars)
 
-    MPI.Start(send_request)
-    MPI.Start(recv_request)
+        wait(params)  # Wait for the copy to complete
 
-    # Cooperative wait with Julia's scheduler
-    wait(send_request)
-    wait(recv_request)
+        # TODO: use RMA with processes local to the node.
+        MPI.Start(send_request)
+        MPI.Start(recv_request)
 
-    unpack_from_array!(params, blk, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+        exchange_state!(blk, side, BlockExchangeState.InProgress)
+        return BlockExchangeState.InProgress
+    else
+        if !(MPI.Test(send_request) && MPI.Test(recv_request))  # TODO: `Test` deallocates, so it might be needed to use a `MPI.MultiRequest` + `MPI.Testall` instead
+            return BlockExchangeState.InProgress  # Still waiting
+        end
 
-    if V !== B
-        # MPI buffers are not on the device. Retreive the result of the exchange to the device.
-        host_to_device!(blk)
+        unpack_from_array!(params, blk, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+
+        if V !== B
+            # MPI buffers are not on the device. Retreive the result of the exchange to the device.
+            host_to_device!(blk)
+        end
+
+        exchange_state!(blk, side, BlockExchangeState.Done)
+        return BlockExchangeState.Done
     end
 end
 
 
-function block_ghost_exchange(params::ArmonParameters, grid::BlockGrid)
-    side = first_side(params.current_axis)  # `Left`  or `Bottom`
-    other_side = opposite_of(side)          # `Right` or `Top`
-    other_side_offset = CartesianIndex(offset_to(other_side))
+"""
+    block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
 
-    @iter_blocks for blk in device_blocks(grid)
-        # Parse through all blocks, each time updating the Left/Bottom neighbours
-        other_blk = blk.neighbours[Int(side)]
-        block_ghost_exchange(params, blk, other_blk, side)
+Handles communications between the `blk` neighbours, along the current `state.axis`.
+If `blk` is on one of the edges of the grid, a remote exchange is performed with the neighbouring
+[`RemoteTaskBlock`](@ref), or the global boundary conditions are applied.
 
-        if !in_grid(blk.pos + other_side_offset, grid.grid_size)
-            # Blocks at the edge of the grid along the current axis need an extra exchange
-            other_blk = blk.neighbours[Int(other_side)]
-            block_ghost_exchange(params, blk, other_blk, other_side)
+Returns `true` if exchanges were not completed, and the block is waiting on another to be ready for
+the exchange.
+"""
+function block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    # Exchange with the Left/Bottom neighbour
+    side = first_side(state.axis)
+    other_blk = blk.neighbours[Int(side)]
+    left_exchange_state = block_ghost_exchange(params, state, blk, other_blk, side)
+
+    # Exchange with the Right/Top neighbour
+    other_side = opposite_of(side)
+    other_blk = blk.neighbours[Int(other_side)]
+    right_exchange_state = block_ghost_exchange(params, state, blk, other_blk, other_side)
+
+    if left_exchange_state == right_exchange_state == BlockExchangeState.Done
+        # Both sides are `Done`: this exchange step is finished.
+        exchange_state!(blk, side, BlockExchangeState.NotReady)
+        exchange_state!(blk, other_side, BlockExchangeState.NotReady)
+        incr_exchange_age!(blk)
+        return false
+    else
+        return true  # Still waiting for neighbours
+    end
+end
+
+
+function block_ghost_exchange(params::ArmonParameters, state::SolverState, grid::BlockGrid)
+    # We must repeatedly update all blocks' states until the exchanges are done, as they are designed
+    # to work independantly and asynchronously in a state machine, which isn't the case here.
+    waiting_for = trues(grid.grid_size)
+    wait_lock = ReentrantLock()  # Required lock as `@iter_blocks` might use multithreading
+    while any(waiting_for)
+        @iter_blocks for blk in device_blocks(grid)
+            if !block_ghost_exchange(params, state, blk)
+                lock(wait_lock) do 
+                    waiting_for[blk.pos] = false
+                end
+            end
         end
     end
 end

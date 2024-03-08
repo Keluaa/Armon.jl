@@ -70,7 +70,7 @@ end
 
 @kernel_function function init_vars(
     test_case::TwoStateTestCase, test_params::InitTestParamsTwoState, X::NTuple,
-    i, ρ::V, E::V, u::V, v::V, _::V, _::V, _::V
+    i, ρ::V, E::V, u::V, v::V, p::V, c::V, g::V
 ) where {V}
     if test_region_high(X, test_case)
         ρ[i] = test_params.high_ρ
@@ -83,6 +83,10 @@ end
         u[i] = test_params.low_u
         v[i] = test_params.low_v
     end
+
+    p[i] = zero(eltype(V))
+    c[i] = zero(eltype(V))
+    g[i] = zero(eltype(V))
 end
 
 
@@ -102,7 +106,7 @@ end
 @generic_kernel function init_test(
     global_pos::NTuple{2, Int}, N::NTuple{2, Int}, bsize::BSize,
     origin::NTuple{2, T}, ΔX::NTuple{2, T},
-    x::V, y::V, mask::V, ρ::V, E::V, u::V, v::V, p::V, c::V, g::V,
+    x::V, y::V, mask::V, ρ::V, E::V, u::V, v::V, p::V, c::V, g::V, vars_to_zero::Tuple{Vararg{V}},
     test_case::Test
 ) where {T, V <: AbstractArray{T}, Test <: TestCase, BSize <: BlockSize}
     @kernel_init begin
@@ -134,34 +138,43 @@ end
     else
         init_vars(test_case, mid, i, ρ, E, u, v, p, c, g)
     end
+
+    for var in vars_to_zero
+        var[i] = zero(T)
+    end
 end
 
 #
 # Wrappers
 #
 
-function update_EOS!(params::ArmonParameters, blk::LocalTaskBlock, t::TestCase)
-    range = block_domain_range(blk.size, params.steps_ranges.EOS)
-    gamma = data_type(params)(specific_heat_ratio(t))
+function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, tc::TestCase)
+    range = block_domain_range(blk.size, state.steps_ranges.EOS)
+    gamma = data_type(params)(specific_heat_ratio(tc))
     return perfect_gas_EOS!(params, blk, range, gamma)
 end
 
 
-function update_EOS!(params::ArmonParameters, blk::LocalTaskBlock, ::Bizarrium)
-    range = block_domain_range(blk.size, params.steps_ranges.EOS)
+function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Bizarrium)
+    range = block_domain_range(blk.size, state.steps_ranges.EOS)
     return bizarrium_EOS!(params, blk, range)
 end
 
 
-function update_EOS!(params::ArmonParameters, grid::BlockGrid)
+function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    return update_EOS!(params, state, blk, state.test_case)
+end
+
+
+function update_EOS!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @iter_blocks for blk in device_blocks(grid)
-        update_EOS!(params, blk, params.test)
+        update_EOS!(params, state, blk)
     end
 end
 
 
 function init_test(params::ArmonParameters, blk::LocalTaskBlock)
-    blk_domain = block_domain_range(blk.size, params.steps_ranges.full_domain)
+    blk_domain = block_domain_range(blk.size, first(params.steps_ranges).full_domain)
 
     # Position of the origin of this block
     real_static_bsize = params.block_size .- 2*params.nghost
@@ -170,7 +183,11 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
     # Cell dimensions
     ΔX = params.domain_size ./ params.global_grid
 
-    init_test(params, blk, blk_domain, blk_global_pos, blk.size, ΔX, params.test)
+    # Make sure all variables to save are initialized
+    vars_names_to_zero = setdiff(saved_vars(), (:x, :y, :ρ, :E, :u, :v, :p, :c, :g))
+    vars_to_zero = Tuple(get_vars(blk, vars_names_to_zero))
+
+    init_test(params, blk, blk_domain, blk_global_pos, blk.size, ΔX, vars_to_zero, params.test)
 end
 
 
@@ -181,17 +198,17 @@ function init_test(params::ArmonParameters, grid::BlockGrid)
 end
 
 
-function cell_update!(params::ArmonParameters, blk::LocalTaskBlock)
-    blk_domain = block_domain_range(blk.size, params.steps_ranges.cell_update)
-    u = params.current_axis == X_axis ? blk.u : blk.v
-    s = stride_along(blk.size, params.current_axis)
-    cell_update!(params, blk, blk_domain, s, params.cycle_dt, u)
+function cell_update!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    blk_domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
+    u = state.axis == X_axis ? blk.u : blk.v
+    s = stride_along(blk.size, state.axis)
+    cell_update!(params, blk, blk_domain, s, state.dx, state.dt, u)
 end
 
 
-function cell_update!(params::ArmonParameters, grid::BlockGrid)
+function cell_update!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @iter_blocks for blk in device_blocks(grid)
-        cell_update!(params, blk)
+        cell_update!(params, state, blk)
     end
 end
 
@@ -217,16 +234,16 @@ end
 end
 
 
-@fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock, dx, dy) where {T}
+@fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2, T}) where {T}
     # CPU reduction
     (; u, v, c) = blk
-    range = block_domain_range(blk.size, params.steps_ranges.real_domain)
+    range = block_domain_range(blk.size, state.steps_ranges.real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
         res = typemax(T)
         for j in range.col, i in range.row .+ (j - 1)
-            cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], dx, dy)
+            cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], Δx...)
             res = min(res, cell_dt)
         end
         return res
@@ -239,7 +256,7 @@ end
             tid = Threads.threadid()
             res = threads_res[tid]
             for i in range.row .+ (j - 1)
-                cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], dx, dy)
+                cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], Δx...)
                 res = min(res, cell_dt)
             end
             threads_res[tid] = res
@@ -259,16 +276,16 @@ end
 end
 
 
-function dtCFL_kernel(params::ArmonParameters, blk::LocalTaskBlock, dx, dy)
+function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2})
     # GPU generic reduction
-    range = block_domain_range(blk.size, params.steps_ranges.full_domain)
+    range = block_domain_range(blk.size, state.steps_ranges.full_domain)
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction result. This is inefficient but can
         # be more performant for some GPU backends.
         # We avoid filling the whole array with `typemax(T)` by applying the kernel on the whole
         # array (`full_domain`) and by using `is_ghost(i)` as a mask.
         # TODO: There may be some synchronization issues with oneAPI.jl.
-        dtCFL_kernel(params, blk, range, blk.work_1, blk.size, dx, dy)
+        dtCFL_kernel(params, blk, range, blk.work_1, blk.size, Δx...)
         wait(params)
         return reduce(min, blk.work_1)
     else
@@ -278,18 +295,24 @@ function dtCFL_kernel(params::ArmonParameters, blk::LocalTaskBlock, dx, dy)
         u_v    = @view blk.u[lin_range]
         v_v    = @view blk.v[lin_range]
         mask_v = @view blk.mask[lin_range]
-        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, dx, dy)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
+        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, Δx...)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
     end
 end
 
 
-function dtCFL_kernel(params::ArmonParameters{T}, grid::BlockGrid, dx, dy) where {T}
+function local_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    Δx = params.domain_size ./ params.global_grid
+    return dtCFL_kernel(params, state, blk, Δx)
+end
+
+
+function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::BlockGrid) where {T}
     mt_reduction = params.use_threading && params.use_cache_blocking
     threads_res = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
     threads_res .= typemax(T)
 
     @iter_blocks for blk in device_blocks(grid)
-        blk_res = dtCFL_kernel(params, blk, dx, dy)
+        blk_res = local_time_step(params, state, blk)
 
         tid = Threads.threadid()
         threads_res[tid] = min(blk_res, threads_res[tid])
@@ -299,61 +322,71 @@ function dtCFL_kernel(params::ArmonParameters{T}, grid::BlockGrid, dx, dy) where
 end
 
 
-function local_time_step(params::ArmonParameters{T}, grid::BlockGrid) where {T}
-    (; cfl, global_grid, domain_size) = params
-
-    (dx::T, dy::T) = domain_size ./ global_grid
-
-    # Time step for this sub-domain
-    dt = dtCFL_kernel(params, grid, dx, dy)
-
-    prev_dt = params.curr_cycle_dt
-
-    if !isfinite(dt) || dt ≤ 0
-        return dt  # Error handling will happen afterwards
-    elseif prev_dt == 0
-        return cfl * dt
-    else
-        # CFL condition and maximum increase per cycle of the time step
-        return convert(T, min(cfl * dt, 1.05 * prev_dt))
+function next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock; already_contributed=false)
+    if params.cst_dt
+        state.dt = params.Dt
+        return false
+    elseif params.dt_on_even_cycles && !iseven(state.global_dt.cycle) && state.dt != 0
+        return false  # No time step to compute
     end
+
+    dt_state = time_step_state(state.global_dt)
+    if dt_state == TimeStepState.DoingMPI
+        dt_state = wait_for_dt!(params, state.global_dt)
+    end
+
+    if dt_state == TimeStepState.Done
+        already_contributed = true
+    elseif dt_state != TimeStepState.Ready
+        return true
+    end
+
+    if !already_contributed
+        # Compute this block's contribution to the next cycle's time step
+        local_dt = local_time_step(params, state, blk)
+        contribute_to_dt!(params, state.global_dt, local_dt)
+    end
+
+    # Update the time step for this cycle
+    state.dt = state.global_dt.current_dt
+
+    # If the time step is 0, we must wait for a new global time step (happens at initialization)
+    return state.dt == 0
 end
 
 
-function time_step(params::ArmonParameters, grid::BlockGrid)
-    (; Dt, dt_on_even_cycles, cycle, cst_dt, is_root, cart_comm) = params
-
-    params.curr_cycle_dt = params.next_cycle_dt
-
-    if cst_dt
-        params.next_cycle_dt = Dt
-    elseif !dt_on_even_cycles || iseven(cycle) || params.curr_cycle_dt == 0
-        @section "local_time_step" begin
-            local_dt = local_time_step(params, grid)
-        end
-
-        if params.use_MPI
-            @section "time_step Allreduce" begin
-                # TODO: use a non-blocking IAllreduce, which would then be probed at the end of a cycle
-                #  however, we need to implement IAllreduce ourselves, since MPI.jl doesn't have a nice API for it (make a PR?)
-                next_dt = MPI.Allreduce(local_dt, MPI.Op(min, data_type(params)), cart_comm)
-            end
-        else
-            next_dt = local_dt
-        end
-
-        if (!isfinite(next_dt) || next_dt <= 0.)
-            is_root && solver_error(:time, "Invalid time step for cycle $(params.cycle): $next_dt")
-            return true
-        end
-
-        params.next_cycle_dt = next_dt
-    else
-        params.next_cycle_dt = params.curr_cycle_dt
+function next_time_step(params::ArmonParameters, state::SolverState, grid::BlockGrid)
+    if params.cst_dt
+        state.dt = params.Dt
+        return false
+    elseif params.dt_on_even_cycles && !iseven(state.global_dt.cycle) && state.dt != 0
+        return false  # No time step to compute
     end
 
-    if params.cycle == 0
-        params.curr_cycle_dt = params.next_cycle_dt
+    dt_state = time_step_state(state.global_dt)
+    if dt_state == TimeStepState.DoingMPI
+        dt_state = wait_for_dt!(params, state.global_dt)
+    end
+
+    if dt_state != TimeStepState.Ready
+        return true
+    end
+
+    # Compute the contribution of all blocks to the next cycle's time step
+    @section "local_time_step" begin
+        local_dt = local_time_step(params, state, grid)
+    end
+
+    @section "time_step_reduction" begin
+        contribute_to_dt!(params, state.global_dt, local_dt; all_blocks=true)
+    end
+
+    if state.dt == 0
+        wait_for_dt!(params, state.global_dt)
+        state.dt = state.global_dt.current_dt = state.global_dt.next_cycle_dt
+    else
+        # Update the time step for this cycle
+        state.dt = state.global_dt.current_dt
     end
 
     return false
@@ -380,7 +413,7 @@ end
 @fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
     # CPU reduction
     (; ρ, E) = blk
-    range = block_domain_range(blk.size, params.steps_ranges.real_domain)
+    range = block_domain_range(blk.size, first(params.steps_ranges).real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
@@ -412,7 +445,7 @@ end
         (res_mass, res_energy) = sum(threads_mass), sum(threads_energy)
     end
 
-    ds = params.dx^2
+    ds = prod(params.domain_size ./ params.global_grid)
     res_mass   *= ds
     res_energy *= ds
 
@@ -449,7 +482,7 @@ function conservation_vars(params::ArmonParameters{T}, blk::LocalTaskBlock) wher
             init=(zero(T), zero(T)))
     end
 
-    ds = params.dx^2
+    ds = prod(params.domain_size ./ params.global_grid)
     total_mass   *= ds
     total_energy *= ds
 
