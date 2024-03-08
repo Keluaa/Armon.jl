@@ -355,7 +355,7 @@ function block_ghost_exchange(params::ArmonParameters, state::SolverState, grid:
     wait_lock = ReentrantLock()  # Required lock as `@iter_blocks` might use multithreading
     while any(waiting_for)
         @iter_blocks for blk in device_blocks(grid)
-            if !block_ghost_exchange(params, state, blk)
+            if waiting_for[blk.pos] && !block_ghost_exchange(params, state, blk)
                 lock(wait_lock) do 
                     waiting_for[blk.pos] = false
                 end

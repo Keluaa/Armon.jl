@@ -713,6 +713,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
     print_device_info(io, pad, p)
+    print_parameter(io, pad, "async_cycle", p.async_cycle)
     print_parameter(io, pad, "MPI", p.use_MPI)
 
     println(io, " ", "─" ^ (pad*2+2))

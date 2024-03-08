@@ -171,13 +171,14 @@ function solver_cycle_async(
     # with a predefined repartition and device
 
     timeout = 60e9  # 60 sec  # TODO: should depend on the total workload, or be deactivatable
+    threads_count = params.use_threading ? Threads.nthreads() : 1
 
-    @batch for _ in 1:Threads.nthreads()
+    @threaded for _ in 1:threads_count
         # TODO: optimize thread block iteration to make iter-block comms faster by iterating over the first-wise edges first
         # TODO: thread block iteration should be done along the current axis
 
         tid = Threads.threadid()
-        thread_blocks = simple_block_distribution(tid, Threads.nthreads(), grid.grid_size)
+        thread_blocks = simple_block_distribution(tid, threads_count, grid.grid_size)
 
         states = @view block_states[thread_blocks]
         blocks = device_block.(Ref(grid), CartesianIndices(grid.grid_size)[thread_blocks])

@@ -2,7 +2,9 @@
 @enumx TimeStepState::UInt32 begin
     "`current_dt` is up-to-date and blocks can contribute to `next_dt`"
     Ready
-    "All blocks contributed to `next_dt`, the MPI reduction has started"
+    "All blocks contributed to `next_dt`, one thread will start the MPI reduction"
+    AllContributed
+    "The MPI reduction has started"
     DoingMPI
     "One thread is waiting for the MPI reduction to complete"
     WaitingForMPI
@@ -49,6 +51,11 @@ end
 
 
 time_step_state(global_dt::GlobalTimeStep) = @atomic global_dt.state.x
+time_step_state!(global_dt::GlobalTimeStep, state::TimeStepState.T) = @atomic global_dt.state.x = state
+function replace_time_step_state!(global_dt::GlobalTimeStep, transition::Pair{TimeStepState.T, TimeStepState.T})
+    _, ok = @atomicreplace global_dt.state.x transition
+    return ok
+end
 
 
 function contribute_to_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}, dt::T; all_blocks=false) where {T}
@@ -57,8 +64,10 @@ function contribute_to_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}
     contributed_blocks = all_blocks ? global_dt.expected_count : 1
     contributions = @atomic global_dt.contributions.x += contributed_blocks
     if contributions == global_dt.expected_count
-        _, ok = @atomicreplace global_dt.state.x TimeStepState.Ready => TimeStepState.DoingMPI
-        !ok && return TimeStepState.DoingMPI
+        if !replace_time_step_state!(global_dt, TimeStepState.Ready => TimeStepState.AllContributed)
+            return TimeStepState.AllContributed
+        end
+
         # All blocks have contributed, therefore `global_dt.current_dt` is outdated: we can update
         # it safely.
         return update_dt!(params, global_dt)
@@ -69,30 +78,35 @@ end
 
 
 function wait_for_dt!(params::ArmonParameters, global_dt::GlobalTimeStep)
-    _, ok = @atomicreplace global_dt.state.x TimeStepState.DoingMPI => TimeStepState.WaitingForMPI
-    !ok && return TimeStepState.WaitingForMPI
+    if !replace_time_step_state!(global_dt, TimeStepState.DoingMPI => TimeStepState.WaitingForMPI)
+        return TimeStepState.WaitingForMPI
+    end
 
     # Since this thread started working on a block without the time step for the new cycle, we
     # consider that all blocks of that thread are in the same state, therefore loosing no time by
     # using a blocking wait here. Only a single thread will wait.
     params.use_MPI && wait(global_dt.MPI_reduction)
-    return update_dt!(params, global_dt, true)
+    return update_dt!(params, global_dt)
 end
 
 
-function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}, reduction_done=false) where {T}
-    if params.use_MPI
-        if !reduction_done
-            local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
+function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where {T}
+    state = time_step_state(global_dt)
+    if state == TimeStepState.AllContributed
+        local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
+        if params.use_MPI
             global_dt.MPI_buffer.senddata[] = local_dt
-            global_dt.MPI_buffer.recvdata[] = zero(T)
+            global_dt.MPI_buffer.recvdata[] = typemax(T)
             IAllreduce!(global_dt.MPI_buffer, MPI.Op(min, T), params.cart_comm, global_dt.MPI_reduction)
+            time_step_state!(global_dt, TimeStepState.DoingMPI)
             return TimeStepState.DoingMPI
         else
-            new_dt = global_dt.MPI_buffer.recvdata[]
+            new_dt = local_dt
         end
+    elseif state == TimeStepState.WaitingForMPI
+        new_dt = global_dt.MPI_buffer.recvdata[]
     else
-        new_dt = @atomicswap global_dt.next_dt.x = typemax(T)
+        error("unexpected time step state: $state")
     end
 
     previous_dt = global_dt.current_dt
@@ -114,7 +128,7 @@ function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}, reduc
     end
 
     @atomic global_dt.contributions.x = 0
-    @atomic global_dt.state.x = TimeStepState.Done
+    time_step_state!(global_dt, TimeStepState.Done)
     return TimeStepState.Done
 end
 
@@ -132,7 +146,7 @@ function next_cycle!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) wher
         error("expected time step to be done, got: $dt_state")
     end
 
-    @atomic global_dt.state.x = TimeStepState.Ready
+    time_step_state!(global_dt, TimeStepState.Ready)
     global_dt.current_dt = global_dt.next_cycle_dt
     global_dt.next_cycle_dt = typemax(T)
 end
