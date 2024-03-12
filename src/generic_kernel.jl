@@ -36,13 +36,19 @@ macro kernel_function(func)
 end
 
 
-function make_threaded_loop(expr::Expr; choice=:dynamic)
+function make_threaded_loop(expr::Expr; choice=:dynamic, outside_kernel=false)
     with = :(@inbounds Armon.@threads $(expr))
     without = :(@inbounds $(expr))
 
     if choice == :dynamic
+        threaded_condition = if outside_kernel
+            :(params.use_threading)
+        else
+            :(params.use_threading && !params.use_cache_blocking)
+        end
+
         return quote
-            if params.use_threading && !params.use_cache_blocking
+            if $(threaded_condition)
                 $(with)
             else
                 $(without)
@@ -209,6 +215,9 @@ end
 
 Allows to enable/disable multithreading of the loop depending on the parameters.
 
+The default condition is `params.use_threading && !params.use_cache_blocking`.
+By passing `:outside_kernel` before `expr`, the condition becomes simply `params.use_threading`.
+
 ```julia
     @threaded for i = 1:n
         y[i] = log10(x[i]) + x[i]
@@ -217,6 +226,13 @@ Allows to enable/disable multithreading of the loop depending on the parameters.
 """
 macro threaded(expr)
     return esc(make_threaded_loop(expr))
+end
+
+macro threaded(is_outside_kernel, expr)
+    if is_outside_kernel != QuoteNode(:outside_kernel)
+        error("Expected `:outside_kernel`, got: $is_outside_kernel")
+    end
+    return esc(make_threaded_loop(expr; outside_kernel=true))
 end
 
 

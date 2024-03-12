@@ -24,19 +24,34 @@
                 @test !isempty(grid.edge_blocks)
                 @test prod(grid.grid_size) == length(grid.edge_blocks)
             end
+
+            @test Armon.device_array_type(grid) == Armon.host_array_type(grid) == Armon.buffer_array_type(grid) == Vector{Float64}
+            @test Armon.device_is_host(grid)
+            @test Armon.buffers_on_device(grid)
+            @test Armon.ghosts(grid) == nghost
+            @test Armon.block_size(Armon.static_block_size(grid)) == block_size
         end
 
         @testset "Domain" begin
             real_cell_count = 0
             all_cell_count = 0
+            blk_bytes = 0
             for blk in Armon.all_blocks(grid)
                 real_cell_count += prod(Armon.real_block_size(blk.size))
                 all_cell_count  += prod(Armon.block_size(blk.size))
+                blk_bytes += sizeof(blk)
             end
+
             @test real_cell_count == prod(ref_params.N)
             if prod(grid.grid_size) == 1
                 @test all_cell_count  == prod(ref_params.N .+ 2*ref_params.nghost)
             end
+
+            total_mem = all_cell_count * sizeof(Float64) * length(Armon.block_vars())
+            remote_blocks_overhead = sum(sizeof.(grid.remote_blocks))
+            device_memory, host_memory = Armon.memory_required(ref_params)
+            @test total_mem == device_memory
+            @test host_memory == total_mem + blk_bytes + remote_blocks_overhead
         end
 
         @testset "Neighbours" begin

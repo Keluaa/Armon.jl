@@ -170,19 +170,6 @@ function simple_block_distribution(tid, threads, grid_size)
 end
 
 
-# TODO: remove (debug only)
-function test_distrib(f, T, GS)
-    blocks = Array{Int, length(N)}(undef, GS)
-    blocks .= 0
-
-    for tid in 1:T
-        blocks[f(tid)] .= tid
-    end
-
-    return blocks
-end
-
-
 function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_count=typemax(Int))
     # TODO: use meta-blocks, one for each core/thread, containing a set of `LocalTaskBlock`,
     # with a predefined repartition and device
@@ -190,7 +177,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
     timeout = 60e9  # 60 sec  # TODO: should depend on the total workload, or be deactivatable
     threads_count = params.use_threading ? Threads.nthreads() : 1
 
-    @threaded for _ in 1:threads_count
+    @threaded :outside_kernel for _ in 1:threads_count
         # TODO: optimize thread block iteration to make iter-block comms faster by iterating over the first-wise edges first
         # TODO: thread block iteration should be done along the current axis
 

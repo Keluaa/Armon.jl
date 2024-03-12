@@ -356,6 +356,7 @@ first_state(grid::BlockGrid) = first(all_blocks(grid)).state
 `(device_memory, host_memory)` required for `params`.
 
 MPI buffers size are included in the appropriate field depending on `params.gpu_aware`.
+`params.use_MPI` and `params.neighbours` is taken into account.
 
 If `device_is_host`, then, `device_memory` only includes memory required by data arrays and MPI buffers.
 """
@@ -380,10 +381,13 @@ function memory_required(params::ArmonParameters{T}) where {T}
     device_memory = arrays_byte_count
     host_memory = host_overhead + (device_is_host ? device_memory : arrays_byte_count)
 
-    if params.gpu_aware
-        device_memory += MPI_buffer_byte_count
-    else
-        host_memory += MPI_buffer_byte_count
+    if params.use_MPI
+        live_neighbours_factor = neighbour_count(params) / length(params.neighbours)
+        if params.gpu_aware
+            device_memory += Int(MPI_buffer_byte_count * live_neighbours_factor)
+        else
+            host_memory += Int(MPI_buffer_byte_count * live_neighbours_factor)
+        end
     end
 
     return device_memory, host_memory
