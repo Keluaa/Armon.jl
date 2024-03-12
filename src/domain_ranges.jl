@@ -65,20 +65,20 @@ prepend(dr::DomainRange, n::Int = 1) = DomainRange(dr.col, prepend(dr.row, n))
 expand(dr::DomainRange,  n::Int = 1) = DomainRange(dr.col, expand(dr.row, n))
 inflate(dr::DomainRange, n::Int = 1) = DomainRange(dr.col, inflate(dr.row, n))
 
-@inline function apply_along_direction(dr::DomainRange, dir::Axis, f, args...)
-    if dir == X_axis
+@inline function apply_along_direction(dr::DomainRange, dir::Axis.T, f, args...)
+    if dir == Axis.X
         return DomainRange(dr.col, f(dr.row, args...))
     else
         return DomainRange(f(dr.col, args...), dr.row)
     end
 end
 
-shift_dir(dr::DomainRange, dir::Axis, n::Int = 1)   = apply_along_direction(dr, dir, shift, n)
-prepend_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, dir, prepend, n)
-expand_dir(dr::DomainRange, dir::Axis, n::Int = 1)  = apply_along_direction(dr, dir, expand, n)
-inflate_dir(dr::DomainRange, dir::Axis, n::Int = 1) = apply_along_direction(dr, dir, inflate, n)
+shift_dir(dr::DomainRange, dir::Axis.T, n::Int = 1)   = apply_along_direction(dr, dir, shift, n)
+prepend_dir(dr::DomainRange, dir::Axis.T, n::Int = 1) = apply_along_direction(dr, dir, prepend, n)
+expand_dir(dr::DomainRange, dir::Axis.T, n::Int = 1)  = apply_along_direction(dr, dir, expand, n)
+inflate_dir(dr::DomainRange, dir::Axis.T, n::Int = 1) = apply_along_direction(dr, dir, inflate, n)
 
-direction_length(dr::DomainRange, dir::Axis) = dir == X_axis ? length(dr.row) : length(dr.col)
+direction_length(dr::DomainRange, dir::Axis.T) = dir == Axis.X ? length(dr.row) : length(dr.col)
 
 linear_range(dr::DomainRange) = first(dr):last(dr)
 
@@ -94,7 +94,7 @@ amount of ghost cells, therefore the iteration domain is determined from the dim
 The first field is the offset to the first cell, the second is the offset to the last cell.
 """
 mutable struct StepsRanges
-    direction       :: Axis
+    direction       :: Axis.T
     real_domain     :: NTuple{2, Dims{2}}
     full_domain     :: NTuple{2, Dims{2}}
     EOS             :: NTuple{2, Dims{2}}

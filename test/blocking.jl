@@ -49,7 +49,7 @@
                         @test blk.neighbour.neighbours[Int(opposite_side)] == blk
                     end
                 else
-                    for (side, neighbour) in zip(instances(Armon.Side), blk.neighbours)
+                    for (side, neighbour) in zip(instances(Armon.Side.T), blk.neighbours)
                         if neighbour isa Armon.RemoteTaskBlock
                             @test neighbour.neighbour == blk
                         else 
@@ -132,11 +132,11 @@ end
             @test ghost_ok   == length(real_cells)
         end
 
-        @testset "$side domain" for side in instances(Armon.Side)
+        @testset "$side domain" for side in instances(Armon.Side.T)
             border = Armon.border_domain(bsize, side)
             expected_size = Armon.real_size_along(bsize, Armon.next_axis(Armon.axis_of(side)))
             @test length(border) == expected_size
-            if Armon.axis_of(side) == Armon.X_axis
+            if Armon.axis_of(side) == Armon.Axis.X
                 @test size(border) == (1, expected_size)
             else
                 @test size(border) == (expected_size, 1)
@@ -144,17 +144,17 @@ end
 
             ghost_border = Armon.ghost_domain(bsize, side)
             @test length(ghost_border) == expected_size * Armon.ghosts(bsize)
-            if Armon.axis_of(side) == Armon.X_axis
+            if Armon.axis_of(side) == Armon.Axis.X
                 @test size(ghost_border) == (Armon.ghosts(bsize), expected_size)
             else
                 @test size(ghost_border) == (expected_size, Armon.ghosts(bsize))
             end
         end
 
-        @test Armon.stride_along(bsize, Armon.X_axis) == abs(Armon.lin_position(bsize, (1, 1)) - Armon.lin_position(bsize, (2, 1)))
-        @test Armon.stride_along(bsize, Armon.Y_axis) == abs(Armon.lin_position(bsize, (1, 1)) - Armon.lin_position(bsize, (1, 2)))
-        @test Armon.size_along(bsize, Armon.X_axis) == Armon.size_along(bsize, Armon.Left) == Armon.size_along(bsize, Armon.Right) == Armon.block_size(bsize)[1]
-        @test Armon.size_along(bsize, Armon.Y_axis) == Armon.size_along(bsize, Armon.Bottom) == Armon.size_along(bsize, Armon.Top) == Armon.block_size(bsize)[2]
+        @test Armon.stride_along(bsize, Armon.Axis.X) == abs(Armon.lin_position(bsize, (1, 1)) - Armon.lin_position(bsize, (2, 1)))
+        @test Armon.stride_along(bsize, Armon.Axis.Y) == abs(Armon.lin_position(bsize, (1, 1)) - Armon.lin_position(bsize, (1, 2)))
+        @test Armon.size_along(bsize, Armon.Axis.X) == Armon.size_along(bsize, Armon.Side.Left) == Armon.size_along(bsize, Armon.Side.Right) == Armon.block_size(bsize)[1]
+        @test Armon.size_along(bsize, Armon.Axis.Y) == Armon.size_along(bsize, Armon.Side.Bottom) == Armon.size_along(bsize, Armon.Side.Top) == Armon.block_size(bsize)[2]
     end
 end
 
@@ -181,7 +181,7 @@ end
         i = 1
         fail_pos = nothing
         for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid)
-            expected_length = Armon.real_size_along(blk.size, Armon.X_axis)
+            expected_length = Armon.real_size_along(blk.size, Armon.Axis.X)
             blk_data = Armon.block_host_data(blk)
             if length(row_range) == expected_length && all((i:i+expected_length-1) .== blk_data.ρ[row_range])
                 i += expected_length

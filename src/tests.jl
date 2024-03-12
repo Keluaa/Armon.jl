@@ -134,12 +134,12 @@ struct Boundaries
 end
 
 
-function Base.getindex(bounds::Boundaries, side::Side)
-    return if side == Left
+function Base.getindex(bounds::Boundaries, side::Side.T)
+    return if side == Side.Left
         bounds.left
-    elseif side == Right
+    elseif side == Side.Right
         bounds.right
-    elseif side == Bottom
+    elseif side == Side.Bottom
         bounds.bottom
     else
         bounds.top
@@ -147,12 +147,12 @@ function Base.getindex(bounds::Boundaries, side::Side)
 end
 
 
-function boundary_condition(test, side::Side)::NTuple{2, Int}
+function boundary_condition(test, side::Side.T)::NTuple{2, Int}
     condition = boundary_condition(test)[side]
     if condition == FreeFlow
         return (1, 1)
     else  # if condition == Dirichlet
-        if side in (Left, Right)
+        if side in (Side.Left, Side.Right)
             return (-1, 1)  # mirror along X
         else
             return (1, -1)  # mirror along Y

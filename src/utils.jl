@@ -12,9 +12,9 @@ end
 
 Enumeration of the axes of the domain
 """
-@enum Axis X_axis=1 Y_axis=2
+@enumx Axis X=1 Y=2
 
-next_axis(axis::Axis) = Axis(mod1(Int(axis) + 1, length(instances(Axis))))
+next_axis(axis::Axis.T) = Axis.T(mod1(Int(axis) + 1, length(instances(Axis.T))))
 
 
 """
@@ -22,51 +22,51 @@ next_axis(axis::Axis) = Axis(mod1(Int(axis) + 1, length(instances(Axis))))
 
 Enumeration of the sides of the domain
 """
-@enum Side Left=1 Right=2 Bottom=3 Top=4
+@enumx Side Left=1 Right=2 Bottom=3 Top=4
 
-@inline sides_along(dir::Axis) = dir == X_axis ? (Left, Right) : (Bottom, Top)
+@inline sides_along(dir::Axis.T) = dir == Axis.X ? (Side.Left, Side.Right) : (Side.Bottom, Side.Top)
 
-@inline first_side(dir::Axis) = dir == X_axis ? Left : Bottom
-@inline first_sides() = (Left, Bottom)
+@inline first_side(dir::Axis.T) = dir == Axis.X ? Side.Left : Side.Bottom
+@inline first_sides() = (Side.Left, Side.Bottom)
 
-@inline last_side(dir::Axis) = dir == X_axis ? Right : Top
-@inline last_sides() = (Right, Top)
+@inline last_side(dir::Axis.T) = dir == Axis.X ? Side.Right : Side.Top
+@inline last_sides() = (Side.Right, Side.Top)
 
-@inline function axis_of(side::Side)
-    # TODO: `Axis(((Integer(side) - 1) >> 1) + 1)` ??
-    if     side == Left   return X_axis
-    elseif side == Right  return X_axis
-    elseif side == Bottom return Y_axis
-    elseif side == Top    return Y_axis
-    else                  return X_axis  # Should not happen, here only for type-stability
+@inline function axis_of(side::Side.T)
+    # TODO: `Axis.T(((Integer(side) - 1) >> 1) + 1)` ??
+    if     side == Side.Left   return Axis.X
+    elseif side == Side.Right  return Axis.X
+    elseif side == Side.Bottom return Axis.Y
+    elseif side == Side.Top    return Axis.Y
+    else                       return Axis.X  # Should not happen, here only for type-stability
     end
 end
 
-@inline function opposite_of(side::Side)
-    if     side == Left   return Right
-    elseif side == Right  return Left
-    elseif side == Bottom return Top
-    elseif side == Top    return Bottom
-    else                  return Left  # Should not happen, here only for type-stability
+@inline function opposite_of(side::Side.T)
+    if     side == Side.Left   return Side.Right
+    elseif side == Side.Right  return Side.Left
+    elseif side == Side.Bottom return Side.Top
+    elseif side == Side.Top    return Side.Bottom
+    else                       return Side.Left  # Should not happen, here only for type-stability
     end
 end
 
-@inline function offset_to(side::Side)
-    if     side == Left   return (-1,  0)
-    elseif side == Right  return ( 1,  0)
-    elseif side == Bottom return ( 0, -1)
-    elseif side == Top    return ( 0,  1)
-    else                  return ( 0,  0)  # Should not happen, here only for type-stability
+@inline function offset_to(side::Side.T)
+    if     side == Side.Left   return (-1,  0)
+    elseif side == Side.Right  return ( 1,  0)
+    elseif side == Side.Bottom return ( 0, -1)
+    elseif side == Side.Top    return ( 0,  1)
+    else                       return ( 0,  0)  # Should not happen, here only for type-stability
     end
 end
 
 
 @inline function side_from_offset(offset::Tuple)
-    if     offset[1] < 0 return Left
-    elseif offset[1] > 0 return Right
-    elseif offset[2] < 0 return Bottom
-    elseif offset[2] > 0 return Top
-    else                 return Left  # Should not happen, here only for type-stability (responsability of the caller)
+    if     offset[1] < 0 return Side.Left
+    elseif offset[1] > 0 return Side.Right
+    elseif offset[2] < 0 return Side.Bottom
+    elseif offset[2] > 0 return Side.Top
+    else                 return Side.Left  # Should not happen, here only for type-stability (responsability of the caller)
     end
 end
 

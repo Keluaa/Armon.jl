@@ -196,7 +196,7 @@ function step_checkpoint(params::ArmonParameters, state::SolverState, grid::Bloc
 
     step_file_name = params.output_file * @sprintf("_%03d_%s", state.global_dt.cycle, step_label)
     if state.global_dt.cycle == 0 && step_label == "time_step"
-        axis = X_axis
+        axis = Axis.X
     else
         axis = state.axis
     end

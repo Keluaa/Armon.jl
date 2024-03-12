@@ -195,7 +195,7 @@ mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, Te
     step               :: SolverStep.T  # Solver step the associated block is at. Unused if `params.async_cycle == false`
     dx                 :: T    # Space step along the current axis
     dt                 :: T    # Scaled time step for the current cycle
-    axis               :: Axis
+    axis               :: Axis.T
     axis_splitting_idx :: Int
     cycle              :: Int  # Local cycle of the block
     splitting          :: Splitting
@@ -212,7 +212,7 @@ mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, Te
         T, S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
     }
         return new{T, S, R, RL, P, TC}(
-            SolverStep.NewCycle, zero(T), zero(T), X_axis, 1, 0,
+            SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
             splitting, riemann, limiter, projection, test_case,
             global_dt, steps_ranges
         )
@@ -250,7 +250,7 @@ function next_axis_sweep!(params::ArmonParameters, state::SolverState)
 end
 
 
-function update_solver_state!(params::ArmonParameters, state::SolverState, axis::Axis, dt_factor)
+function update_solver_state!(params::ArmonParameters, state::SolverState, axis::Axis.T, dt_factor)
     i_ax = Int(axis)
     state.dx = params.domain_size[i_ax] / params.global_grid[i_ax]
     state.dt = state.global_dt.current_dt * dt_factor
@@ -278,7 +278,7 @@ function reset!(state::SolverState{T}) where {T}
     state.step = SolverStep.NewCycle
     state.dx = zero(T)
     state.dt = zero(T)
-    state.axis = X_axis
+    state.axis = Axis.X
     state.axis_splitting_idx = 1
     state.cycle = 0
 end

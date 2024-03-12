@@ -1,5 +1,5 @@
 
-import Armon: shift, expand, prepend, inflate, shift_dir, inflate_dir, X_axis, Y_axis
+import Armon: shift, expand, prepend, inflate, shift_dir, inflate_dir
 import Armon: DomainRange
 
 
@@ -86,22 +86,22 @@ import Armon: DomainRange
         @test !(main_r[3] in dr)
 
         n = 5
-        sxdr = shift_dir(dr, X_axis, n)
+        sxdr = shift_dir(dr, Armon.Axis.X, n)
         @test length(sxdr) == length(dr)
         @test first(sxdr)  == first(dr) + n
         @test last(sxdr)   == last(dr)  + n
 
-        sydr = shift_dir(dr, Y_axis, n)
+        sydr = shift_dir(dr, Armon.Axis.Y, n)
         @test length(sydr) == length(dr)
         @test first(sydr)  == first(dr) + n * step(main_r)
         @test last(sydr)   == last(dr)  + n * step(main_r)
 
-        ixdr = inflate_dir(dr, X_axis, n)
+        ixdr = inflate_dir(dr, Armon.Axis.X, n)
         @test length(ixdr) == length(dr) + 2n * length(main_r)
         @test first(ixdr)  == first(dr) - n
         @test last(ixdr)   == last(dr)  + n
 
-        iydr = inflate_dir(dr, Y_axis, n)
+        iydr = inflate_dir(dr, Armon.Axis.Y, n)
         @test length(iydr) == length(dr) + 2n * length(inner_r)
         @test first(iydr)  == first(dr) - n * step(main_r)
         @test last(iydr)   == last(dr)  + n * step(main_r)

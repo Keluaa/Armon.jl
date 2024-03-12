@@ -1,7 +1,7 @@
 
 @generic_kernel function boundary_conditions!(
     ρ::V, u::V, v::V, p::V, c::V, g::V, E::V,
-    bsize::BlockSize, axis::Axis, side::Side,
+    bsize::BlockSize, axis::Axis.T, side::Side.T,
     u_factor::T, v_factor::T
 ) where {T, V <: AbstractArray{T}}
     @kernel_init begin
@@ -29,7 +29,7 @@
 end
 
 
-function boundary_conditions!(params::ArmonParameters{T}, state::SolverState, blk::LocalTaskBlock, side::Side) where {T}
+function boundary_conditions!(params::ArmonParameters{T}, state::SolverState, blk::LocalTaskBlock, side::Side.T) where {T}
     (u_factor::T, v_factor::T) = boundary_condition(state.test_case, side)
     domain = border_domain(blk.size, side)
     boundary_conditions!(params, block_device_data(blk), domain, blk.size, state.axis, side, u_factor, v_factor)
@@ -63,7 +63,7 @@ end
 @generic_kernel function block_ghost_exchange(
     vars₁::NTuple{N, V},
     vars₂::NTuple{N, V},
-    bsize::BlockSize, axis::Axis, side₁::Side
+    bsize::BlockSize, axis::Axis.T, side₁::Side.T
 ) where {N, V}
     @kernel_init begin
         side₂ = opposite_of(side₁)
@@ -104,7 +104,7 @@ Check if `blk₂` is ready to exchange its border cells with `blk₁` along `sid
 
 Returns `true` if the exchange can proceed.
 """
-function check_block_ready_for_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side)
+function check_block_ready_for_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side.T)
     side₁_state = exchange_state(blk₁, side₁)
     if side₁_state == BlockExchangeState.NotReady
         exchange_state!(blk₁, side₁, BlockExchangeState.Ready)
@@ -145,7 +145,7 @@ function check_block_ready_for_exchange(blk₁::LocalTaskBlock, blk₂::LocalTas
 end
 
 
-function post_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side)
+function post_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side.T)
     exchange_state!(blk₁, side₁, BlockExchangeState.Done)
     exchange_state!(blk₂, opposite_of(side₁), BlockExchangeState.Done)
     return BlockExchangeState.Done
@@ -154,7 +154,7 @@ end
 
 function block_ghost_exchange(
     params::ArmonParameters, state::SolverState,
-    blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side
+    blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side.T
 ) where {V, Size <: StaticBSize}
     !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
 
@@ -172,7 +172,7 @@ end
 @generic_kernel function block_ghost_exchange(
     vars₁::NTuple{N, V}, bsize₁::BlockSize,
     vars₂::NTuple{N, V}, bsize₂::BlockSize,
-    axis::Axis, side₁::Side
+    axis::Axis.T, side₁::Side.T
 ) where {N, V}
     @kernel_init begin
         side₂ = opposite_of(side₁)
@@ -191,12 +191,12 @@ end
     I₁ = position(bsize₁, i₁)
 
     # TODO: cleanup
-    I₂x = ifelse(side₂ in sides_along(X_axis), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[1]), I₁[1])
-    I₂y = ifelse(side₂ in sides_along(Y_axis), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[2]), I₁[2])
+    I₂x = ifelse(side₂ in sides_along(Axis.X), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[1]), I₁[1])
+    I₂y = ifelse(side₂ in sides_along(Axis.Y), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[2]), I₁[2])
     I₂ = (I₂x, I₂y)
     # TODO: Unreadable but efficient and dimension-agnostic?
     # I₂ = ifelse.(
-    #     in.(side₂, (sides_along(X_axis), sides_along(Y_axis))),
+    #     in.(side₂, (sides_along(Axis.X), sides_along(Axis.Y))),
     #     ifelse.(side₂ in first_sides(), 1, real_block_size(bsize₂)),
     #     I₁
     # )
@@ -221,7 +221,7 @@ end
 
 function block_ghost_exchange(
     params::ArmonParameters, state::SolverState,
-    blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side
+    blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side.T
 ) where {V}
     !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
 
@@ -238,7 +238,7 @@ end
 
 
 @generic_kernel function pack_to_array!(
-    bsize::BlockSize, side::Side, array::V, vars::NTuple{N, V}
+    bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
 ) where {N, V}
     idx = @index_2D_lin()
     itr = @iter_idx()
@@ -254,7 +254,7 @@ end
 
 
 @generic_kernel function unpack_from_array!(
-    bsize::BlockSize, side::Side, array::V, vars::NTuple{N, V}
+    bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
 ) where {N, V}
     idx = @index_2D_lin()
     itr = @iter_idx()
@@ -271,7 +271,7 @@ end
 
 function block_ghost_exchange(
     params::ArmonParameters, state::SolverState,
-    blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side
+    blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
     if other_blk.rank == -1
         # `other_blk` is fake, this is the border of the global domain

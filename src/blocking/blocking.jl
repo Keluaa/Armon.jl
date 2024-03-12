@@ -138,24 +138,24 @@ end
 
 
 """
-    border_domain(bsize::BlockSize, side::Side)
+    border_domain(bsize::BlockSize, side::Side.T)
 
 [`DomainRange`](@ref) of the real cells along `side`. It includes only one "strip" of cells, that is
 `length(border_domain(bsize, side)) == size_along(bsize, side)`.
 """
-function border_domain(bsize::BlockSize, side::Side)
+function border_domain(bsize::BlockSize, side::Side.T)
     rsize = real_block_size(bsize)
 
-    if side == Left
+    if side == Side.Left
         bl_corner = (0, 0)
         tr_corner = (1 - rsize[1], 0)
-    elseif side == Right
+    elseif side == Side.Right
         bl_corner = (rsize[1] - 1, 0)
         tr_corner = (0, 0)
-    elseif side == Bottom
+    elseif side == Side.Bottom
         bl_corner = (0, 0)
         tr_corner = (0, 1 - rsize[2])
-    elseif side == Top
+    elseif side == Side.Top
         bl_corner = (0, rsize[2] - 1)
         tr_corner = (0, 0)
     end
@@ -165,11 +165,11 @@ end
 
 
 """
-    ghost_domain(params::ArmonParameters, side::Side)
+    ghost_domain(params::ArmonParameters, side::Side.T)
 
 [`DomainRange`](@ref) of all ghosts cells of `side`, excluding the corners of the block.
 """
-function ghost_domain(bsize::BlockSize, side::Side)
+function ghost_domain(bsize::BlockSize, side::Side.T)
     g = ghosts(bsize)
     domain = border_domain(bsize, side)
     domain = shift_dir(domain, axis_of(side), side in first_sides() ? -g : g)
@@ -178,11 +178,11 @@ function ghost_domain(bsize::BlockSize, side::Side)
 end
 
 
-stride_along(bsize::BlockSize, axis::Axis)    = Base.size_to_strides(1, block_size(bsize)...)[Int(axis)]
-size_along(bsize::BlockSize, axis::Axis)      = block_size(bsize)[Int(axis)]
-size_along(bsize::BlockSize, side::Side)      = size_along(bsize, axis_of(side))
-real_size_along(bsize::BlockSize, axis::Axis) = real_block_size(bsize)[Int(axis)]
-real_size_along(bsize::BlockSize, side::Side) = real_size_along(bsize, axis_of(side))
+stride_along(bsize::BlockSize, axis::Axis.T)    = Base.size_to_strides(1, block_size(bsize)...)[Int(axis)]
+size_along(bsize::BlockSize, axis::Axis.T)      = block_size(bsize)[Int(axis)]
+size_along(bsize::BlockSize, side::Side.T)      = size_along(bsize, axis_of(side))
+real_size_along(bsize::BlockSize, axis::Axis.T) = real_block_size(bsize)[Int(axis)]
+real_size_along(bsize::BlockSize, side::Side.T) = real_size_along(bsize, axis_of(side))
 
 
 """
@@ -218,13 +218,13 @@ in_grid(idx, grid) = in_grid(1, idx, grid)
 in_grid(start, idx, grid) = all(Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))
 
 """
-    in_grid(idx, grid, axis::Axis)
-    in_grid(start, idx, grid, axis::Axis)
+    in_grid(idx, grid, axis::Axis.T)
+    in_grid(start, idx, grid, axis::Axis.T)
 
 Same as `in_grid(start, idx, grid)`, but only checks along `axis`.
 """
-in_grid(idx, grid, axis::Axis) = in_grid(1, idx, grid, axis)
-in_grid(start, idx, grid, axis::Axis) = (Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))[Int(axis)]
+in_grid(idx, grid, axis::Axis.T) = in_grid(1, idx, grid, axis)
+in_grid(start, idx, grid, axis::Axis.T) = (Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))[Int(axis)]
 
 
 const Neighbours = @NamedTuple{left::T, right::T, bottom::T, top::T} where {T}

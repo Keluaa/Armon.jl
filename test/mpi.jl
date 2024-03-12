@@ -186,7 +186,7 @@ function test_neighbour_coords(P, proc_in_grid, global_comm)
     ref_params = ref_params_for_sub_domain(:Sod, Float64, P; global_comm)
     coords = ref_params.cart_coords
 
-    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.X_axis)), (coords[2], Armon.sides_along(Armon.Y_axis))), 
+    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.Axis.X)), (coords[2], Armon.sides_along(Armon.Axis.Y))), 
             side in (coord % 2 == 0 ? sides : reverse(sides))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -214,9 +214,9 @@ function dump_neighbours(P, proc_in_grid, global_comm)
 
     coords = ref_params.cart_coords
 
-    neighbour_coords = Dict{Armon.Side, Tuple{Int, Int}}()
+    neighbour_coords = Dict{Armon.Side.T, Tuple{Int, Int}}()
 
-    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.X_axis)), (coords[2], Armon.sides_along(Armon.Y_axis))), 
+    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.Axis.X)), (coords[2], Armon.sides_along(Armon.Axis.Y))), 
             side in (coord % 2 == 0 ? sides : reverse(sides))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -234,7 +234,7 @@ function dump_neighbours(P, proc_in_grid, global_comm)
     end
 
     println("[$(ref_params.rank)]: $(coords)")
-    for side in instances(Armon.Side)
+    for side in instances(Armon.Side.T)
         if Armon.has_neighbour(ref_params, side)
             neighbour_rank = Armon.neighbour_at(ref_params, side)
             @printf(" - %6s: [%2d] = %6s (expected: %6s)",
@@ -284,7 +284,7 @@ function test_halo_exchange(P, proc_in_grid, global_comm)
     data = BlockGrid(ref_params)
     coords = ref_params.cart_coords
 
-    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.X_axis)), (coords[2], Armon.sides_along(Armon.Y_axis))), 
+    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.Axis.X)), (coords[2], Armon.sides_along(Armon.Axis.Y))), 
             side in (coord % 2 == 0 ? sides : reverse(sides))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)

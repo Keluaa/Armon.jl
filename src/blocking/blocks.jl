@@ -116,9 +116,9 @@ comm_vars(blk::LocalTaskBlock; on_device=true)  = comm_vars(block_data(blk; on_d
 exchange_age(blk::LocalTaskBlock) = @atomic blk.exchange_age.x
 incr_exchange_age!(blk::LocalTaskBlock) = @atomic blk.exchange_age.x += 1
 
-exchange_state(blk::LocalTaskBlock, side::Side) = @atomic blk.exchanges[Int(side)].x
-exchange_state!(blk::LocalTaskBlock, side::Side, state::BlockExchangeState.T) = @atomic blk.exchanges[Int(side)].x = state
-function replace_exchange_state!(blk::LocalTaskBlock, side::Side, transition::Pair{BlockExchangeState.T, BlockExchangeState.T})
+exchange_state(blk::LocalTaskBlock, side::Side.T) = @atomic blk.exchanges[Int(side)].x
+exchange_state!(blk::LocalTaskBlock, side::Side.T, state::BlockExchangeState.T) = @atomic blk.exchanges[Int(side)].x = state
+function replace_exchange_state!(blk::LocalTaskBlock, side::Side.T, transition::Pair{BlockExchangeState.T, BlockExchangeState.T})
     _, ok = @atomicreplace blk.exchanges[Int(side)].x transition
     return ok
 end

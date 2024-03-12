@@ -1,6 +1,5 @@
 
 using Printf
-import Armon: Axis, X_axis, Y_axis
 
 
 function cmp_cpu_with_reference(test::Symbol, type::Type; options...)
@@ -29,7 +28,7 @@ function cmp_cpu_with_reference(test::Symbol, type::Type; options...)
 end
 
 
-function axis_invariance(test::Symbol, type::Type, axis::Axis; options...)
+function axis_invariance(test::Symbol, type::Type, axis::Armon.Axis.T; options...)
     ref_params = get_reference_params(test, type; options...)
     _, _, data = run_armon_reference(ref_params)
 
@@ -122,7 +121,7 @@ end
     end
 
     @testset "Axis invariance" begin
-        @testset "$test" for (test, axis) in ([:Sod, Y_axis], [:Sod_y, X_axis], [:Bizarrium, Y_axis])
+        @testset "$test" for (test, axis) in ([:Sod, Armon.Axis.Y], [:Sod_y, Armon.Axis.X], [:Bizarrium, Armon.Axis.Y])
             axis_invariance(test, Float64, axis; use_threading=false, use_simd=false)
         end
     end

@@ -201,7 +201,7 @@ end
 function cell_update!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
     blk_domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
     blk_data = block_device_data(blk)
-    u = state.axis == X_axis ? blk_data.u : blk_data.v
+    u = state.axis == Axis.X ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)
     cell_update!(params, blk_data, blk_domain, s, state.dx, state.dt, u)
 end

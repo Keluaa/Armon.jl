@@ -104,10 +104,10 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     # Allocate all remote blocks
     # X (Left, Right) then Y (Bottom, Top)
     remote_i = 1
-    for axis in (X_axis, Y_axis), side in sides_along(axis)
+    for axis in (Axis.X, Axis.Y), side in sides_along(axis)
         # Range of all blocks along `side`
-        blocks_x = axis == X_axis ? (side == Left   ? (1:1) : (grid_size[1]:grid_size[1])) : (1:grid_size[1])
-        blocks_y = axis == Y_axis ? (side == Bottom ? (1:1) : (grid_size[2]:grid_size[2])) : (1:grid_size[2])
+        blocks_x = axis == Axis.X ? (side == Side.Left   ? (1:1) : (grid_size[1]:grid_size[1])) : (1:grid_size[1])
+        blocks_y = axis == Axis.Y ? (side == Side.Bottom ? (1:1) : (grid_size[2]:grid_size[2])) : (1:grid_size[2])
 
         for our_pos in CartesianIndices((blocks_x, blocks_y))
             pos = our_pos + CartesianIndex(offset_to(side))
@@ -134,10 +134,10 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
     # Initialize all block neighbours references
     for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
-        left_idx   = idx + CartesianIndex(offset_to(Left))
-        right_idx  = idx + CartesianIndex(offset_to(Right))
-        bottom_idx = idx + CartesianIndex(offset_to(Bottom))
-        top_idx    = idx + CartesianIndex(offset_to(Top))
+        left_idx   = idx + CartesianIndex(offset_to(Side.Left))
+        right_idx  = idx + CartesianIndex(offset_to(Side.Right))
+        bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom))
+        top_idx    = idx + CartesianIndex(offset_to(Side.Top))
 
         this_block   = block_at(grid, idx)
         left_block   = block_at(grid, left_idx)
@@ -266,7 +266,7 @@ end
 "Linear index of a remote block at the edges of the grid"
 function remote_block_idx(grid::BlockGrid, idx::CartesianIndex{2})
     offset = 0
-    for axis in instances(Axis), side in sides_along(axis)
+    for axis in instances(Axis.T), side in sides_along(axis)
         ai = Int(axis)  # Axis index
 
         side_length = grid.grid_size[ai]

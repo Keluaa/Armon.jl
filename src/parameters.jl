@@ -295,7 +295,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     global_comm::MPI.Comm
     cart_comm::MPI.Comm
     cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid
-    neighbours::Dict{Side, Int}  # Ranks of the neighbours of this process
+    neighbours::Dict{Side.T, Int}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
@@ -405,10 +405,10 @@ function init_MPI(params::ArmonParameters;
 
         # TODO: dimension agnostic
         params.neighbours = Dict(
-            Left   => MPI.Cart_shift(C_COMM, 0, -1)[2],
-            Right  => MPI.Cart_shift(C_COMM, 0,  1)[2],
-            Bottom => MPI.Cart_shift(C_COMM, 1, -1)[2],
-            Top    => MPI.Cart_shift(C_COMM, 1,  1)[2]
+            Side.Left   => MPI.Cart_shift(C_COMM, 0, -1)[2],
+            Side.Right  => MPI.Cart_shift(C_COMM, 0,  1)[2],
+            Side.Bottom => MPI.Cart_shift(C_COMM, 1, -1)[2],
+            Side.Top    => MPI.Cart_shift(C_COMM, 1,  1)[2]
         )
     else
         params.rank = 0
@@ -417,10 +417,10 @@ function init_MPI(params::ArmonParameters;
         params.cart_comm = global_comm
         params.cart_coords = ntuple(Returns(0), length(params.N))
         params.neighbours = Dict(
-            Left   => MPI.PROC_NULL,
-            Right  => MPI.PROC_NULL,
-            Bottom => MPI.PROC_NULL,
-            Top    => MPI.PROC_NULL
+            Side.Left   => MPI.PROC_NULL,
+            Side.Right  => MPI.PROC_NULL,
+            Side.Bottom => MPI.PROC_NULL,
+            Side.Top    => MPI.PROC_NULL
         )
     end
 
@@ -830,11 +830,11 @@ Get `T`, the type used for numbers by the solver
 data_type(::ArmonParameters{T}) where T = T
 
 
-neighbour_at(params::ArmonParameters, side::Side) = params.neighbours[side]
-has_neighbour(params::ArmonParameters, side::Side) = params.neighbours[side] ≠ MPI.PROC_NULL
+neighbour_at(params::ArmonParameters, side::Side.T) = params.neighbours[side]
+has_neighbour(params::ArmonParameters, side::Side.T) = params.neighbours[side] ≠ MPI.PROC_NULL
 
 neighbour_count(params::ArmonParameters) = count(≠(MPI.PROC_NULL), values(params.neighbours))
-neighbour_count(params::ArmonParameters, dir::Axis) = count(≠(MPI.PROC_NULL), neighbour_at.(params, sides_along(dir)))
+neighbour_count(params::ArmonParameters, dir::Axis.T) = count(≠(MPI.PROC_NULL), neighbour_at.(params, sides_along(dir)))
 
 
 # Default copy method
@@ -878,10 +878,10 @@ end
 #
 
 function compute_steps_ranges(params::ArmonParameters)
-    params.steps_ranges = collect(compute_steps_ranges.(instances(Axis), params.nghost, Ref(params.projection_scheme)))
+    params.steps_ranges = collect(compute_steps_ranges.(instances(Axis.T), params.nghost, Ref(params.projection_scheme)))
 end
 
-function compute_steps_ranges(axis::Axis, ghosts::Int, projection::ProjectionScheme)
+function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme)
     # Extra cells to compute in each step for the projection
     extra_FLX = stencil_width(projection)
     extra_UP = stencil_width(projection)
@@ -898,7 +898,7 @@ function compute_steps_ranges(axis::Axis, ghosts::Int, projection::ProjectionSch
     # Steps ranges, computed so that there is no need for an extra BC step before the projection
     EOS = real_range  # The BC overwrites any changes to the ghost cells right after
 
-    if axis == X_axis
+    if axis == Axis.X
         # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes
         fluxes_bl  = (extra_FLX, 0); fluxes_tr  = (extra_FLX+1, 0)
         cell_up_bl = (extra_UP,  0); cell_up_tr = (extra_UP,    0)
