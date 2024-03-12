@@ -166,6 +166,7 @@ end
         (4, ( 96,  96), (32, 32)),  # No edge blocks
         (4, ( 16,  16), (32, 32)),  # Only edge blocks
         (3, ( 16,  33), ( 0,  0)),  # No blocking, only edge blocks
+        (4, (100, 100), (57, 57)),  # Edge blocks bigger than static blocks
         (0, (100, 100), (32, 32)),  # 0 ghosts
     )
         params = ArmonParameters(;
@@ -190,6 +191,7 @@ end
             end
         end
         @test fail_pos === nothing
+        @test i - 1 == prod(N)
     end
 end
 

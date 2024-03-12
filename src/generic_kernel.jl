@@ -42,7 +42,7 @@ function make_threaded_loop(expr::Expr; choice=:dynamic)
 
     if choice == :dynamic
         return quote
-            if params.use_threading || !params.use_cache_blocking
+            if params.use_threading && !params.use_cache_blocking
                 $(with)
             else
                 $(without)

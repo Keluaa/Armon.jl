@@ -253,7 +253,7 @@ end
         threads_res = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
         threads_res .= typemax(T)
 
-        @threads for j in range.col
+        @threaded for j in range.col
             tid = Threads.threadid()
             res = threads_res[tid]
             for i in range.row .+ (j - 1)
@@ -317,7 +317,7 @@ function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::B
     @iter_blocks for blk in all_blocks(grid)
         blk_res = local_time_step(params, state, blk)
 
-        tid = Threads.threadid()
+        tid = mt_reduction ? Threads.threadid() : 1
         threads_res[tid] = min(blk_res, threads_res[tid])
     end
 
@@ -450,7 +450,7 @@ end
         threads_mass   .= 0
         threads_energy .= 0
 
-        @threads for j in range.col
+        @threaded for j in range.col
             tid = Threads.threadid()
             thread_mass = threads_mass[tid]
             thread_energy = threads_energy[tid]
@@ -521,6 +521,7 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     threads_energy .= 0
 
     @iter_blocks for blk in all_blocks(grid)
+        tid = mt_reduction ? Threads.threadid() : 1
         (threads_mass[tid], threads_energy[tid]) =
             (threads_mass[tid], threads_energy[tid]) .+ conservation_vars(params, blk)
     end

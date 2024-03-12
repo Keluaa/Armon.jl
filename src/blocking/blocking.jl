@@ -350,8 +350,9 @@ end
 
 function BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false)
     # `sub_grid` is a `Tuple` of iterables
-    bs = static_block_size(grid)
-    row_count = (1, Base.tail(block_size(bs))...)
+    bs = block_size(static_block_size(grid))
+    bs = max.(bs, grid.edge_size)  # Include dimensions of edge blocks in case some are bigger than static blocks
+    row_count = (1, bs[2:end]...)
 
     # Black magic: by intertwining `row_count` and `sub_grid` we create an iterator over all rows
     # and blocks of the grid, in the same order as if we where iterating cell by cell.
