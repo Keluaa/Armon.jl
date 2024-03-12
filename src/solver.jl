@@ -40,6 +40,16 @@ macro checkpoint(step_label)
 end
 
 
+"""
+    block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
+
+Advances the [`SolverStep`](@ref) state of the `blk`, apply each step of the solver on the `blk`.
+This continues until the current cycle is done, or the block needs to wait for another block to do
+the ghost cells exchange ([`block_ghost_exchange`](@ref)) or compute the its time step
+([`next_time_step`](@ref)).
+
+Returns `true` if we reached the end of the current cycle for `blk`.
+"""
 function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     @label next_step
     state = blk.state
@@ -191,9 +201,9 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         step_count = 0
         while step_count < max_step_count
             if time_ns() - t_start > timeout
-                blocks_pos = Tuple.(CartesianIndices(grid.grid_size)[thread_blocks_idx])
-                blocks = device_block.(Ref(grid), blocks_pos)
-                eoc_str = join(string.(blocks_pos) .* ": " .* string.(finished_cycle.(blocks)), ", ")
+                blocks_pos = CartesianIndices(grid.grid_size)[thread_blocks_idx]
+                blocks = block_at.(Ref(grid), blocks_pos)
+                eoc_str = join(string.(Tuple.(blocks_pos)) .* ": " .* (string∘finished_cycle∘solver_state).(blocks), ", ")
                 solver_error(:timeout, "cycle took too long in thread $tid, blocks: $eoc_str")
             end
 
@@ -202,10 +212,10 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
                 blk_pos = CartesianIndices(grid.grid_size)[blk_idx]
                 # One path for each type of block to avoid runtime dispatch
                 if in_grid(blk_pos, grid.static_sized_grid)
-                    blk = grid.device_blocks[block_idx(grid, blk_pos)]
+                    blk = grid.blocks[block_idx(grid, blk_pos)]
                     all_finished_cycle &= block_state_machine(params, blk)
                 else
-                    blk = grid.device_edge_blocks[edge_block_idx(grid, blk_pos)]
+                    blk = grid.edge_blocks[edge_block_idx(grid, blk_pos)]
                     all_finished_cycle &= block_state_machine(params, blk)
                 end
             end

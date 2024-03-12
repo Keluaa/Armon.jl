@@ -32,7 +32,7 @@ end
 function boundary_conditions!(params::ArmonParameters{T}, state::SolverState, blk::LocalTaskBlock, side::Side) where {T}
     (u_factor::T, v_factor::T) = boundary_condition(state.test_case, side)
     domain = border_domain(blk.size, side)
-    boundary_conditions!(params, blk, domain, blk.size, state.axis, side, u_factor, v_factor)
+    boundary_conditions!(params, block_device_data(blk), domain, blk.size, state.axis, side, u_factor, v_factor)
 end
 
 
@@ -153,7 +153,8 @@ end
 
 
 function block_ghost_exchange(
-    params::ArmonParameters, state::SolverState, blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side
+    params::ArmonParameters, state::SolverState,
+    blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side
 ) where {V, Size <: StaticBSize}
     !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
 
@@ -219,7 +220,8 @@ end
 
 
 function block_ghost_exchange(
-    params::ArmonParameters, state::SolverState, blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side
+    params::ArmonParameters, state::SolverState,
+    blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side
 ) where {V}
     !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
 
@@ -268,8 +270,9 @@ end
 
 
 function block_ghost_exchange(
-    params::ArmonParameters, state::SolverState, blk::LocalTaskBlock{V}, other_blk::RemoteTaskBlock{B}, side::Side
-) where {V, B}
+    params::ArmonParameters, state::SolverState,
+    blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side
+) where {D, H, B}
     if other_blk.rank == -1
         # `other_blk` is fake, this is the border of the global domain
         boundary_conditions!(params, state, blk, side)
@@ -280,14 +283,16 @@ function block_ghost_exchange(
     send_domain = border_domain(blk.size, side)
     recv_domain = shift_dir(send_domain, axis_of(side), side in first_sides() ? -ghosts(blk.size) : ghosts(blk.size))
 
+    buffer_are_on_device = D == B
+
     if exchange_state(blk, side) == BlockExchangeState.NotReady
-        if V !== B
-            # MPI buffers are not on the device. We first need to copy them to the host memory.
+        if !buffer_are_on_device
+            # MPI buffers are not located where the up-to-date data is: we must to a copy first.
             device_to_host!(blk)
         end
 
-        vars = comm_vars(blk)
-        pack_to_array!(params, blk, send_domain, blk.size, side, other_blk.send_buf.data, vars)
+        vars = comm_vars(blk; on_device=D == B)
+        pack_to_array!(params, send_domain, blk.size, side, other_blk.send_buf.data, vars)  # TODO: run on host if `D != B`, or perform it on the device on a tmp array
 
         wait(params)  # Wait for the copy to complete
 
@@ -302,10 +307,11 @@ function block_ghost_exchange(
             return BlockExchangeState.InProgress  # Still waiting
         end
 
-        unpack_from_array!(params, blk, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+        vars = comm_vars(blk; on_device=D == B)
+        unpack_from_array!(params, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)  # TODO: run on host if `D != B`
 
-        if V !== B
-            # MPI buffers are not on the device. Retreive the result of the exchange to the device.
+        if !buffer_are_on_device
+            # MPI buffers are not where we want the data to be. Retreive the result of the exchange.
             host_to_device!(blk)
         end
 
@@ -354,7 +360,7 @@ function block_ghost_exchange(params::ArmonParameters, state::SolverState, grid:
     waiting_for = trues(grid.grid_size)
     wait_lock = ReentrantLock()  # Required lock as `@iter_blocks` might use multithreading
     while any(waiting_for)
-        @iter_blocks for blk in device_blocks(grid)
+        @iter_blocks for blk in all_blocks(grid)
             if waiting_for[blk.pos] && !block_ghost_exchange(params, state, blk)
                 lock(wait_lock) do 
                     waiting_for[blk.pos] = false

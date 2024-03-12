@@ -25,7 +25,6 @@ armon
 SolverStats
 StepsRanges
 data_type
-@section
 ```
 
 ## Grid and blocks
@@ -35,13 +34,13 @@ BlockGrid
 grid_dimensions
 TaskBlock
 LocalTaskBlock
+BlockData
 RemoteTaskBlock
 device_to_host!
 host_to_device!
 buffers_on_device
 device_is_host
-device_blocks
-host_blocks
+all_blocks
 block_idx
 edge_block_idx
 remote_block_idx
@@ -66,6 +65,38 @@ in_grid
 is_ghost
 BlockRowIterator
 DomainRange
+```
+
+## Block states
+
+```@docs
+SolverState
+first_state
+SolverStep
+block_state_machine
+```
+
+### Time step reduction
+
+```@docs
+next_time_step
+GlobalTimeStep
+TimeStepState.WaitingForMPI
+TimeStepState.Done
+TimeStepState.Ready
+TimeStepState.DoingMPI
+TimeStepState.AllContributed
+```
+
+### Block exchanges
+
+```@docs
+block_ghost_exchange
+check_block_ready_for_exchange
+BlockExchangeState.NotReady
+BlockExchangeState.Ready
+BlockExchangeState.InProgress
+BlockExchangeState.Done
 ```
 
 ## Device and backends
@@ -101,4 +132,5 @@ memory_required
 Axis
 Side
 SolverException
+@section
 ```

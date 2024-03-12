@@ -68,17 +68,20 @@ no_zero(x::Flt) where {Flt <: AbstractFloat} = ifelse(iszero(x), nextfloat(zero(
 
 function count_differences(
     ref_params::ArmonParameters{T}, grid::BlockGrid,
-    blk::Armon.LocalTaskBlock{V, Size}, ref_blk::Armon.LocalTaskBlock{V, Size};
-    atol=abs_tol(T, ref_params.test), rtol=rel_tol(T, ref_params.test), save_diff=false
-) where {T, V <: AbstractArray{T}, Size}
-    diff_var = blk.work_1
+    blk::Armon.LocalTaskBlock, ref_blk::Armon.LocalTaskBlock;
+    atol=abs_tol(T, ref_params.test), rtol=rel_tol(T, ref_params.test), save_diff=false, on_device=false
+) where {T}
+    diff_var = Armon.block_data(blk; on_device).work_1
     save_diff && (diff_var .= 0)
+
+    ref_data = Armon.block_data(ref_blk; on_device)
+    cur_data = Armon.block_data(blk; on_device)
 
     differences_count = 0
     max_diff = zero(T)
     for (_, row_idx, row_range) in Armon.BlockRowIterator(grid, blk), field in Armon.saved_vars()
-        ref_row = @view getfield(ref_blk, field)[row_range]
-        cur_row = @view getfield(blk, field)[row_range]
+        ref_row = @view getfield(ref_data, field)[row_range]
+        cur_row = @view getfield(cur_data, field)[row_range]
 
         diff_count = sum((!isapprox).(ref_row, cur_row; atol, rtol))
         differences_count += diff_count
@@ -105,14 +108,10 @@ function count_differences(
 end
 
 
-function count_differences(
-    ref_params::ArmonParameters{T}, grid::BlockGrid, ref_grid::BlockGrid;
-    device_blocks=false, kwargs...
-) where {T}
+function count_differences(ref_params::ArmonParameters{T}, grid::BlockGrid, ref_grid::BlockGrid; kwargs...) where {T}
     differences_count = 0
     max_diff = zero(T)
-    blk_iter = device_blocks ? Armon.device_blocks : Armon.host_blocks
-    for (blk, ref_blk) in zip(blk_iter(grid), blk_iter(ref_grid))
+    for (blk, ref_blk) in zip(Armon.all_blocks(grid), Armon.all_blocks(ref_grid))
         blk_diff, blk_max_diff = count_differences(ref_params, grid, blk, ref_blk; kwargs...)
         differences_count += blk_diff
         max_diff += blk_max_diff

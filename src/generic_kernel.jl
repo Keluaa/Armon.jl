@@ -815,11 +815,11 @@ function transform_kernel(func::Expr)
 
     # Filter out the arguments to the main function that are present in the LocalTaskBlock or 
     # ArmonParameters structs, to then unpack them from a struct instance.
-    main_args, data_args = pack_struct_fields(args, LocalTaskBlock)
+    main_args, data_args = pack_struct_fields(args, BlockData)
     main_args, params_args = pack_struct_fields(main_args, ArmonParameters)
 
     params_type = is_T_in_where ? :(ArmonParameters{T}) : :(ArmonParameters)
-    data_type   = is_V_in_where ? :(LocalTaskBlock{V})  : :(LocalTaskBlock)
+    data_type   = is_V_in_where ? :(BlockData{V})  : :(BlockData)
 
     if isempty(data_args)
         main_def[:args] = [:(params::$params_type), main_loop_arg, main_args...]

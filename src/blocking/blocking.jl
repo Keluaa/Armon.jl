@@ -253,7 +253,7 @@ include("block_grid.jl")
 
 
 """
-    @iter_blocks for blk in device_blocks(grid)
+    @iter_blocks for blk in all_blocks(grid)
         # body...
     end
 
@@ -264,13 +264,8 @@ The body is duplicated for inner and edge blocks, ensuring type-inference.
 If `params.use_multithreading`, then an attempt will be made at equilibrating workload among threads.
 
 ```julia
-# Iterate on all device blocks
-@iter_blocks for blk in device_blocks(grid)
-    some_function(blk)
-end
-
-# Iterate on all host blocks
-@iter_blocks for blk in host_blocks(grid)
+# Iterate on all blocks of the grid
+@iter_blocks for blk in all_blocks(grid)
     some_function(blk)
 end
 ```
@@ -282,14 +277,11 @@ macro iter_blocks(expr)
     body = expr.args[2]
 
     if @capture(block_range, f_(grid_var_))
-        if f === :device_blocks || f === device_blocks
-            inner_blocks_range = :($grid_var.device_blocks)
-            edge_blocks_range  = :($grid_var.device_edge_blocks)
-        elseif f === :host_blocks || f === host_blocks
-            inner_blocks_range = :($grid_var.host_blocks)
-            edge_blocks_range  = :($grid_var.host_edge_blocks)
+        if f === :all_blocks || f === all_blocks
+            inner_blocks_range = :($grid_var.blocks)
+            edge_blocks_range  = :($grid_var.edge_blocks)
         else
-            error("expected `device_blocks(grid)` or `host_blocks(grid)`, got: $block_range")
+            error("expected `all_blocks(grid)`, got: $block_range")
         end
     else
         error("wrong style of block iteration: $block_range")
@@ -314,18 +306,17 @@ end
 """
     BlockRowIterator(grid::BlockGrid; kwargs...)
     BlockRowIterator(grid::BlockGrid, blk::LocalTaskBlock; kwargs...)
-    BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false, device_blocks=true)
+    BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false)
 
 Iterate the rows of all blocks of the `grid`, row by row (and not block by block).
 This allows to iterate the cells of the `grid` as if it was a single block.
 
-Giving `blk` will return an iterator on the rows of the block (`device_blocks` is deduced).
+Giving `blk` will return an iterator on the rows of the block.
 
 `sub_grid` defaults to the whole grid: it is a `Tuple` of iterables, one for each axis.
 
 If `global_ghosts == true`, then the ghost cells of at the border of the global domain are also returned.
 If `all_ghosts == true`, then the ghost cells of at the border of all blocks are also returned.
-If `device_blocks == false`, then host blocks are returned instead of device blocks.
 
 ```julia
 julia> for (blk, row_range) in BlockRowIterator(grid; all_ghosts=true)
@@ -343,7 +334,6 @@ julia> for (blk, row_range) in BlockRowIterator(grid; all_ghosts=true)
 struct BlockRowIterator
     grid::BlockGrid
     row_iter::Iterators.ProductIterator
-    device_blocks::Bool
     global_ghosts::Bool
     all_ghosts::Bool
 end
@@ -353,13 +343,12 @@ BlockRowIterator(grid::BlockGrid; kwargs...) =
     BlockRowIterator(grid, Base.oneto.(grid.grid_size); kwargs...)
 
 function BlockRowIterator(grid::BlockGrid, blk::LocalTaskBlock; kwargs...)
-    device_blocks = device_array_type(grid) == array_type(blk)
     # Only iterate the grid at the position of `blk`
     grid_iter = UnitRange.(Tuple(blk.pos), Tuple(blk.pos))
-    return BlockRowIterator(grid, grid_iter; device_blocks, kwargs...)
+    return BlockRowIterator(grid, grid_iter; kwargs...)
 end
 
-function BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false, device_blocks=true)
+function BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false)
     # `sub_grid` is a `Tuple` of iterables
     bs = static_block_size(grid)
     row_count = (1, Base.tail(block_size(bs))...)
@@ -372,7 +361,7 @@ function BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_gh
 
     global_ghosts && error("global_ghosts NYI")  # TODO
 
-    return BlockRowIterator(grid, row_iter, device_blocks, global_ghosts, all_ghosts)
+    return BlockRowIterator(grid, row_iter, global_ghosts, all_ghosts)
 end
 
 
@@ -395,12 +384,7 @@ function Base.iterate(iter::BlockRowIterator, row_iter_state=0)
     row_idx = row_iter_val[1:2:end]
     blk_idx = row_iter_val[2:2:end]
 
-    if iter.device_blocks
-        blk = device_block(iter.grid, CartesianIndex(blk_idx))
-    else
-        blk = host_block(iter.grid, CartesianIndex(blk_idx))
-    end
-
+    blk = block_at(iter.grid, CartesianIndex(blk_idx))
     blk_size = block_size(blk)
     block_row_count = (1, Base.tail(blk_size)...)
 

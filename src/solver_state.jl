@@ -161,6 +161,12 @@ function next_cycle!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) wher
 end
 
 
+"""
+    SolverStep
+
+Enumeration of each state a [`LocalTaskBlock`](@ref) can be in.
+[`block_state_machine`](@ref) advances this state.
+"""
 @enumx SolverStep begin
     NewCycle
     TimeStep
@@ -264,7 +270,8 @@ function end_cycle!(state::SolverState)
 end
 
 
-finished_cycle(state::SolverState) = state.cycle == state.global_dt.cycle && state.step == NewCycle
+solver_step(state::SolverState) = state.step
+finished_cycle(state::SolverState) = state.cycle == state.global_dt.cycle && state.step == SolverStep.NewCycle
 
 
 function reset!(state::SolverState{T}) where {T}

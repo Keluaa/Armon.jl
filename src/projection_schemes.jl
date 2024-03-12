@@ -44,15 +44,16 @@ end
 function euler_projection!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
     projection_range = block_domain_range(blk.size, state.steps_ranges.projection)
     s = stride_along(blk.size, state.axis)
+    blk_data = block_device_data(blk)
     euler_projection!(
-        params, blk, projection_range, s, state.dx, state.dt,
-        blk.work_1, blk.work_2, blk.work_3, blk.work_4
+        params, blk_data, projection_range, s, state.dx, state.dt,
+        blk_data.work_1, blk_data.work_2, blk_data.work_3, blk_data.work_4
     )
 end
 
 
 function euler_projection!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @section "Projection" @iter_blocks for blk in device_blocks(grid)
+    @section "Projection" @iter_blocks for blk in all_blocks(grid)
         euler_projection!(params, state, blk)
     end
 end
@@ -80,9 +81,10 @@ end
 function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::EulerProjection)
     advection_range = block_domain_range(blk.size, state.steps_ranges.advection)
     s = stride_along(blk.size, state.axis)
+    blk_data = block_device_data(blk)
     advection_first_order!(
-        params, blk, advection_range, s, state.dt,
-        blk.work_1, blk.work_2, blk.work_3, blk.work_4
+        params, blk_data, advection_range, s, state.dt,
+        blk_data.work_1, blk_data.work_2, blk_data.work_3, blk_data.work_4
     )
 end
 
@@ -125,9 +127,10 @@ end
 function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Euler2ndProjection)
     advection_range = block_domain_range(blk.size, state.steps_ranges.advection)
     s = stride_along(blk.size, state.axis)
+    blk_data = block_device_data(blk)
     advection_second_order!(
-        params, blk, advection_range, s, state.dx, state.dt,
-        blk.work_1, blk.work_2, blk.work_3, blk.work_4
+        params, blk_data, advection_range, s, state.dx, state.dt,
+        blk_data.work_1, blk_data.work_2, blk_data.work_3, blk_data.work_4
     )
 end
 
@@ -136,7 +139,7 @@ advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlo
     advection_fluxes!(params::ArmonParameters, state, blk::LocalTaskBlock, state.projection_scheme)
 
 function advection_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @section "Advection" @iter_blocks for blk in device_blocks(grid)
+    @section "Advection" @iter_blocks for blk in all_blocks(grid)
         advection_fluxes!(params, state, blk)
     end
 end

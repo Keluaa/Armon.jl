@@ -12,12 +12,12 @@ function write_blocks_to_file(
 
     # Write cells in the correct ascending (X, Y, Z) order, combining the cells of all blocks
     prev_row_idx = nothing
-    for (blk, row_idx, row_range) in BlockRowIterator(grid; global_ghosts, all_ghosts, device_blocks=false)
+    for (blk, row_idx, row_range) in BlockRowIterator(grid; global_ghosts, all_ghosts)
         if prev_row_idx != row_idx && !isnothing(prev_row_idx)
             for_3D && println(file)  # Separate rows to use pm3d plotting with gnuplot
         end
 
-        vars = getfield.(Ref(blk), vars_to_write)
+        vars = get_vars(blk, vars_to_write; on_device=false)
         # TODO: center the positions of the cells
         for idx in row_range
             Printf.format(file, format, getindex.(vars, idx)...)
@@ -34,8 +34,8 @@ function read_data_from_file(
 ) where {T}
     vars_to_read = tuple(saved_vars()..., more_vars...)
 
-    for (blk, _, row_range) in BlockRowIterator(grid; global_ghosts, all_ghosts, device_blocks=false)
-        vars = getfield.(Ref(blk), vars_to_read)
+    for (blk, _, row_range) in BlockRowIterator(grid; global_ghosts, all_ghosts)
+        vars = get_vars(blk, vars_to_read; on_device=false)
         for idx in row_range
             for var in vars[1:end-1]
                 var[idx] = parse(T, readuntil(file, ','))
@@ -122,10 +122,9 @@ function compare_block(
     real_static_bsize = params.block_size .- 2*params.nghost
     blk_global_pos = params.cart_coords .* params.N .+ (Tuple(our_blk.pos) .- 1) .* real_static_bsize
 
-    for var in vars
-        ref_var = getfield(ref_blk, var)
-        our_var = getfield(our_blk, var)
-
+    ref_vars = get_vars(ref_blk, vars; on_device=false)
+    our_vars = get_vars(our_blk, vars; on_device=false)
+    for (var, ref_var, our_var) in zip(vars, ref_vars, our_vars)
         diff_mask = (!isapprox).(ref_var, our_var; rtol=params.comparison_tolerance)
         !params.write_ghosts && (diff_mask .*= (!is_ghost).(Ref(our_blk.size), 1:prod(block_size(our_blk))))
 
@@ -166,7 +165,7 @@ function compare_data(
     vars=saved_vars()
 )
     different = false
-    for (ref_blk, our_blk) in zip(host_blocks(ref_data), host_blocks(our_data))
+    for (ref_blk, our_blk) in zip(all_blocks(ref_data), all_blocks(our_data))
         different |= compare_block(params, ref_blk, our_blk, label; vars)
     end
     return different

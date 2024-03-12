@@ -11,24 +11,11 @@ Base.eltype(::TaskBlock{V}) where {V} = eltype(V)
 
 
 """
-    LocalTaskBlock{V, Size, SolverState} <: TaskBlock{V}
+    BlockData{V}
 
-Container of `Size` and variables of type `V`, part of a [`BlockGrid`](@ref).
-
-The block stores its own solver state, allowing it to run all solver steps independantly of all
-other blocks, apart from steps requiring synchronization.
+Holds the variables of all cells of a [`LocalTaskBlock`](@ref).
 """
-mutable struct LocalTaskBlock{V, Size <: BlockSize, SState <: SolverState} <: TaskBlock{V}
-    state        :: SState             # Solver state for the block
-    exchange_age :: Atomic{Int}        # Incremented every time an exchange is completed
-    exchanges    :: Neighbours{Atomic{BlockExchangeState.T}}  # State of ghost cells exchanges for each side
-    size         :: Size               # Size (in cells) of the block
-    pos          :: CartesianIndex{2}  # Position in the local block grid
-    neighbours   :: Neighbours{TaskBlock}
-    mirror       :: LocalTaskBlock     # Host/Device mirror of this block. If device is host, then it is a self reference
-    # TODO: remove the `mirror` and replace it by two vars `host_data`, `device_data` which contains the data + some info to know which one is up-to-date
-    # TODO: device? storing the associated GPU stream, or CPU cores (or maybe not, to allow relocations?)
-    # Cells variables
+struct BlockData{V}
     x      :: V
     y      :: V
     ρ      :: V
@@ -46,19 +33,63 @@ mutable struct LocalTaskBlock{V, Size <: BlockSize, SState <: SolverState} <: Ta
     work_4 :: V
     mask   :: V  # TODO: remove ??
 
-    function LocalTaskBlock{V, Size, SState}(size::Size, pos, blk_state::SState; kwargs...) where {V, Size, SState}
-        # `neighbours` and `mirror` are set afterwards, when all blocks are created.
-        block = new{V, Size, SState}(
+    function BlockData{V}(size; kwargs...) where {V}
+        vars = ntuple(length(block_vars())) do i
+            var = block_vars()[i]
+            label = string(var)
+            return V(undef, size; alloc_array_kwargs(; label, kwargs...)...)
+        end
+        return new{V}(vars...)
+    end
+end
+
+
+block_vars() = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ, :work_1, :work_2, :work_3, :work_4, :mask)
+main_vars()  = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ)  # Variables synchronized between host and device
+saved_vars() = (:x, :y, :ρ, :u, :v,     :p                  )  # Variables saved to/read from I/O
+comm_vars()  = (        :ρ, :u, :v, :E, :p, :c, :g          )  # Variables exchanged between ghost cells
+
+get_vars(data::BlockData, vars) = getfield.(Ref(data), vars)
+block_vars(data::BlockData) = get_vars(data, block_vars())
+main_vars(data::BlockData)  = get_vars(data, main_vars())
+saved_vars(data::BlockData) = get_vars(data, saved_vars())
+comm_vars(data::BlockData)  = get_vars(data, comm_vars())
+
+
+"""
+    LocalTaskBlock{D, H, Size, SolverState} <: TaskBlock{V}
+
+Container of `Size` and variables of type `D` on the device and `H` on the host.
+Part of a [`BlockGrid`](@ref).
+
+The block stores its own solver state, allowing it to run all solver steps independantly of all
+other blocks, apart from steps requiring synchronization.
+"""
+mutable struct LocalTaskBlock{D, H, Size <: BlockSize, SState <: SolverState} <: TaskBlock{D}
+    state        :: SState             # Solver state for the block
+    exchange_age :: Atomic{Int}        # Incremented every time an exchange is completed
+    exchanges    :: Neighbours{Atomic{BlockExchangeState.T}}  # State of ghost cells exchanges for each side
+    size         :: Size               # Size (in cells) of the block
+    pos          :: CartesianIndex{2}  # Position in the local block grid
+    neighbours   :: Neighbours{TaskBlock}
+    device_data  :: BlockData{D}
+    host_data    :: BlockData{H}  # Host data uses the same arrays as device data if `D == H`
+    # TODO: device? storing the associated GPU stream, or CPU cores (or maybe not, to allow relocations?)
+
+    function LocalTaskBlock{D, H, Size, SState}(size::Size, pos, blk_state::SState, device_kwargs, host_kwargs) where {D, H, Size, SState}
+        # `neighbours` is set afterwards, when all blocks are created.
+        block = new{D, H, Size, SState}(
             blk_state, Atomic(0),
             Neighbours(Atomic{BlockExchangeState.T}, BlockExchangeState.NotReady),
             size, pos #= undef =#
         )
 
-        b_size = block_size(size)
-        for var in block_vars()
-            label = string(var)
-            var_array = V(undef, prod(b_size); alloc_array_kwargs(; label, kwargs...)...)
-            setfield!(block, var, var_array)
+        cell_count = prod(block_size(size))
+        if D != H
+            block.device_data = BlockData{D}(cell_count; device_kwargs...)
+            block.host_data   = BlockData{H}(cell_count; host_kwargs...)
+        else
+            block.host_data = block.device_data = BlockData{D}(cell_count; device_kwargs...)
         end
 
         return block
@@ -69,18 +100,17 @@ end
 block_size(blk::LocalTaskBlock) = block_size(blk.size)
 real_block_size(blk::LocalTaskBlock) = real_block_size(blk.size)
 ghosts(blk::LocalTaskBlock) = ghosts(blk.size)
+solver_state(blk::LocalTaskBlock) = blk.state
 
+block_device_data(blk::LocalTaskBlock) = blk.device_data
+block_host_data(blk::LocalTaskBlock) = blk.host_data
+block_data(blk::LocalTaskBlock; on_device=true) = on_device ? block_device_data(blk) : block_host_data(blk)
 
-block_vars() = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ, :work_1, :work_2, :work_3, :work_4, :mask)
-main_vars()  = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ)  # Variables synchronized between host and device
-saved_vars() = (:x, :y, :ρ, :u, :v,     :p                  )  # Variables saved to/read from I/O
-comm_vars()  = (        :ρ, :u, :v, :E, :p, :c, :g          )  # Variables exchanged between ghost cells
-
-get_vars(blk::LocalTaskBlock, vars) = getfield.(Ref(blk), vars)
-block_vars(blk::LocalTaskBlock) = get_vars(blk, block_vars())
-main_vars(blk::LocalTaskBlock)  = get_vars(blk, main_vars())
-saved_vars(blk::LocalTaskBlock) = get_vars(blk, saved_vars())
-comm_vars(blk::LocalTaskBlock)  = get_vars(blk, comm_vars())
+get_vars(blk::LocalTaskBlock, vars; on_device=true) = get_vars(block_data(blk; on_device), vars)
+block_vars(blk::LocalTaskBlock; on_device=true) = block_vars(block_data(blk; on_device))
+main_vars(blk::LocalTaskBlock; on_device=true)  = main_vars(block_data(blk; on_device))
+saved_vars(blk::LocalTaskBlock; on_device=true) = saved_vars(block_data(blk; on_device))
+comm_vars(blk::LocalTaskBlock; on_device=true)  = comm_vars(block_data(blk; on_device))
 
 
 exchange_age(blk::LocalTaskBlock) = @atomic blk.exchange_age.x
@@ -103,64 +133,36 @@ function reset!(blk::LocalTaskBlock)
 end
 
 
-function Base.copyto!(dst_blk::LocalTaskBlock{V, Size}, src_blk::LocalTaskBlock{V, Size}) where {V, Size}
-    if block_size(dst_blk) != block_size(src_blk)
-        error("Destination and source blocks have different sizes: $(block_size(dst_blk)) != $(block_size(src_blk))")
-    end
+"""
+    device_to_host!(blk::LocalTaskBlock)
 
-    # TODO: ensure this is done in the correct thread ??
-    for (dst_var, src_var) in zip(main_vars(dst_blk), main_vars(src_blk))
+Copies the device data of `blk` to the host data. A no-op if the device is the host.
+"""
+function device_to_host!(blk::LocalTaskBlock{D, H}) where {D, H}
+    for (dst_var, src_var) in zip(main_vars(blk.host_data), main_vars(blk.device_data))
+        # TODO: ensure this is done in the correct thread/device
+        # KernelAbstractions.copyto!(blk.device, dst_var, src_var)
         copyto!(dst_var, src_var)
     end
 end
 
-
-function Base.copyto!(dst_blk::LocalTaskBlock{A, Size}, src_blk::LocalTaskBlock{B, Size}) where {A, B, Size}
-    if block_size(dst_blk) != block_size(src_blk)
-        error("Destination and source blocks have different sizes: $(block_size(dst_blk)) != $(block_size(src_blk))")
-    end
-
-    # TODO: ensure this is done in the correct thread ?? + device??
-    for (dst_var, src_var) in zip(main_vars(dst_blk), main_vars(src_blk))
-        KernelAbstractions.copyto!(dst_blk.device, dst_var, src_var)
-    end
-end
+device_to_host!(::LocalTaskBlock{H, H}) where {H} = nothing
 
 
 """
     device_to_host!(blk::LocalTaskBlock)
 
-Copies the device data of `blk` to its host mirror. `blk` can be the device or host block.
-A no-op if the device is the host.
+Copies the host data of `blk` to its device data. A no-op if the device is the host.
 """
-function device_to_host!(blk::LocalTaskBlock)
-    blk === blk.mirror && return  # device is host
-
-    first_var = getfield(blk, first(block_vars()))
-    if KernelAbstractions.get_backend(first_var) isa KernelAbstractions.GPU
-        copyto!(blk.mirror, blk)
-    else
-        copyto!(blk, blk.mirror)
+function host_to_device!(blk::LocalTaskBlock{D, H}) where {D, H}
+    for (dst_var, src_var) in zip(main_vars(blk.device_data), main_vars(blk.host_data))
+        # TODO: ensure this is done in the correct thread/device
+        # KernelAbstractions.copyto!(blk.device, dst_var, src_var)
+        copyto!(dst_var, src_var)
     end
 end
 
-
-"""
-    device_to_host!(blk::LocalTaskBlock)
-
-Copies the host data of `blk` to its device mirror. `blk` can be the device or host block.
-A no-op if the device is the host.
-"""
-function host_to_device!(blk::LocalTaskBlock)
-    blk === blk.mirror && return  # device is host
-
-    first_var = getfield(blk, first(block_vars()))
-    if KernelAbstractions.get_backend(first_var) isa KernelAbstractions.GPU
-        copyto!(blk, blk.mirror)
-    else
-        copyto!(blk.mirror, blk)
-    end
-end
+host_to_device!(::LocalTaskBlock{H, H}) where {H} = nothing
 
 
 function Base.show(io::IO, blk::LocalTaskBlock)

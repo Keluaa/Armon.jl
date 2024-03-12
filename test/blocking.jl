@@ -16,31 +16,31 @@
 
         @testset "Grid" begin
             if prod(block_size) > 0
-                @test prod(grid.grid_size) == length(grid.device_blocks) + length(grid.device_edge_blocks)
+                @test prod(grid.grid_size) == length(grid.blocks) + length(grid.edge_blocks)
                 grid_size, static_grid, remainder_size = Armon.grid_dimensions(ref_params)
                 @test all(remainder_size .> nghost .|| remainder_size .== 0)
             else
-                @test isempty(grid.device_blocks)
-                @test !isempty(grid.device_edge_blocks)
-                @test prod(grid.grid_size) == length(grid.device_edge_blocks)
+                @test isempty(grid.blocks)
+                @test !isempty(grid.edge_blocks)
+                @test prod(grid.grid_size) == length(grid.edge_blocks)
             end
         end
 
         @testset "Domain" begin
             real_cell_count = 0
             all_cell_count = 0
-            for blk in Armon.device_blocks(grid)
+            for blk in Armon.all_blocks(grid)
                 real_cell_count += prod(Armon.real_block_size(blk.size))
                 all_cell_count  += prod(Armon.block_size(blk.size))
             end
-            @test real_cell_count == prod(params.N)
+            @test real_cell_count == prod(ref_params.N)
             if prod(grid.grid_size) == 1
-                @test all_cell_count  == prod(params.N .+ 2*params.nghost)
+                @test all_cell_count  == prod(ref_params.N .+ 2*ref_params.nghost)
             end
         end
 
         @testset "Neighbours" begin
-            for blk in Iterators.flatten((grid.device_blocks, grid.device_edge_blocks, grid.remote_blocks))
+            for blk in Iterators.flatten((grid.blocks, grid.edge_blocks, grid.remote_blocks))
                 if blk isa Armon.RemoteTaskBlock
                     if blk.neighbour isa Armon.RemoteTaskBlock
                         @test blk.neighbour.neighbour == blk
@@ -63,11 +63,9 @@
 
         @testset "Block position" begin
             for pos in CartesianIndex(1, 1):CartesianIndex(grid.grid_size)
-                blk = Armon.device_block(grid, pos)
-                host_blk = Armon.host_block(grid, pos)
+                blk = Armon.block_at(grid, pos)
                 @test blk.pos == pos
                 @test blk isa Armon.LocalTaskBlock
-                @test blk.mirror == host_blk == blk
             end
 
             # Remote blocks
@@ -76,7 +74,7 @@
                     CartesianIndex(grid.grid_size[1]+1, 1):CartesianIndex(grid.grid_size[1]+1, grid.grid_size[2]),  # right
                     CartesianIndex(1,                   0):CartesianIndex(grid.grid_size[1],                   0),  # bottom
                     CartesianIndex(1, grid.grid_size[2]+1):CartesianIndex(grid.grid_size[1], grid.grid_size[2]+1))) # top
-                blk = Armon.device_block(grid, pos)
+                blk = Armon.block_at(grid, pos)
                 @test blk.pos == pos
                 @test blk isa Armon.RemoteTaskBlock
             end
@@ -183,10 +181,11 @@ end
         fail_pos = nothing
         for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid)
             expected_length = Armon.real_size_along(blk.size, Armon.X_axis)
-            if length(row_range) == expected_length && all((i:i+expected_length-1) .== blk.ρ[row_range])
+            blk_data = Armon.block_host_data(blk)
+            if length(row_range) == expected_length && all((i:i+expected_length-1) .== blk_data.ρ[row_range])
                 i += expected_length
             else
-                fail_pos = (blk.pos, row_idx, row_range, blk.ρ[row_range])
+                fail_pos = (blk.pos, row_idx, row_range, blk_data.ρ[row_range])
                 break
             end
         end

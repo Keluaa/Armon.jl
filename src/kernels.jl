@@ -150,14 +150,14 @@ end
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, tc::TestCase)
     range = block_domain_range(blk.size, state.steps_ranges.EOS)
-    gamma = data_type(params)(specific_heat_ratio(tc))
-    return perfect_gas_EOS!(params, blk, range, gamma)
+    gamma = eltype(blk)(specific_heat_ratio(tc))
+    return perfect_gas_EOS!(params, block_device_data(blk), range, gamma)
 end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Bizarrium)
     range = block_domain_range(blk.size, state.steps_ranges.EOS)
-    return bizarrium_EOS!(params, blk, range)
+    return bizarrium_EOS!(params, block_device_data(blk), range)
 end
 
 
@@ -167,7 +167,7 @@ end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @iter_blocks for blk in device_blocks(grid)
+    @iter_blocks for blk in all_blocks(grid)
         update_EOS!(params, state, blk)
     end
 end
@@ -184,15 +184,15 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
     ΔX = params.domain_size ./ params.global_grid
 
     # Make sure all variables to save are initialized
-    vars_names_to_zero = setdiff(saved_vars(), (:x, :y, :ρ, :E, :u, :v, :p, :c, :g))
+    vars_names_to_zero = setdiff(saved_vars(), (:x, :y, :ρ, :E, :u, :v, :p, :c, :g, :mask))
     vars_to_zero = Tuple(get_vars(blk, vars_names_to_zero))
 
-    init_test(params, blk, blk_domain, blk_global_pos, blk.size, ΔX, vars_to_zero, params.test)
+    init_test(params, block_device_data(blk), blk_domain, blk_global_pos, blk.size, ΔX, vars_to_zero, params.test)
 end
 
 
 function init_test(params::ArmonParameters, grid::BlockGrid)
-    @iter_blocks for blk in device_blocks(grid)
+    @iter_blocks for blk in all_blocks(grid)
         init_test(params, blk)
     end
 end
@@ -200,14 +200,15 @@ end
 
 function cell_update!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
     blk_domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
-    u = state.axis == X_axis ? blk.u : blk.v
+    blk_data = block_device_data(blk)
+    u = state.axis == X_axis ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)
-    cell_update!(params, blk, blk_domain, s, state.dx, state.dt, u)
+    cell_update!(params, blk_data, blk_domain, s, state.dx, state.dt, u)
 end
 
 
 function cell_update!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @iter_blocks for blk in device_blocks(grid)
+    @iter_blocks for blk in all_blocks(grid)
         cell_update!(params, state, blk)
     end
 end
@@ -236,7 +237,7 @@ end
 
 @fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2, T}) where {T}
     # CPU reduction
-    (; u, v, c) = blk
+    (; u, v, c) = block_device_data(blk)
     range = block_domain_range(blk.size, state.steps_ranges.real_domain)
 
     if params.use_cache_blocking
@@ -279,22 +280,24 @@ end
 function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2})
     # GPU generic reduction
     range = block_domain_range(blk.size, state.steps_ranges.full_domain)
+    blk_data = block_device_data(blk)
+
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction result. This is inefficient but can
         # be more performant for some GPU backends.
         # We avoid filling the whole array with `typemax(T)` by applying the kernel on the whole
         # array (`full_domain`) and by using `is_ghost(i)` as a mask.
         # TODO: There may be some synchronization issues with oneAPI.jl.
-        dtCFL_kernel(params, blk, range, blk.work_1, blk.size, Δx...)
+        dtCFL_kernel(params, blk_data, range, blk_data.work_1, blk.size, Δx...)
         wait(params)
-        return reduce(min, blk.work_1)
+        return reduce(min, blk_data.work_1)
     else
         # Direct reduction, which depends on a pre-computed `mask`
         lin_range = first(range):last(range)  # Reduce on a 1D range
-        c_v    = @view blk.c[lin_range]
-        u_v    = @view blk.u[lin_range]
-        v_v    = @view blk.v[lin_range]
-        mask_v = @view blk.mask[lin_range]
+        c_v    = @view blk_data.c[lin_range]
+        u_v    = @view blk_data.u[lin_range]
+        v_v    = @view blk_data.v[lin_range]
+        mask_v = @view blk_data.mask[lin_range]
         return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, Δx...)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
     end
 end
@@ -311,7 +314,7 @@ function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::B
     threads_res = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
     threads_res .= typemax(T)
 
-    @iter_blocks for blk in device_blocks(grid)
+    @iter_blocks for blk in all_blocks(grid)
         blk_res = local_time_step(params, state, blk)
 
         tid = Threads.threadid()
@@ -322,6 +325,24 @@ function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::B
 end
 
 
+"""
+    next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock; already_contributed=false)
+    next_time_step(params::ArmonParameters, state::SolverState, grid::BlockGrid)
+
+Compute the time step of the next cycle. This is done at the start of the current cycle.
+
+Since the current cycle does not rely on an up-to-date time step, the time step reduction is done
+fully asynchronously, including the global MPI reduction.
+The accuracy cost of this optimisation is minimal, as the CFL condition prevents the time step from
+being too large.
+Additionally, we prevent the time step from increasing of more than +5% of the previous one.
+
+For first cycle, if no initial time step is given, the time step of the next cycle is reused for the
+initial cycle.
+
+If `blk` is given, its contribution is only added to the `state.global_dt` (the [`GlobalTimeStep`](@ref)).
+Passing the whole block `grid` will block until the new time step is computed.
+"""
 function next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock; already_contributed=false)
     if params.cst_dt
         state.dt = params.Dt
@@ -412,8 +433,8 @@ end
 
 @fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
     # CPU reduction
-    (; ρ, E) = blk
-    range = block_domain_range(blk.size, first(params.steps_ranges).real_domain)
+    (; ρ, E) = block_device_data(blk)
+    range = block_domain_range(blk.size, blk.state.steps_ranges.real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
@@ -464,20 +485,22 @@ end
 
 function conservation_vars(params::ArmonParameters{T}, blk::LocalTaskBlock) where {T}
     # GPU generic reduction
-    range = block_domain_range(blk.size, params.steps_ranges.full_domain)
+    range = block_domain_range(blk.size, blk.state.steps_ranges.full_domain)
+    blk_data = block_device_data(blk)
+
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction results.
         # Same comments as for `dtCFL_kernel`.
-        conservation_vars(params, blk, range, blk.work_1, blk.work_2, blk.size)
+        conservation_vars(params, blk_data, range, blk_data.work_1, blk_data.work_2, blk.size)
         wait(params)
         identity2(a, b) = (a, b)
-        total_mass, total_energy = mapreduce(identity2, min, blk.work_1, blk.work_2;
+        total_mass, total_energy = mapreduce(identity2, min, blk_data.work_1, blk_data.work_2;
             init=(zero(T), zero(T)))
     else
         lin_range = first(range):last(range)
-        ρ_v    = @view blk.ρ[lin_range]
-        E_v    = @view blk.E[lin_range]
-        mask_v = @view blk.mask[lin_range]
+        ρ_v    = @view blk_data.ρ[lin_range]
+        E_v    = @view blk_data.E[lin_range]
+        mask_v = @view blk_data.mask[lin_range]
         total_mass, total_energy = mapreduce(conservation_vars_kernel_reduction, .+, ρ_v, E_v, mask_v;
             init=(zero(T), zero(T)))
     end
@@ -497,9 +520,9 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     threads_mass   .= 0
     threads_energy .= 0
 
-    @iter_blocks for blk in device_blocks(grid)
-        tid = Threads.threadid()
-        (threads_mass[tid], threads_energy[tid]) = (threads_mass[tid], threads_energy[tid]) .+ conservation_vars(params, blk)
+    @iter_blocks for blk in all_blocks(grid)
+        (threads_mass[tid], threads_energy[tid]) =
+            (threads_mass[tid], threads_energy[tid]) .+ conservation_vars(params, blk)
     end
 
     total_mass   = sum(threads_mass)
