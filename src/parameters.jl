@@ -395,13 +395,11 @@ function init_MPI(params::ArmonParameters;
         params.proc_size = MPI.Comm_size(global_comm)
         params.proc_dims = P
 
-        # Create a cartesian grid communicator of P processes. reorder=true can be very
-        # important for performance since it will optimize the layout of the processes.
-        p32 = collect(Int32.(P))
-        periodic_borders = zeros(Int32, length(p32))
-        C_COMM = MPI.Cart_create(global_comm, p32, periodic_borders, reorder_grid)
+        # Create a cartesian grid communicator of P processes. `reorder=true` can be very important
+        # for performance since it will optimize the layout of the processes.
+        C_COMM = MPI.Cart_create(global_comm, P; reorder=reorder_grid)
         params.cart_comm = C_COMM
-        params.cart_coords = tuple(MPI.Cart_coords(C_COMM)...)
+        params.cart_coords = Tuple(MPI.Cart_coords(C_COMM))
 
         # TODO: dimension agnostic
         params.neighbours = Dict(
