@@ -7,6 +7,7 @@ using Test
 
 WRITE_FAILED = parse(Bool, get(ENV, "WRITE_FAILED", "false"))
 NO_MPI = parse(Bool, get(ENV, "NO_MPI", "false"))
+MPI_PROCS = parse(Int, get(ENV, "MPI_PROCS", "0"))
 
 if !NO_MPI
     using MPI
@@ -46,6 +47,8 @@ if isinteractive()
     Choice: """
     printstyled(stdout, menu; color=:light_green)
     raw_main_options = readline()
+elseif haskey(ENV, "TEST_FILTER")
+    raw_main_options = ENV["TEST_FILTER"]
 else
     raw_main_options = isempty(ARGS) ? "short" : join(ARGS, ", ")
 end
@@ -94,7 +97,15 @@ function do_tests(tests_to_do)
             elseif test === :conservation   run_file("conservation.jl")
             elseif test === :gpu            run_file("gpu.jl")
             elseif test === :kokkos         run_file("kokkos.jl")
-            elseif test === :mpi            run_file("mpi.jl")
+            elseif test === :mpi
+                if MPI_PROCS > 0 && world_size < MPI_PROCS
+                    @info "Launching $MPI_PROCS MPI sub-processes"
+                    project_dir = dirname(Base.ACTIVE_PROJECT[])
+                    mpi_cmd = `$(mpiexec()) -n $MPI_PROCS $(Base.julia_cmd()) --project=$(project_dir) --color=yes $(@__FILE__)`
+                    run(mpi_cmd)
+                else
+                    run_file("mpi.jl")
+                end
             else
                 error("Unknown test set: $test")
             end
