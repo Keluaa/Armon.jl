@@ -10,7 +10,7 @@ NO_MPI = parse(Bool, get(ENV, "NO_MPI", "false"))
 
 if !NO_MPI
     using MPI
-    MPI.Init()
+    MPI.Init(; threadlevel=:multiple)
     is_root = MPI.Comm_rank(MPI.COMM_WORLD) == 0
     world_size = MPI.Comm_size(MPI.COMM_WORLD)
     if is_root && world_size > 1
@@ -37,11 +37,9 @@ if isinteractive()
      - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
      - kokkos         Equivalence of the Kokkos backend with the Julia CPU backend
-     - async          Checks that separating the domain and treating the boundary conditions asynchronously 
-                      doesn't introduce any variations in the result.
      - MPI            Equivalence with the single domain case and asynchronous communications.
                       If 'TEST_KOKKOS_MPI=true' or 'kokkos' is in the test list, MPI tests with
-                      Kokkos will also be performed.
+                      Kokkos will also be performed. Same for GPU backends.
 
     Separate multiple test sets with a comma.
 
@@ -58,7 +56,7 @@ main_options = main_options .|> Symbol |> union
 
 if :all in main_options
     expanded_options = [:quality, :stability, :domains, :blocking, :convergence, :conservation,
-                        :kokkos, :gpu, :async, :mpi]
+                        :kokkos, :gpu, :mpi]
 elseif :short in main_options
     expanded_options = [:quality, :stability, :convergence, :conservation]
 else

@@ -184,12 +184,11 @@ communication with other [`BlockGrid`](@ref)s.
 mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
     pos        :: CartesianIndex{2}  # Position in the local block grid
     neighbour  :: LocalTaskBlock     # Remote blocks are on the edges of the sub-domain: there can only be one real neighbour
-    rank       :: Int
+    rank       :: Int                # `-1` if the remote block has no MPI rank to communicate with
     global_pos :: CartesianIndex{2}  # Rank position in the Cartesian process grid
     send_buf   :: MPI.Buffer{B}
     recv_buf   :: MPI.Buffer{B}
-    send_req   :: MPI.AbstractRequest
-    recv_req   :: MPI.AbstractRequest
+    requests   :: MPI.UnsafeMultiRequest
 
     function RemoteTaskBlock{B}(size, pos, rank, global_pos, comm) where {B}
         # `neighbour` is set afterwards, when all blocks are created.
@@ -198,21 +197,21 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block.global_pos = global_pos
         block.send_buf = MPI.Buffer(B(undef, size))
         block.recv_buf = MPI.Buffer(B(undef, size))
-        block.send_req = MPI.Send_init(block.send_buf, comm; dest=rank)
-        block.recv_req = MPI.Recv_init(block.recv_buf, comm; source=rank)
+        block.requests = MPI.UnsafeMultiRequest(2)  # We always keep a reference to the buffers, therefore it is safe
+        MPI.Send_init(block.send_buf, comm, block.requests[1]; dest=rank)
+        MPI.Recv_init(block.recv_buf, comm, block.requests[2]; source=rank)
         return block
     end
 
     function RemoteTaskBlock{B}(pos) where {B}
         # Constructor for an non-existant task block, found at the edges of the global domain, where
-        # there is no MPI rank.
+        # there is no neighbouring MPI rank.
         block = new{B}(pos)
         block.rank = -1
         block.global_pos = CartesianIndex(0, 0)
         block.send_buf = MPI.Buffer(B(undef, 0))
         block.recv_buf = MPI.Buffer(B(undef, 0))
-        block.send_req = MPI.Request()
-        block.recv_req = MPI.Request()
+        block.requests = MPI.UnsafeMultiRequest(0)
         return block
     end
 end
@@ -221,9 +220,9 @@ end
 function Base.show(io::IO, blk::RemoteTaskBlock)
     pos_str = join(Tuple(blk.pos), ',')
     if blk.rank == -1
-        print(io, "RemoteTaskBlock(at ($pos_str), to: nowhere")
+        print(io, "RemoteTaskBlock(at ($pos_str), to: nowhere)")
     else
         global_str = join(Tuple(blk.global_pos), ',')
-        print(io, "RemoteTaskBlock(at ($pos_str), to: process $(blk.rank) at ($global_str)")
+        print(io, "RemoteTaskBlock(at ($pos_str), to: process $(blk.rank) at ($global_str))")
     end
 end

@@ -294,7 +294,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     proc_dims::NTuple{2, Int}
     global_comm::MPI.Comm
     cart_comm::MPI.Comm
-    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid
+    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
     neighbours::Dict{Side.T, Int}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions of the global grid
     reorder_grid::Bool
@@ -445,6 +445,15 @@ function init_device(params::ArmonParameters;
     params.use_cache_blocking = use_cache_blocking
     params.use_two_step_reduction = use_two_step_reduction
     params.async_cycle = async_cycle
+
+    if use_cache_blocking && use_threading && params.use_MPI
+        thread_level = MPI.Query_thread()
+        if thread_level < MPI.THREAD_MULTIPLE
+            solver_error(:config, "Using multithreading with cache blocking requires MPI to be \
+                                   initialized with `threadlevel ≥ MPI.THREAD_MULTIPLE`, \
+                                   got: $thread_level")
+        end
+    end
 
     if !use_cache_blocking
         if use_gpu

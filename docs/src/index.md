@@ -45,6 +45,7 @@ block_idx
 edge_block_idx
 remote_block_idx
 @iter_blocks
+block_pos_containing_cell
 ```
 
 ### Block size and iteration
@@ -93,6 +94,8 @@ TimeStepState.AllContributed
 ```@docs
 block_ghost_exchange
 check_block_ready_for_exchange
+start_exchange
+finish_exchange
 BlockExchangeState.NotReady
 BlockExchangeState.Ready
 BlockExchangeState.InProgress

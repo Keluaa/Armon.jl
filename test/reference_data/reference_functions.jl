@@ -98,9 +98,10 @@ function count_differences(
         max_diff = max(max_diff, row_max_diff)
 
         @debug begin
-            blk_str = join(blk.pos, '×')
+            blk_str = join(Tuple(blk.pos), '×')
             row_str = join(row_idx, '×')
-            "In block $blk_str row $row_str has $diff_count differences in '$field' with the reference. Max diff=$row_max_diff"
+            ulp = row_max_diff / eps(T)
+            "In block $blk_str row $row_str has $diff_count differences in '$field' with the reference. Max diff=$row_max_diff ($ulp ulp)"
         end
     end
 

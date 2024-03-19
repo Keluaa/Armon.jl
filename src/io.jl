@@ -2,25 +2,24 @@
 # TODO: use hdf5 for much more efficient read/write
 
 function write_blocks_to_file(
-    params::ArmonParameters, grid::BlockGrid, file::IO;
-    global_ghosts=false, all_ghosts=false, for_3D=true, more_vars=()
+    params::ArmonParameters, grid::BlockGrid, file::IO, row_iter_params...;
+    global_ghosts=false, all_ghosts=false, for_3D=true, vars=saved_vars()
 )
-    vars_to_write = tuple(saved_vars()..., more_vars...)
-
     p = params.output_precision
-    format = Printf.Format(join(repeat(["%#$(p+7).$(p)e"], length(vars_to_write)), ", ") * "\n")
+    format = Printf.Format(join(repeat(["%#$(p+7).$(p)e"], length(vars)), ", ") * "\n")
 
     # Write cells in the correct ascending (X, Y, Z) order, combining the cells of all blocks
     prev_row_idx = nothing
-    for (blk, row_idx, row_range) in BlockRowIterator(grid; global_ghosts, all_ghosts)
+    for (blk, row_idx, row_range) in BlockRowIterator(grid, row_iter_params...; global_ghosts, all_ghosts)
+        row_idx = row_idx[2:end]
         if prev_row_idx != row_idx && !isnothing(prev_row_idx)
             for_3D && println(file)  # Separate rows to use pm3d plotting with gnuplot
         end
 
-        vars = get_vars(blk, vars_to_write; on_device=false)
+        blk_vars = get_vars(blk, vars; on_device=false)
         # TODO: center the positions of the cells
         for idx in row_range
-            Printf.format(file, format, getindex.(vars, idx)...)
+            Printf.format(file, format, getindex.(blk_vars, idx)...)
         end
 
         prev_row_idx = row_idx
@@ -29,18 +28,16 @@ end
 
 
 function read_data_from_file(
-    ::ArmonParameters{T}, grid::BlockGrid, file::IO;
-    global_ghosts=false, all_ghosts=false, more_vars=()
+    ::ArmonParameters{T}, grid::BlockGrid, file::IO, row_iter_params...;
+    global_ghosts=false, all_ghosts=false, vars=saved_vars()
 ) where {T}
-    vars_to_read = tuple(saved_vars()..., more_vars...)
-
-    for (blk, _, row_range) in BlockRowIterator(grid; global_ghosts, all_ghosts)
-        vars = get_vars(blk, vars_to_read; on_device=false)
+    for (blk, _, row_range) in BlockRowIterator(grid, row_iter_params...; global_ghosts, all_ghosts)
+        blk_vars = get_vars(blk, vars; on_device=false)
         for idx in row_range
-            for var in vars[1:end-1]
+            for var in blk_vars[1:end-1]
                 var[idx] = parse(T, readuntil(file, ','))
             end
-            vars[end][idx] = parse(T, readuntil(file, '\n'))
+            blk_vars[end][idx] = parse(T, readuntil(file, '\n'))
         end
     end
 end
@@ -68,8 +65,7 @@ function write_sub_domain_file(
 )
     output_file_path = build_file_path(params, file_name)
     open(output_file_path, "w") do file
-        all_ghosts = params.write_ghosts
-        write_blocks_to_file(params, data, file; all_ghosts, options...)
+        write_blocks_to_file(params, data, file; global_ghosts=params.write_ghosts, options...)
     end
 
     if !no_msg && params.is_root && params.silent < 2
@@ -83,8 +79,7 @@ function read_sub_domain_file!(
 )
     output_file_path = build_file_path(params, file_name)
     open(output_file_path, "r") do file
-        all_ghosts = params.write_ghosts
-        read_data_from_file(params, data, file; all_ghosts, options...)
+        read_data_from_file(params, data, file; global_ghosts=params.write_ghosts, options...)
     end
 end
 

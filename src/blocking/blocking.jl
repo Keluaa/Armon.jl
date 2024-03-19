@@ -101,8 +101,6 @@ function position(bsize::BlockSize, size::NTuple{2}, i::I) where {I}
     row_length = I(size[1])
     iy = (i - one(I)) ÷ row_length
     ix = (i - one(I)) % row_length
-    # g=5
-    # 6 -> (1, 0)
     return (ix, iy) .- ghosts(bsize) .+ 1
 end
 
@@ -138,12 +136,16 @@ end
 
 
 """
-    border_domain(bsize::BlockSize, side::Side.T)
+    border_domain(bsize::BlockSize, side::Side.T; single_strip=true)
 
-[`DomainRange`](@ref) of the real cells along `side`. It includes only one "strip" of cells, that is
+[`DomainRange`](@ref) of the real cells along `side`.
+
+If `single_strip == true`,  it includes only one "strip" of cells, that is
 `length(border_domain(bsize, side)) == size_along(bsize, side)`.
+Otherwise, there are `ghosts(bsize)` strips of cells: all real cells which would be exchanged with
+another block along `side`.
 """
-function border_domain(bsize::BlockSize, side::Side.T)
+function border_domain(bsize::BlockSize, side::Side.T; single_strip=true)
     rsize = real_block_size(bsize)
 
     if side == Side.Left
@@ -160,21 +162,35 @@ function border_domain(bsize::BlockSize, side::Side.T)
         tr_corner = (0, 0)
     end
 
-    return block_domain_range(bsize, bl_corner, tr_corner)
+    domain = block_domain_range(bsize, bl_corner, tr_corner)
+    single_strip && return domain
+    if side in first_sides()
+        return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
+    else
+        return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
+    end
 end
 
 
 """
-    ghost_domain(params::ArmonParameters, side::Side.T)
+    ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
 
 [`DomainRange`](@ref) of all ghosts cells of `side`, excluding the corners of the block.
+
+If `single_strip == true`, then the domain is only 1 cell thick, positionned at the furthest ghost
+cell from the real cells.
+Otherwise, there are `ghosts(bsize)` strips of cells: all ghost cells which would be exchanged with
+another block along `side`.
 """
-function ghost_domain(bsize::BlockSize, side::Side.T)
-    g = ghosts(bsize)
+function ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
     domain = border_domain(bsize, side)
-    domain = shift_dir(domain, axis_of(side), side in first_sides() ? -g : g)
-    domain = expand_dir(domain, axis_of(side), g - 1)
-    return domain
+    domain = shift_dir(domain, axis_of(side), side in first_sides() ? -ghosts(bsize) : ghosts(bsize))
+    single_strip && return domain
+    if side in first_sides()
+        return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
+    else
+        return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
+    end
 end
 
 
@@ -183,6 +199,11 @@ size_along(bsize::BlockSize, axis::Axis.T)      = block_size(bsize)[Int(axis)]
 size_along(bsize::BlockSize, side::Side.T)      = size_along(bsize, axis_of(side))
 real_size_along(bsize::BlockSize, axis::Axis.T) = real_block_size(bsize)[Int(axis)]
 real_size_along(bsize::BlockSize, side::Side.T) = real_size_along(bsize, axis_of(side))
+
+face_size(bsize::BlockSize, side::Axis.T)      = prod(block_size(bsize)) ÷ size_along(bsize, side)
+face_size(bsize::BlockSize, side::Side.T)      = face_size(bsize, axis_of(side))
+real_face_size(bsize::BlockSize, side::Axis.T) = prod(real_block_size(bsize)) ÷ real_size_along(bsize, side)
+real_face_size(bsize::BlockSize, side::Side.T) = real_face_size(bsize, axis_of(side))
 
 
 """
@@ -306,68 +327,159 @@ end
 """
     BlockRowIterator(grid::BlockGrid; kwargs...)
     BlockRowIterator(grid::BlockGrid, blk::LocalTaskBlock; kwargs...)
-    BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false)
+    BlockRowIterator(grid::BlockGrid, blk₁_pos, blk₂_pos; kwargs...)
+    BlockRowIterator(grid::BlockGrid, sub_domain::NTuple{2, CartesianIndex}; kwargs...)
+    BlockRowIterator(grid::BlockGrid, row_iter::CartesianIndices; global_ghosts=false, all_ghosts=false)
 
 Iterate the rows of all blocks of the `grid`, row by row (and not block by block).
 This allows to iterate the cells of the `grid` as if it was a single block.
 
+Elements are tuples of `(block, global_row_idx, row_range)`. `row_range` is the range of cells in
+`block` for the current row.
+
 Giving `blk` will return an iterator on the rows of the block.
 
-`sub_grid` defaults to the whole grid: it is a `Tuple` of iterables, one for each axis.
+Giving `blk₁_pos` and `blk₂_pos` will return an iterator over all rows between those blocks.
+
+Giving `sub_domain` will return an iterator including only the cells contained in `sub_domain`.
+`sub_domain` is a cuboid defined by the position of the cells in the whole domain of `grid`, using
+its lower and upper corners.
+
+`row_iter` is a iterator over global row indices.
 
 If `global_ghosts == true`, then the ghost cells of at the border of the global domain are also returned.
 If `all_ghosts == true`, then the ghost cells of at the border of all blocks are also returned.
 
-```julia
-julia> for (blk, row_range) in BlockRowIterator(grid; all_ghosts=true)
-           println(blk.pos, " - ", row_range)
+```jldoctest
+julia> params = ArmonParameters(; N=(24, 8), nghost=4, block_size=(20, 12), use_MPI=false);
+
+julia> grid = BlockGrid(params);
+
+julia> for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid)
+           println(Tuple(blk.pos), " - ", row_idx, " - ", row_range)
        end
-(1, 1) - 1:64
-(2, 1) - 1:64
-(1, 1) - 65:128
-(2, 1) - 65:128
-(1, 1) - 129:192
-(2, 1) - 129:192
-...
+(1, 1) - (1, 1) - 85:96
+(2, 1) - (2, 1) - 85:96
+(1, 1) - (1, 2) - 105:116
+(2, 1) - (2, 2) - 105:116
+(1, 1) - (1, 3) - 125:136
+(2, 1) - (2, 3) - 125:136
+(1, 1) - (1, 4) - 145:156
+(2, 1) - (2, 4) - 145:156
+(1, 2) - (1, 5) - 85:96
+(2, 2) - (2, 5) - 85:96
+(1, 2) - (1, 6) - 105:116
+(2, 2) - (2, 6) - 105:116
+(1, 2) - (1, 7) - 125:136
+(2, 2) - (2, 7) - 125:136
+(1, 2) - (1, 8) - 145:156
+(2, 2) - (2, 8) - 145:156
 ```
 """
-struct BlockRowIterator
-    grid::BlockGrid
-    row_iter::Iterators.ProductIterator
-    global_ghosts::Bool
-    all_ghosts::Bool
+struct BlockRowIterator  # TODO: use have Dim as type param + use NTuple 
+    grid          :: BlockGrid
+    row_iter      :: CartesianIndices
+    rows_per_blk  :: CartesianIndex
+    global_ghosts :: Bool
+    all_ghosts    :: Bool
+end
+
+
+function row_range_from_corners(grid, bl_blk_pos, tr_blk_pos, include_ghosts, last_offset=nothing)
+    if include_ghosts
+        static_row_count = (1, static_block_size(grid)[2:end]...)
+        edge_row_count = (1, (grid.edge_size[2:end] .+ 2*ghosts(grid))...)
+    else
+        static_row_count = (1, real_block_size(grid)[2:end]...)
+        edge_row_count = (1, grid.edge_size[2:end]...)
+    end
+
+    first_row_pos = ifelse.(
+        in_grid.(Ref(bl_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
+        static_row_count .* (bl_blk_pos .- 1) .+ 1,
+        static_row_count .* grid.static_sized_grid .+ 1
+    )
+
+    if last_offset === nothing
+        last_row_pos = ifelse.(
+            in_grid.(Ref(tr_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
+            static_row_count .* tr_blk_pos,
+            static_row_count .* grid.static_sized_grid .+ edge_row_count
+        )
+    else
+        last_row_pos = ifelse.(
+            in_grid.(Ref(tr_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
+            static_row_count .* (tr_blk_pos .- 1) .+ last_offset,
+            static_row_count .* grid.static_sized_grid .+ last_offset
+        )
+    end
+
+    return first_row_pos, last_row_pos
 end
 
 
 BlockRowIterator(grid::BlockGrid; kwargs...) =
-    BlockRowIterator(grid, Base.oneto.(grid.grid_size); kwargs...)
+    BlockRowIterator(grid, 1, grid.grid_size; kwargs...)
 
-function BlockRowIterator(grid::BlockGrid, blk::LocalTaskBlock; kwargs...)
-    # Only iterate the grid at the position of `blk`
-    grid_iter = UnitRange.(Tuple(blk.pos), Tuple(blk.pos))
-    return BlockRowIterator(grid, grid_iter; kwargs...)
+BlockRowIterator(grid::BlockGrid, blk::LocalTaskBlock; kwargs...) =
+    BlockRowIterator(grid, blk.pos, blk.pos; kwargs...)
+
+function BlockRowIterator(grid::BlockGrid, bl_blk_pos, tr_blk_pos; global_ghosts=false, all_ghosts=false)
+    first_row_pos, last_row_pos = row_range_from_corners(
+        grid, Tuple(bl_blk_pos), Tuple(tr_blk_pos), global_ghosts || all_ghosts
+    )
+    row_iter = CartesianIndex(first_row_pos):CartesianIndex(last_row_pos)
+    return BlockRowIterator(grid, row_iter; global_ghosts, all_ghosts)
 end
 
-function BlockRowIterator(grid::BlockGrid, sub_grid; global_ghosts=false, all_ghosts=false)
-    # `sub_grid` is a `Tuple` of iterables
-    bs = block_size(static_block_size(grid))
-    bs = max.(bs, grid.edge_size)  # Include dimensions of edge blocks in case some are bigger than static blocks
-    row_count = (1, bs[2:end]...)
+function BlockRowIterator(grid::BlockGrid, sub_domain::NTuple{2, CartesianIndex}; global_ghosts=false, all_ghosts=false)
+    if global_ghosts || all_ghosts
+        sub_domain_with_ghosts = sub_domain
+        # Build `sub_domain` solely to find which blocks we need
+        sub_domain_bl = CartesianIndex(clamp.(Tuple(sub_domain[1]), 1, grid.cell_size))
+        sub_domain_tr = CartesianIndex(clamp.(Tuple(sub_domain[2]), 1, grid.cell_size))
+        sub_domain = (sub_domain_bl, sub_domain_tr)
+    end
 
-    # Black magic: by intertwining `row_count` and `sub_grid` we create an iterator over all rows
-    # and blocks of the grid, in the same order as if we where iterating cell by cell.
-    # Edge blocks are handled at iteration time.
-    blk_rows_iter = Base.oneto.(row_count)
-    row_iter = Iterators.product(Iterators.flatten(zip(blk_rows_iter, sub_grid))...)
+    # Only iterate the grid for the rows included in `sub_domain` (in real cells)
+    bl_blk_pos, bl_cell_pos = block_pos_containing_cell(grid, sub_domain[1])
+    tr_blk_pos, tr_cell_pos = block_pos_containing_cell(grid, sub_domain[2])
 
-    global_ghosts && error("global_ghosts NYI")  # TODO
+    if global_ghosts || all_ghosts
+        # Shift the original `sub_domain` to global indexing, relative to the origin of the block
+        g = ghosts(grid)
+        bl_cell_pos = Tuple(sub_domain_with_ghosts[1]) .- (Tuple(bl_blk_pos) .- 1) .* real_block_size(grid) .+ g
+        tr_cell_pos = Tuple(sub_domain_with_ghosts[2]) .- (Tuple(tr_blk_pos) .- 1) .* real_block_size(grid) .+ g
+    else
+        bl_cell_pos = Tuple(bl_cell_pos)
+        tr_cell_pos = Tuple(tr_cell_pos)
+    end
 
-    return BlockRowIterator(grid, row_iter, global_ghosts, all_ghosts)
+    bl_row_pos = (1, bl_cell_pos[2:end]...)
+    tr_row_pos = (1, tr_cell_pos[2:end]...)
+
+    first_row_pos, last_row_pos = row_range_from_corners(
+        grid, Tuple(bl_blk_pos), Tuple(tr_blk_pos), global_ghosts || all_ghosts, tr_row_pos
+    )
+    first_row_pos = first_row_pos .+ bl_row_pos .- 1
+
+    row_iter = CartesianIndex(first_row_pos):CartesianIndex(last_row_pos)
+    return BlockRowIterator(grid, row_iter; global_ghosts, all_ghosts)
+end
+
+function BlockRowIterator(grid::BlockGrid, row_iter::CartesianIndices; global_ghosts=false, all_ghosts=false)
+    if global_ghosts || all_ghosts
+        row_count = (1, static_block_size(grid)[2:end]...)
+    else
+        row_count = (1, real_block_size(grid)[2:end]...)
+    end
+    row_count = ifelse.(row_count .≤ 0, grid.edge_size, row_count)
+    return BlockRowIterator(grid, row_iter, CartesianIndex(row_count), global_ghosts, all_ghosts)
 end
 
 
-Base.IteratorSize(::BlockRowIterator) = Base.SizeUnknown()
-Base.eltype(::BlockRowIterator) = Tuple{LocalTaskBlock, UnitRange}
+Base.IteratorSize(::Type{BlockRowIterator}) = Base.SizeUnknown()
+Base.eltype(::Type{BlockRowIterator}) = Tuple{LocalTaskBlock, NTuple{2, Int}, UnitRange}
 
 
 function Base.iterate(iter::BlockRowIterator, row_iter_state=0)
@@ -379,32 +491,48 @@ function Base.iterate(iter::BlockRowIterator, row_iter_state=0)
     end
 
     row_iter_state === nothing && return nothing
-    row_iter_val, row_iter_state = row_iter_state
+    global_row_idx, row_iter_state = row_iter_state
+    global_row_idx = Tuple(global_row_idx)
 
-    # De-intertwine `row_iter_val`
-    row_idx = row_iter_val[1:2:end]
-    blk_idx = row_iter_val[2:2:end]
+    # Block position from the global row index
+    blk_pos = (global_row_idx .- 1) .÷ Tuple(iter.rows_per_blk) .+ 1
+    if !in_grid(blk_pos, iter.grid.static_sized_grid)
+        # In the edge blocks
+        blk_pos = clamp.(blk_pos, 1, iter.grid.grid_size)
+    end
 
-    blk = block_at(iter.grid, CartesianIndex(blk_idx))
+    blk = block_at(iter.grid, CartesianIndex(blk_pos))
     blk_size = block_size(blk)
     block_row_count = (1, Base.tail(blk_size)...)
+    g = ghosts(blk)
 
-    if blk.size isa DynamicBSize
-        # `row_idx` might be outside of `blk`
-        !all(row_idx .≤ block_row_count) && @goto next_row
+    # Local row index
+    row_idx = global_row_idx .- (blk_pos .- 1) .* Tuple(iter.rows_per_blk)
+    if !(iter.all_ghosts || iter.global_ghosts)
+        row_idx = (row_idx[1], (row_idx[2:end] .+ g)...)
     end
 
     on_global_edge = false
-    if iter.all_ghosts
-        # Iterate through all rows
-    elseif iter.global_ghosts && !in_grid(2, blk_idx, iter.grid.grid_size .- 1)
-        # `blk` is on the global grid edge, is the row also on the edge?
-        # TODO
-        on_global_edge = true
-    else
-        # Keep rows with real cells
-        if !all(1 .≤ (row_idx[2:end] .- ghosts(blk.size)) .≤ (block_row_count[2:end] .- 2*ghosts(blk.size)))
-            @goto next_row
+    left_ghosts = false
+    right_ghosts = false
+    if iter.global_ghosts
+        if in_grid(2, blk_pos, iter.grid.grid_size .- 1)
+            # Keep rows with real cells
+            if !all(g .< row_idx[2:end] .≤ (block_row_count[2:end] .- g))
+                @goto next_row
+            end
+        else
+            # `blk` is on the global grid edge. Keep only rows containing real cells or ghost cells on the edge
+            on_global_edge = true
+
+            # Include all rows containing real cells
+            include_row = all(g .< row_idx[2:end] .≤ (block_row_count[2:end] .- g))
+
+            # Include all rows with ghosts along the global edge
+            include_row |= all(blk_pos[2:end] .== 1 .&& row_idx[2:end] .≤ block_row_count[2:end] .- g)
+            include_row |= all(blk_pos[2:end] .== iter.grid.grid_size[2:end] .&& g .< row_idx[2:end])
+
+            !include_row && @goto next_row
         end
     end
 
@@ -415,13 +543,15 @@ function Base.iterate(iter::BlockRowIterator, row_iter_state=0)
     if iter.all_ghosts
         # Keep all cells of the row
     elseif iter.global_ghosts && on_global_edge
-        # TODO: add ghosts to the range
+        # Keep only ghost cells on the global edge
+        left_ghosts = blk_pos[1] == 1
+        right_ghosts = blk_pos[1] == iter.grid.grid_size[1]
+        row_range = (first(row_range) + g * !left_ghosts):(last(row_range) - g * !right_ghosts)
     else
         # Keep only the real cells of the row
-        g = ghosts(blk)
         row_range = (first(row_range) + g):(last(row_range) - g)
     end
 
-    next_element = (blk, row_idx, row_range)
+    next_element = (blk, global_row_idx, row_range)
     return next_element, row_iter_state
 end

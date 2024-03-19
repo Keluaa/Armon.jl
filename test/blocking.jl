@@ -29,7 +29,7 @@
             @test Armon.device_is_host(grid)
             @test Armon.buffers_on_device(grid)
             @test Armon.ghosts(grid) == nghost
-            @test Armon.block_size(Armon.static_block_size(grid)) == block_size
+            @test Armon.static_block_size(grid) == block_size
         end
 
         @testset "Domain" begin
@@ -95,6 +95,18 @@
             end
         end
     end
+
+    @testset "Errors" begin
+        @test_throws "block size (5, 5) is too small" begin
+            ref_params = get_reference_params(:Sod, Float64; N=(100, 100), block_size=(5, 5), nghost=4)
+            Armon.BlockGrid(ref_params)
+        end
+
+        @test_throws "block size (20, 10) is too small" begin
+            ref_params = get_reference_params(:Sod, Float64; N=(100, 100), block_size=(20, 10), nghost=4)
+            Armon.BlockGrid(ref_params)
+        end
+    end
 end
 
 
@@ -157,7 +169,7 @@ end
                 @test size(border) == (expected_size, 1)
             end
 
-            ghost_border = Armon.ghost_domain(bsize, side)
+            ghost_border = Armon.ghost_domain(bsize, side; single_strip=false)
             @test length(ghost_border) == expected_size * Armon.ghosts(bsize)
             if Armon.axis_of(side) == Armon.Axis.X
                 @test size(ghost_border) == (Armon.ghosts(bsize), expected_size)
@@ -183,6 +195,7 @@ end
         (3, ( 16,  33), ( 0,  0)),  # No blocking, only edge blocks
         (4, (100, 100), (57, 57)),  # Edge blocks bigger than static blocks
         (0, (100, 100), (32, 32)),  # 0 ghosts
+        (4, ( 24,   8), (20, 12)),  # Example in doc
     )
         params = ArmonParameters(;
             test=:DebugIndexes, nghost=5, N, block_size=B,
@@ -207,6 +220,71 @@ end
         end
         @test fail_pos === nothing
         @test i - 1 == prod(N)
+
+        # All blocks with only the global domain ghosts
+        total = 0
+        fail_pos = nothing
+        for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid; global_ghosts=true)
+            blk_data = Armon.block_host_data(blk)
+            if !checkbounds(Bool, blk_data.ρ, row_range)
+                fail_pos = (blk.pos, row_idx, row_range)
+                break
+            end
+            total += length(row_range)
+        end
+        @test fail_pos === nothing
+        @test total == prod(N .+ 2g)
+
+        # All blocks with all ghosts
+        total = 0
+        fail_pos = nothing
+        for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid; all_ghosts=true)
+            blk_data = Armon.block_host_data(blk)
+            if !checkbounds(Bool, blk_data.ρ, row_range)
+                fail_pos = (blk.pos, row_idx, row_range)
+                break
+            end
+            total += length(row_range)
+        end
+        total_cells = sum(prod.(Armon.block_size.(Armon.all_blocks(grid))))
+        @test fail_pos === nothing
+        @test total == total_cells
+
+        # Using cell sub domain
+        total = 0
+        fail_pos = nothing
+        for row in 1:N[2]
+            row_start = CartesianIndex(1, row)
+            row_end = CartesianIndex(N[1], row)
+            for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid, (row_start, row_end))
+                blk_data = Armon.block_host_data(blk)
+                if !checkbounds(Bool, blk_data.ρ, row_range)
+                    fail_pos = (blk.pos, row_idx, row_range)
+                    break
+                end
+                total += length(row_range)
+            end
+        end
+        @test fail_pos === nothing
+        @test total == prod(N)
+
+        # Using cell sub domain with ghosts
+        total = 0
+        fail_pos = nothing
+        for row in 1-g:N[2]+g
+            row_start = CartesianIndex(1, row)
+            row_end = CartesianIndex(N[1], row)
+            for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid, (row_start, row_end); global_ghosts=true)
+                blk_data = Armon.block_host_data(blk)
+                if !checkbounds(Bool, blk_data.ρ, row_range)
+                    fail_pos = (blk.pos, row_idx, row_range)
+                    break
+                end
+                total += length(row_range)
+            end
+        end
+        @test fail_pos === nothing
+        @test total == prod(N .+ 2g)
     end
 end
 

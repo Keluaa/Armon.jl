@@ -11,7 +11,7 @@ MPI_JL_ARGS ?= --color=yes
 
 JULIA_THREADS ?= $(MPI_CORES)
 JULIA ?= julia
-JULIA_ARGS ?= -O3 --check-bounds=no --project=$(PROJECT_DIR) -t $(JULIA_THREADS)
+JULIA_ARGS ?= -O3 --project=$(PROJECT_DIR) -t $(JULIA_THREADS)
 
 main_test_file = $(TEST_DIR)/runtests.jl
 create_data_ref_file = $(DATA_REF_DIR)/create_references.jl

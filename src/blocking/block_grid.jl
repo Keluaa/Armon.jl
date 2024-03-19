@@ -31,8 +31,8 @@ struct BlockGrid{
 }
     grid_size          :: NTuple{2, Int}  # Size of the grid, including all local blocks
     static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
-    cell_size          :: NTuple{2, Int}  # Number of cells in each direction
-    edge_size          :: NTuple{2, Int}  # Number of cells in edge blocks in each direction (only along non-edge directions)
+    cell_size          :: NTuple{2, Int}  # Number of real cells in each direction
+    edge_size          :: NTuple{2, Int}  # Number of real cells in edge blocks in each direction (only along non-edge directions)
     device             :: Device
     global_dt          :: GlobalTimeStep{T}
     blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, BS, SState}}
@@ -72,12 +72,13 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
 
     # Main grid container
+    edge_size = remainder_block_size .- 2*ghost
     grid = BlockGrid{
         T, device_array, host_array, buffer_array,
         ghost, typeof(static_size),
         state_type, typeof(params.device)
     }(
-        grid_size, static_sized_grid, cell_size, remainder_block_size, params.device, global_dt,
+        grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
         blocks, edge_blocks, remote_blocks
     )
 
@@ -114,7 +115,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
             if has_neighbour(params, side)
                 # The buffer must be the same size as the side of our block which is a neighbour to...
-                buffer_size = size_along(block_at(grid, our_pos).size, side)
+                buffer_size = real_face_size(block_at(grid, our_pos).size, side)
                 # ...for each variable to communicate of each ghost cell
                 buffer_size *= length(comm_vars()) * params.nghost
 
@@ -152,6 +153,11 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         end
     end
 
+    # Sanity check
+    if sum(prod.(real_block_size.(all_blocks(grid)))) != prod(grid.cell_size)
+        error("failed to create a grid for the $(cell_size) domain with $(params.block_size) blocks and $(params.nghost) ghosts")
+    end
+
     return grid
 end
 
@@ -181,11 +187,15 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
         return ntuple(Returns(1), D), ntuple(Returns(0), D), domain_size .+ 2*ghost
     end
 
+    if any(block_size .< 3*ghost)
+        # 2 ghost regions in all axes + the real cell region should have enough ghost cells to
+        # prevent one block from depending on cells two (or more) blocks away, therefore `≥3*ghost`.
+        solver_error(:config, "block size $block_size is too small for $ghost ghosts cells: \
+                               it should be `≥3*ghosts` for all axes, got: $block_size .< $(3*ghost)")
+    end
+
     # `block_size` includes the number of ghost cells, while `domain_size` is in real cells.
     real_block_size = block_size .- 2*ghost  # number of real cells in a block in each dim
-    if prod(real_block_size) < 1
-        solver_error(:config, "block size $block_size is too small with $ghost ghost cells: $real_block_size")
-    end
 
     grid_size = domain_size .÷ real_block_size
     remainder = domain_size .% real_block_size
@@ -200,11 +210,12 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
     remainder_too_small = 0 .< remainder .< ghost .&& grid_size .> 0
     if any(remainder_too_small)
         remainder = remainder .+ real_block_size .* remainder_too_small
-        grid_size = grid_size .- 1 .* remainder_too_small
+        grid_size = grid_size .- remainder_too_small
+        prod(grid_size) == 0 && (grid_size = ntuple(Returns(0), D))
     end
 
     static_sized_grid = grid_size  # Grid of blocks with a static size
-    prod(remainder) > 0 && (grid_size = grid_size .+ (remainder .> 0))
+    any(remainder .> 0) && (grid_size = grid_size .+ (remainder .> 0))
 
     if prod(grid_size) < 1
         solver_error(:config, "could not partition $domain_size domain into $block_size blocks with $ghost ghost cells")
@@ -303,7 +314,8 @@ device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
 host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
 buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
 ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
-static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = BS
+static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = block_size(BS)
+real_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = real_block_size(BS)
 
 
 """
@@ -512,6 +524,31 @@ end
 host_to_device!(::BlockGrid{<:Any, D, D}) where {D} = nothing
 
 
+"""
+    block_pos_containing_cell(grid::BlockGrid, pos::Union{CartesianIndex, NTuple})
+
+Returns two `CartesianIndex`es: the first is the position of the block containing the cell at `pos`,
+the second is the position of the cell in that block.
+"""
+function block_pos_containing_cell(grid::BlockGrid, pos)
+    if !in_grid(pos, grid.cell_size)
+        error("real cell position $pos is outside of the grid: $(grid.cell_size)")
+    elseif prod(static_block_size(grid)) == 0
+        # No blocking: there is only a single block in the grid
+        return CartesianIndex{length(pos)}(1), CartesianIndex(pos)
+    end
+
+    block_pos = (Tuple(pos) .- 1) .÷ real_block_size(grid) .+ 1
+    if !in_grid(block_pos, grid.static_sized_grid)
+        # In the edge blocks
+        block_pos = clamp.(block_pos, 1, grid.grid_size)
+    end
+
+    cell_pos = Tuple(pos) .- (block_pos .- 1) .* real_block_size(grid)
+    return CartesianIndex(block_pos), CartesianIndex(cell_pos)
+end
+
+
 function print_grid_dimensions(
     io::IO, grid_size::Tuple, static_grid::Tuple, static_block_size::Tuple,
     cell_size::Tuple, ghost; pad=20
@@ -571,7 +608,7 @@ function print_grid_dimensions(
         print_parameter(io, pad, "edge blocks", "$edge_pos_str, containing $edge_cell_ratio of all real cells")
     end
     print_parameter(io, pad, "remote grid", "$remote_block_count remote blocks, \
-        containing $remote_buffers_size cells (total)"; nl=false)
+        containing $remote_buffers_size cells (max)"; nl=false)
 end
 
 

@@ -1,14 +1,29 @@
 
+using Printf
 using MPI
-import CUDA
-using AMDGPU
 
-MPI.Init()
+MPI.Init(; threadlevel=:multiple)
 MPI.Barrier(MPI.COMM_WORLD)
 
 
-TEST_CUDA_MPI = CUDA.functional()   && parse(Bool, get(ENV, "TEST_CUDA_MPI", "false"))
-TEST_ROCM_MPI = AMDGPU.functional() && parse(Bool, get(ENV, "TEST_ROCM_MPI", "false"))
+NX = 100
+NY = 100
+
+
+TEST_CUDA_MPI = if parse(Bool, get(ENV, "TEST_CUDA_MPI", "false"))
+    import CUDA
+    CUDA.functional()
+else
+    false
+end
+
+TEST_ROCM_MPI = if parse(Bool, get(ENV, "TEST_ROCM_MPI", "false"))
+    import AMDGPU
+    AMDGPU.functional()
+else
+    false
+end
+
 
 TEST_TYPES_MPI = (Float64,)
 TEST_CASES_MPI = (:Sod, :Sod_y, :Sod_circ, #=:Sedov,=# :Bizarrium)
@@ -33,31 +48,27 @@ end
 
 
 function read_sub_domain_from_global_domain_file!(params::ArmonParameters, data::BlockGrid, file::IO)
-    error("NYI for BlockGrid")
     # TODO: use HDF5 for this
 
-    (g_nx, g_ny) = params.global_grid
-    (cx, cy) = params.cart_coords
-    (; nghost) = params
-
     # Ranges of the global domain
-    global_cols = 1:g_nx
-    global_rows = 1:g_ny
+    global_cols = 1:params.global_grid[2]
+    global_rows = 1:params.global_grid[1]
     if params.write_ghosts
-        global_cols = Armon.inflate(global_cols, nghost)
-        global_rows = Armon.inflate(global_rows, nghost)
+        global_cols = Armon.inflate(global_cols, params.nghost)
+        global_rows = Armon.inflate(global_rows, params.nghost)
     end
 
     # Ranges of the sub-domain
-    col_range = 1:ny
-    row_range = 1:nx
+    col_range = 1:params.N[2]
+    row_range = 1:params.N[1]
     if params.write_ghosts
-        offset = nghost
+        offset = params.nghost
     else
         offset = 0
     end
 
     # Position of the origin and end of this sub-domain
+    (cx, cy) = params.cart_coords
     pos_x = cx * length(row_range) + 1 - offset
     pos_y = cy * length(col_range) + 1 - offset
     end_x = pos_x + length(row_range) - 1 + offset * 2
@@ -69,14 +80,6 @@ function read_sub_domain_from_global_domain_file!(params::ArmonParameters, data:
     cols_before = first(global_cols):(pos_x-1)
     cols_after = (end_x+1):last(global_cols)
 
-    if params.write_ghosts
-        col_range = Armon.inflate(col_range, nghost)
-        row_range = Armon.inflate(row_range, nghost)
-        offset = nghost
-    else
-        offset = 0
-    end
-
     skip_cells(range) = for _ in range
         skipchars(!=('\n'), file)
         skip(file, 1)  # Skip the '\n'
@@ -86,10 +89,10 @@ function read_sub_domain_from_global_domain_file!(params::ArmonParameters, data:
         if iy in sub_domain_rows
             skip_cells(cols_before)
 
-            # `col_range = iy:iy` since we can only read one row at a time
-            # The offset then transforms `iy` to the local index of the row
-            col_range = (iy:iy) .- col_offset
-            Armon.read_data_from_file(params, data, col_range, row_range, file)
+            # We only read one row at a time
+            col_idx = iy - col_offset  # Transforms `iy` to the local index of the row
+            read_domain = (CartesianIndex(1, col_idx), CartesianIndex(params.N[1], col_idx))
+            Armon.read_data_from_file(params, data, file, read_domain; global_ghosts=params.write_ghosts)
 
             skip_cells(cols_after)
         else
@@ -127,6 +130,17 @@ function ref_params_for_sub_domain(test::Symbol, type::Type, P; overriden_option
 end
 
 
+function non_mpi_params(P, cart_pos; options...)
+    # Utility to create an `ArmonParameters` for any sub-domain, but with MPI disabled
+    params = ArmonParameters(; options..., use_MPI=false)
+    params.proc_size = prod(P)
+    params.proc_dims = P
+    params.cart_coords = cart_pos
+    Armon.init_indexing(params)
+    return params
+end
+
+
 function set_comm_for_grid(P)
     new_grid_size = prod(P)
     global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
@@ -139,7 +153,7 @@ end
 
 
 macro MPI_test(comm, expr, kws...)
-    # Similar to @test in Test.jl
+    # Similar to @test in Test.jl, but the results are gathered to the root process
     skip = [kw.args[2] for kw in kws if kw.args[1] === :skip]
     kws = filter(kw -> kw.args[1] ∉ (:skip, :broken), kws)
     length(skip) > 1 && error("'skip' only allowed once")
@@ -180,14 +194,13 @@ macro root_test(expr, kws...)
 end
 
 
-function test_neighbour_coords(P, proc_in_grid, global_comm)
-    !proc_in_grid && return
-
+function test_neighbour_coords(P, global_comm)
     ref_params = ref_params_for_sub_domain(:Sod, Float64, P; global_comm)
     coords = ref_params.cart_coords
 
-    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.Axis.X)), (coords[2], Armon.sides_along(Armon.Axis.Y))), 
-            side in (coord % 2 == 0 ? sides : reverse(sides))
+    all_ok = true
+    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+            side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
         neighbour_coords = zeros(Int, 2)
@@ -198,26 +211,24 @@ function test_neighbour_coords(P, proc_in_grid, global_comm)
         expected_coords = coords .+ Armon.offset_to(side)
         @test expected_coords == neighbour_coords
         if expected_coords != neighbour_coords
+            all_ok = false
             @debug "[$(ref_params.rank)] $neighbour_rank at $side: expected $expected_coords, got $neighbour_coords"
         end
     end
+
+    return all_ok
 end
 
-NX = 100
-NY = 100
-using Printf
 
 function dump_neighbours(P, proc_in_grid, global_comm)
     !proc_in_grid && return
 
     ref_params = ref_params_for_sub_domain(:Sod, Float64, P; N=(NX, NY), global_comm)
-
     coords = ref_params.cart_coords
-
     neighbour_coords = Dict{Armon.Side.T, Tuple{Int, Int}}()
 
-    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.Axis.X)), (coords[2], Armon.sides_along(Armon.Axis.Y))), 
-            side in (coord % 2 == 0 ? sides : reverse(sides))
+    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+            side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
         n_coords = zeros(Int, 2)
@@ -256,67 +267,93 @@ end
 
 
 function fill_domain_idx(array, domain, val)
-    for (iy, j) in enumerate(domain.col), ix in 1:length(domain.row)
-        i = ix + (j - 1)
-        array[i] = val + iy * 1000 + ix
+    for (iy, j) in enumerate(domain.col), (ix, i) in enumerate(domain.row)
+        idx = i + (j - 1)
+        array[idx] = val + iy * 1000 + ix
     end
 end
 
 
 function check_domain_idx(array, domain, val, my_rank, neighbour_rank)
     diff_count = 0
-    for (iy, j) in enumerate(domain.col), ix in 1:length(domain.row)
-        i = ix + j - 1
+    for (iy, j) in enumerate(domain.col), (ix, i) in enumerate(domain.row)
+        idx = i + j - 1
         expected_val = val + iy * 1000 + ix
-        if expected_val != array[i]
+        if expected_val != array[idx]
             diff_count += 1
-            @debug "[$my_rank] With $neighbour_rank: at ($i,$j) (or $ix,$iy), expected $expected_val, got $(Int(array[i]))"
+            @debug "[$my_rank] With $neighbour_rank: at ($i,$j) (or $ix,$iy), expected $expected_val, got $(array[idx])"
         end
     end
     return diff_count
 end
 
 
-function test_halo_exchange(P, proc_in_grid, global_comm)
-    !proc_in_grid && return
+function positions_along(grid::BlockGrid, side::Armon.Side.T)
+    axis = Armon.axis_of(side)
+    side_pos  = ifelse.(side in Armon.first_sides(), 1, grid.grid_size)
+    first_pos = ifelse.(instances(Armon.Axis.T) .== axis, side_pos, 1)
+    last_pos  = ifelse.(instances(Armon.Axis.T) .== axis, side_pos, grid.grid_size)
+    return CartesianIndex(first_pos):CartesianIndex(last_pos)
+end
 
-    ref_params = ref_params_for_sub_domain(:Sod, Int64, P; N=(NX, NY), global_comm)
-    data = BlockGrid(ref_params)
+
+function test_halo_exchange(P, global_comm)
+    ref_params = ref_params_for_sub_domain(:DebugIndexes, Float64, P; N=(NX, NY), global_comm)
+    block_grid = BlockGrid(ref_params)
     coords = ref_params.cart_coords
 
-    for (coord, sides) in ((coords[1], Armon.sides_along(Armon.Axis.X)), (coords[2], Armon.sides_along(Armon.Axis.Y))), 
-            side in (coord % 2 == 0 ? sides : reverse(sides))
+    if WRITE_FAILED
+        Armon.init_test(ref_params, block_grid)
+        for blk in Armon.all_blocks(block_grid)
+            Armon.block_host_data(blk).ρ .= 0
+        end
+        Armon.device_to_host!(block_grid)
+    end
+
+    total_diff = 0
+    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+            side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
 
-        # TODO: redo
-        # Fill the domain we send with predictable data, with indexes encoded into the data
-        domain = Armon.border_domain(ref_params, side)
-        fill_domain_idx(device(data).rho, domain, ref_params.rank * 1_000_000)
+        for pos in positions_along(block_grid, side)
+            @testset let blk = Armon.block_at(block_grid, pos)
+                test_array = Armon.block_host_data(blk).ρ
 
-        # "Halo exchange", but with one neighbour at a time
-        comm_array = Armon.get_send_comm_array(data, side)
-        Armon.read_border_array!(ref_params, data, comm_array, side)
-        wait(ref_params)
+                # Fill the real domain we send with predictable data, with indexes encoded into the data
+                domain = Armon.border_domain(blk.size, side; single_strip=false)
+                fill_domain_idx(test_array, domain, (ref_params.rank + 1) * 1_000_000)
+                Armon.host_to_device!(blk)
 
-        requests = data.requests[side]
-        MPI.Start(requests.send)
-        MPI.Start(requests.recv)
+                # Halo exchange, but with one neighbour at a time
+                remote_blk = blk.neighbours[Int(side)]
+                @root_test length(domain) * length(Armon.comm_vars()) == length(remote_blk.send_buf.data)
+                if !Armon.start_exchange(ref_params, blk, remote_blk, side)
+                    MPI.Waitall(remote_blk.requests)
+                    @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
+                end
 
-        MPI.Wait(requests.send)
-        MPI.Wait(requests.recv)
-
-        comm_array = Armon.get_recv_comm_array(data, side)
-        Armon.copy_from_recv_buffer!(data, comm_array, side)
-        Armon.write_border_array!(ref_params, data, comm_array, side)
-        wait(ref_params)
-
-        # Check if the received array was correctly pasted into our ghost domain
-        g_domain = Armon.ghost_domain(ref_params, side)
-        diff_count = check_domain_idx(device(data).rho, g_domain, neighbour_rank * 1_000_000, ref_params.rank, neighbour_rank)
-
-        @test diff_count == 0
+                # Check if the received array was correctly pasted into our ghost domain
+                Armon.device_to_host!(blk)
+                ghost_domain = Armon.ghost_domain(blk.size, side; single_strip=false)
+                diff_count = check_domain_idx(test_array, ghost_domain, (neighbour_rank + 1) * 1_000_000, ref_params.rank, neighbour_rank)
+                total_diff += diff_count
+            end
+        end
     end
+
+    if WRITE_FAILED
+        global_diff_count = MPI.Allreduce(total_diff, MPI.SUM, global_comm)
+        if global_diff_count > 0
+            p_str = join(P, '×')
+            Armon.write_sub_domain_file(
+                ref_params, block_grid, "xchg_$(p_str)";
+                no_msg=true, all_ghosts=true, vars=(:x, :y, :ρ)
+            )
+        end
+    end
+
+    return total_diff == 0
 end
 
 
@@ -327,10 +364,13 @@ function test_reference(prefix, comm, test, type, P; kwargs...)
         dt, cycles, data = run_armon_reference(ref_params)
         ref_dt, ref_cycles, ref_data = ref_data_for_sub_domain(ref_params)
 
-        @root_test dt ≈ ref_dt atol=abs_tol(type, ref_params.test) rtol=rel_tol(type, ref_params.test)
+        atol = abs_tol(type, ref_params.test)
+        rtol = rel_tol(type, ref_params.test)
+        @root_test dt ≈ ref_dt atol=atol rtol=rtol
         @root_test cycles == ref_cycles
 
         diff_count, _ = count_differences(ref_params, data, ref_data)
+        diff_count += (cycles != ref_cycles) + !isapprox(dt, ref_dt; atol, rtol)
 
         diff_count, data, ref_data
     catch e
@@ -340,18 +380,18 @@ function test_reference(prefix, comm, test, type, P; kwargs...)
         -1, nothing, nothing
     end
 
-    if WRITE_FAILED
-        global_diff_count = MPI.Allreduce(diff_count, MPI.SUM, comm)
+    global_diff_count = MPI.Allreduce(diff_count, MPI.SUM, comm)
+    if WRITE_FAILED && global_diff_count > 0
+        println("[$(MPI.Comm_rank(comm))]: found $diff_count")
         if global_diff_count > 0 && diff_count >= 0
             prefix *= isempty(prefix) ? "" : "_"
             p_str = join(P, '×')
             Armon.write_sub_domain_file(ref_params, data, "$(prefix)test_$(test)_$(type)_$(p_str)"; no_msg=true)
             Armon.write_sub_domain_file(ref_params, ref_data, "$(prefix)ref_$(test)_$(type)_$(p_str)"; no_msg=true)
         end
-        println("[$(MPI.Comm_rank(comm))]: found $diff_count")
     end
 
-    return diff_count == 0
+    return global_diff_count == 0
 end
 
 
@@ -385,13 +425,16 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
         # dump_neighbours(P, proc_in_grid, comm)
 
         @testset "Neighbours" begin
-            test_neighbour_coords(P, proc_in_grid, comm)
+            @MPI_test comm begin
+                test_neighbour_coords(P, comm)
+            end skip=!enough_processes || !proc_in_grid
         end
 
         @testset "Halo exchange" begin
-            test_halo_exchange(P, proc_in_grid, comm)
+            @MPI_test comm begin
+                test_halo_exchange(P, comm)
+            end skip=!enough_processes || !proc_in_grid
         end
-
 
         @testset "CPU" begin
             @testset "Reference" begin
@@ -411,7 +454,7 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
                         )
 
                         data = BlockGrid(ref_params)
-                        init_test(ref_params, data)
+                        Armon.init_test(ref_params, data)
 
                         init_mass, init_energy = Armon.conservation_vars(ref_params, data)
                         Armon.time_loop(ref_params, data)
@@ -427,7 +470,6 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
             end
         end
 
-
         @testset "CUDA" begin
             @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
                 @MPI_test comm begin
@@ -436,7 +478,6 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
             end
         end
 
-
         @testset "ROCm" begin
             @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
                 @MPI_test comm begin
@@ -444,7 +485,6 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
                 end skip=!TEST_ROCM_MPI || !enough_processes || !proc_in_grid
             end
         end
-
 
         @testset "Kokkos" begin
             @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI

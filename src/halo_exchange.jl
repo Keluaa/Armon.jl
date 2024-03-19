@@ -244,7 +244,7 @@ end
     itr = @iter_idx()
 
     (i, i_g) = divrem(itr - 1, ghosts(bsize))
-    i_arr = (i_g * size_along(bsize, side) + i) * N
+    i_arr = (i_g * real_face_size(bsize, side) + i) * N
 
     # TODO: KernelAbstractions.Extras.@unroll ??
     for v in 1:N
@@ -260,12 +260,79 @@ end
     itr = @iter_idx()
 
     (i, i_g) = divrem(itr - 1, ghosts(bsize))
-    i_arr = (i_g * size_along(bsize, side) + i) * N
+    i_arr = (i_g * real_face_size(bsize, side) + i) * N
 
     # TODO: KernelAbstractions.Extras.@unroll ??
     for v in 1:N
-        array[i_arr+v] = vars[v][idx]
+        vars[v][idx] = array[i_arr+v]
     end
+end
+
+
+"""
+    start_exchange(
+        params::ArmonParameters,
+        blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
+    ) where {D, H, B}
+
+Start the exchange between one local block and a remote block from another sub-domain.
+Returns `true` if the exchange is [`BlockExchangeState.Done`](@ref), `false` if
+[`BlockExchangeState.InProgress`](@ref).
+"""
+function start_exchange(
+    params::ArmonParameters,
+    blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
+) where {D, H, B}
+    buffer_are_on_device = D == B
+    if !buffer_are_on_device
+        # MPI buffers are not located where the up-to-date data is: we must to a copy first.
+        device_to_host!(blk)
+    end
+
+    send_domain = border_domain(blk.size, side; single_strip=false)
+    vars = comm_vars(blk; on_device=buffer_are_on_device)
+    # TODO: run on host if `D != B`, or perform it on the device on a tmp array
+    pack_to_array!(params, send_domain, blk.size, side, other_blk.send_buf.data, vars)
+
+    wait(params)  # Wait for the copy to complete
+
+    # TODO: use RMA with processes local to the node.
+    MPI.Startall(other_blk.requests)
+
+    return false
+end
+
+
+"""
+    finish_exchange(
+        params::ArmonParameters,
+        blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
+    ) where {D, H, B}
+
+Finish the exchange between one local block and a remote block from another sub-domain, if MPI
+communications are done.
+Returns `true` if the exchange is [`BlockExchangeState.Done`](@ref), `false` if
+[`BlockExchangeState.InProgress`](@ref).
+"""
+function finish_exchange(
+    params::ArmonParameters,
+    blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
+) where {D, H, B}
+    # Finish the exchange between one local block and a remote block from another sub-domain
+    !MPI.Testall(other_blk.requests) && return false  # Still waiting
+
+    recv_domain = ghost_domain(blk.size, side; single_strip=false)
+    buffer_are_on_device = D == B
+    vars = comm_vars(blk; on_device=buffer_are_on_device)
+    # TODO: run on host if `D != B`
+    unpack_from_array!(params, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+
+    if !buffer_are_on_device
+        # MPI buffers are not where we want the data to be. Retreive the result of the exchange.
+        host_to_device!(blk)
+    end
+
+    return true
 end
 
 
@@ -280,44 +347,15 @@ function block_ghost_exchange(
     end
 
     # Exchange between one local block and a remote block from another sub-domain
-    send_domain = border_domain(blk.size, side)
-    recv_domain = shift_dir(send_domain, axis_of(side), side in first_sides() ? -ghosts(blk.size) : ghosts(blk.size))
-
-    buffer_are_on_device = D == B
-
     if exchange_state(blk, side) == BlockExchangeState.NotReady
-        if !buffer_are_on_device
-            # MPI buffers are not located where the up-to-date data is: we must to a copy first.
-            device_to_host!(blk)
-        end
-
-        vars = comm_vars(blk; on_device=D == B)
-        pack_to_array!(params, send_domain, blk.size, side, other_blk.send_buf.data, vars)  # TODO: run on host if `D != B`, or perform it on the device on a tmp array
-
-        wait(params)  # Wait for the copy to complete
-
-        # TODO: use RMA with processes local to the node.
-        MPI.Start(send_request)
-        MPI.Start(recv_request)
-
-        exchange_state!(blk, side, BlockExchangeState.InProgress)
-        return BlockExchangeState.InProgress
+        exchange_ended = start_exchange(params, blk, other_blk, side)
     else
-        if !(MPI.Test(send_request) && MPI.Test(recv_request))  # TODO: `Test` deallocates, so it might be needed to use a `MPI.MultiRequest` + `MPI.Testall` instead
-            return BlockExchangeState.InProgress  # Still waiting
-        end
-
-        vars = comm_vars(blk; on_device=D == B)
-        unpack_from_array!(params, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)  # TODO: run on host if `D != B`
-
-        if !buffer_are_on_device
-            # MPI buffers are not where we want the data to be. Retreive the result of the exchange.
-            host_to_device!(blk)
-        end
-
-        exchange_state!(blk, side, BlockExchangeState.Done)
-        return BlockExchangeState.Done
+        exchange_ended = finish_exchange(params, blk, other_blk, side)
     end
+
+    new_state = exchange_ended ? BlockExchangeState.Done : BlockExchangeState.InProgress
+    exchange_state!(blk, side, new_state)
+    return new_state
 end
 
 
