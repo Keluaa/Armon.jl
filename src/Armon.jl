@@ -10,8 +10,7 @@ using TimerOutputs
 using Preferences
 using EnumX
 
-export ArmonParameters, BlockGrid, SolverStats, armon, data_type, memory_required
-export device_to_host!, host_to_device!
+export ArmonParameters, BlockGrid, SolverStats, armon
 
 # Forward declarations
 abstract type Limiter end
