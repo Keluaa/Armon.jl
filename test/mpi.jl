@@ -200,9 +200,10 @@ end
 function test_neighbour_coords(P, global_comm)
     ref_params = ref_params_for_sub_domain(:Sod, Float64, P; global_comm)
     coords = ref_params.cart_coords
+    dim = length(P)
 
     all_ok = true
-    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+    for (coord, axis) in zip(coords, Armon.axes_of(ndims(dim))),
             side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -211,7 +212,7 @@ function test_neighbour_coords(P, global_comm)
                       dest=neighbour_rank, source=neighbour_rank)
         neighbour_coords = tuple(neighbour_coords...)
 
-        expected_coords = coords .+ Armon.offset_to(side)
+        expected_coords = coords .+ Armon.offset_to(side, dim)
         @test expected_coords == neighbour_coords
         if expected_coords != neighbour_coords
             all_ok = false
@@ -230,7 +231,7 @@ function dump_neighbours(P, proc_in_grid, global_comm)
     coords = ref_params.cart_coords
     neighbour_coords = Dict{Armon.Side.T, Tuple{Int, Int}}()
 
-    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+    for (coord, axis) in zip(coords, Armon.axes_of(ndims(ref_params))),
             side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -248,7 +249,7 @@ function dump_neighbours(P, proc_in_grid, global_comm)
     end
 
     println("[$(ref_params.rank)]: $(coords)")
-    for side in instances(Armon.Side.T)
+    for side in Armon.sides_of(ndims(ref_params))
         if Armon.has_neighbour(ref_params, side)
             neighbour_rank = Armon.neighbour_at(ref_params, side)
             @printf(" - %6s: [%2d] = %6s (expected: %6s)",
@@ -293,9 +294,9 @@ end
 
 function positions_along(grid::BlockGrid, side::Armon.Side.T)
     axis = Armon.axis_of(side)
-    side_pos  = ifelse.(side in Armon.first_sides(), 1, grid.grid_size)
-    first_pos = ifelse.(instances(Armon.Axis.T) .== axis, side_pos, 1)
-    last_pos  = ifelse.(instances(Armon.Axis.T) .== axis, side_pos, grid.grid_size)
+    side_pos  = ifelse.(side in Armon.first_sides(ndims(grid)), 1, grid.grid_size)
+    first_pos = ifelse.(Armon.axes_of(ndims(grid)) .== axis, side_pos, 1)
+    last_pos  = ifelse.(Armon.axes_of(ndims(grid)) .== axis, side_pos, grid.grid_size)
     return CartesianIndex(first_pos):CartesianIndex(last_pos)
 end
 
@@ -314,7 +315,7 @@ function test_halo_exchange(P, global_comm)
     end
 
     total_diff = 0
-    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+    for (coord, axis) in zip(coords, Armon.axes_of(ndims(block_grid))),
             side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)

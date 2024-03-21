@@ -982,7 +982,7 @@ end
 #
 
 function compute_steps_ranges(params::ArmonParameters)
-    params.steps_ranges = collect(compute_steps_ranges.(instances(Axis.T), params.nghost, Ref(params.projection_scheme)))
+    params.steps_ranges = collect(compute_steps_ranges.(axes_of(length(params.N)), params.nghost, Ref(params.projection_scheme)))
 end
 
 function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme)

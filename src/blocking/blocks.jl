@@ -95,6 +95,7 @@ block_size(blk::LocalTaskBlock) = block_size(blk.size)
 real_block_size(blk::LocalTaskBlock) = real_block_size(blk.size)
 ghosts(blk::LocalTaskBlock) = ghosts(blk.size)
 solver_state(blk::LocalTaskBlock) = blk.state
+Base.ndims(blk::LocalTaskBlock) = ndims(blk.size)
 
 block_device_data(blk::LocalTaskBlock) = blk.device_data
 block_host_data(blk::LocalTaskBlock) = blk.host_data

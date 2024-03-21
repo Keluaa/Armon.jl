@@ -159,22 +159,3 @@ analyse_log_stats
 BlockGridLogStats
 BLOCK_LOG_THREAD_LOCAL_STORAGE
 ```
-
-## Utility
-
-```@docs
-Axis
-Side
-SolverException
-@section
-```
-
-### NUMA utilities
-
-```@docs
-array_pages
-touch_pages
-move_pages(::Vector{Ptr{T}}, ::Any) where T
-lock_pages(::Ptr, ::Any)
-unlock_pages
-```
