@@ -10,64 +10,297 @@ end
 """
     Axis
 
-Enumeration of the axes of the domain
+Enumeration of the axes of a domain. Accepts values from `1` (X axis) to `126`.
+Only the first 3 axes are explicitly named.
 """
-@enumx Axis X=1 Y=2
+module Axis
+    primitive type T <: Base.Enums.Enum{UInt8} 8 end 
 
-next_axis(axis::Axis.T) = Axis.T(mod1(Int(axis) + 1, length(instances(Axis.T))))
+    function T(a::Integer)
+        !(1 ≤ a ≤ 126) && throw(ArgumentError("Axis index must be ≥ 1 and ≤ 126"))
+        return Core.bitcast(T, Base.convert(UInt8, a))
+    end
+
+    (::Type{UInt8})(a::T) = UInt8(Core.bitcast(UInt8, a))::UInt8
+    Base.cconvert(::Type{UInt8}, a::T) = UInt8(a)::UInt8
+
+    Base.typemin(::Type{T}) = T(UInt8(1))
+    Base.typemax(::Type{T}) = T(UInt8(126))  # Nearest multiple of two before `typemax(UInt8)÷2`
+
+    axis_name(a::UInt8) = a ≤ 3 ? (:X, :Y, :Z)[a] : Symbol(:Axis_, a)
+    axis_name(a::T) = axis_name(UInt8(a))
+    Base.Symbol(a::T) = axis_name(a)
+    Base.Enums._symbol(a::T) = axis_name(a)
+
+    Base.show(io::IO, ::MIME"text/plain", a::T) = print(io, a, "::Axis.T = ", Integer(a))
+
+    function Base.show(io::IO, ::MIME"text/plain", st::Type{T})
+        println(io, "Enum Axis:")
+        for x in 1:7
+            println(io, " Axis.", Symbol(T(x)), " = ", x)
+        end
+        print(io, " ... (up to Axis.$(typemax(T)))")
+    end
+
+    let type_hash = hash(T)
+        Base.Enums._enum_hash(a::T, h::UInt) = Base.Enums.hash(type_hash, Base.Enums.hash(Integer(a), h))
+    end
+
+    Base.instances(::Type{T}) = error("instances of Axis should not be iterated, use `axes_of(dim)`")
+    Base.Enums.namemap(::Type{T}) = error("names of Axis should not be iterated, use `Symbol.(axes_of(dim))`")
+
+    const X = T(1)
+    const Y = T(2)
+    const Z = T(3)
+end
+
+
+"""
+    axes_of(::Val{dim})
+    axes_of(dim::Integer)
+
+Axes for all dimensions up to `dim`.
+    
+```jldoctest
+julia> Armon.axes_of(3)
+(Armon.Axis.X, Armon.Axis.Y, Armon.Axis.Z)
+```
+"""
+axes_of(::Val{dim}) where {dim} = ntuple(Axis.T, dim)
+axes_of(dim::Integer) = axes_of(Val(dim))
+
+
+"""
+    next_axis(axis::Axis.T, ::Val{dim})
+    next_axis(axis::Axis.T, dim::Integer)
+
+The axis after `axis`, mod `dim`.
+
+```jldoctest
+julia> Armon.next_axis(Armon.Axis.X, 3)
+Y::Axis.T = 2
+
+julia> Armon.next_axis(Armon.Axis.Z, 3)
+X::Axis.T = 1
+```
+"""
+next_axis(axis::Axis.T, ::Val{dim}) where {dim} = Axis.T(mod1(UInt(axis) + 1, dim))
+next_axis(axis::Axis.T, dim::Integer) = next_axis(axis, Val(dim))
 
 
 """
     Side
 
-Enumeration of the sides of the domain
+Enumeration of the sides of a domain. Accepts values from `1` (Left side) to `254`.
+Only the sides of the first 3 axes are explicitly named.
 """
-@enumx Side Left=1 Right=2 Bottom=3 Top=4
+module Side
+    primitive type T <: Base.Enums.Enum{UInt8} 8 end 
 
-@inline sides_along(dir::Axis.T) = dir == Axis.X ? (Side.Left, Side.Right) : (Side.Bottom, Side.Top)
+    function T(s::Integer)
+        !(1 ≤ s ≤ 254) && throw(ArgumentError("Side index must be ≥ 1 and ≤ 254"))
+        return Core.bitcast(T, Base.convert(UInt8, s))
+    end
 
-@inline first_side(dir::Axis.T) = dir == Axis.X ? Side.Left : Side.Bottom
-@inline first_sides() = (Side.Left, Side.Bottom)
+    (::Type{UInt8})(s::T) = UInt8(Core.bitcast(UInt8, s))::UInt8
+    Base.cconvert(::Type{UInt8}, s::T) = UInt8(s)::UInt8
 
-@inline last_side(dir::Axis.T) = dir == Axis.X ? Side.Right : Side.Top
-@inline last_sides() = (Side.Right, Side.Top)
+    Base.typemin(::Type{T}) = T(UInt8(1))
+    Base.typemax(::Type{T}) = T(UInt8(254))  # Nearest multiple of two before `typemax(UInt8)`
 
-@inline function axis_of(side::Side.T)
-    # TODO: `Axis.T(((Integer(side) - 1) >> 1) + 1)` ??
-    if     side == Side.Left   return Axis.X
-    elseif side == Side.Right  return Axis.X
-    elseif side == Side.Bottom return Axis.Y
-    elseif side == Side.Top    return Axis.Y
-    else                       return Axis.X  # Should not happen, here only for type-stability
+    side_name(s::UInt8) = s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Back, :Front)[s] : Symbol(:Side_, s)
+    side_name(s::T) = side_name(UInt8(s))
+    Base.Symbol(s::T) = side_name(s)
+    Base.Enums._symbol(s::T) = side_name(s)
+
+    Base.show(io::IO, ::MIME"text/plain", s::T) = print(io, s, "::Side.T = ", Integer(s))
+
+    function Base.show(io::IO, ::MIME"text/plain", st::Type{T})
+        println(io, "Enum Side:")
+        for x in 1:7
+            println(io, " Side.", Symbol(T(x)), " = ", x)
+        end
+        print(io, " ... (up to Side.$(typemax(T)))")
+    end
+
+    let type_hash = hash(T)
+        Base.Enums._enum_hash(s::T, h::UInt) = Base.Enums.hash(type_hash, Base.Enums.hash(Integer(s), h))
+    end
+
+    Base.instances(::Type{T}) = error("instances of Side should not be iterated, use `sides_of(dim)`")
+    Base.Enums.namemap(::Type{T}) = error("names of Side should not be iterated, use `Symbol.(sides_of(dim))`")
+
+    const Left   = T(1)
+    const Right  = T(2)
+    const Bottom = T(3)
+    const Top    = T(4)
+    const Back   = T(5)
+    const Front  = T(6)
+end
+
+
+"""
+    sides_of(::Val{dim})
+    sides_of(dim::Integer)
+
+Sides for all dimensions up to `dim`.
+
+```jldoctest
+julia> Armon.sides_of(2)
+(Armon.Side.Left, Armon.Side.Right, Armon.Side.Bottom, Armon.Side.Top)
+```
+"""
+sides_of(::Val{dim}) where {dim} = ntuple(Side.T, dim*2)
+sides_of(dim::Integer) = sides_of(Val(dim))
+
+
+"""
+    sides_along(ax::Axis.T)
+
+Sides before and after `ax`.
+
+```jldoctest
+julia> Armon.sides_along(Armon.Axis.X)
+(Armon.Side.Left, Armon.Side.Right)
+
+julia> Armon.sides_along(Armon.Axis.Z)
+(Armon.Side.Back, Armon.Side.Front)
+```
+"""
+sides_along(ax::Axis.T) = (Side.T(2*UInt8(ax)-1), Side.T(2*UInt8(ax)))
+
+
+"""
+    first_side(ax::Axis.T)
+
+The first side of `sides_along(ax)`. Always at the lowest coordinates of `ax`.
+"""
+first_side(ax::Axis.T) = Side.T(2*UInt8(ax)-1)
+
+
+"""
+    first_side(s::Side.T)
+
+`true` if `s` is the first side of an axis.
+"""
+first_side(s::Side.T) = isodd(Integer(s))
+
+
+"""
+    first_sides(::Val{dim})
+    first_sides(dim::Integer)
+
+Tuple of the first sides of all axes up to `dim`.
+
+```jldoctest
+julia> Armon.first_sides(3)
+(Armon.Side.Left, Armon.Side.Bottom, Armon.Side.Back)
+```
+"""
+first_sides(::Val{dim}) where {dim} = ntuple(d -> Side.T(2*d-1), dim)
+first_sides(dim::Integer) = first_sides(Val(dim))
+
+
+"""
+    last_side(ax::Axis.T)
+
+The last side of `sides_along(ax)`. Always at the highest coordinates of `ax`.
+"""
+last_side(ax::Axis.T) = Side.T(2*UInt8(ax))
+
+
+"""
+    last_side(ax::Axis.T)
+
+`true` if `s` is the last side of an axis.
+"""
+last_side(s::Side.T) = iseven(Integer(s))
+
+
+"""
+    last_sides(::Val{dim})
+    last_sides(dim::Integer)
+
+Tuple of the last sides of all axes up to `dim`.
+
+```jldoctest
+julia> Armon.last_sides(3)
+(Armon.Side.Right, Armon.Side.Top, Armon.Side.Front)
+```
+"""
+last_sides(::Val{dim}) where {dim} = ntuple(d -> Side.T(2*d), dim)
+last_sides(dim::Integer) = last_sides(Val(dim))
+
+
+"""
+    axis_of(s::Side.T)
+
+[`Axis`](@ref) this [`Side`](@ref) belongs to.
+
+```jldoctest
+julia> Armon.axis_of(Armon.Side.Left)
+X::Axis.T = 1
+```
+"""
+axis_of(s::Side.T) = Axis.T((Integer(s) - 1) >> 1 + 1)
+
+
+"""
+    opposite_of(s::Side.T)
+
+The [`Side`](@ref) opposite of `s`.
+
+```jldoctest
+julia> Armon.opposite_of(Armon.Side.Left)
+Right::Side.T = 2
+```
+"""
+opposite_of(s::Side.T) = first_side(s) ? Side.T(Integer(s)+1) : Side.T(Integer(s)-1)
+
+
+"""
+    offset_of(s::Side.T, dim::Integer)
+
+An `NTuple{dim, Int}` offset going towards `s`.
+
+```jldoctest
+julia> Armon.offset_to(Armon.Side.Left, 2)
+(-1, 0)
+
+julia> Armon.offset_to(Armon.Side.Top, 3)
+(0, 1, 0)
+```
+"""
+function offset_to(s::Side.T, dim::Integer)
+    i_ax = Integer(axis_of(s))
+    if first_side(s)
+        return ntuple(i -> i == i_ax ? -1 : 0, dim)
+    else
+        return ntuple(i -> i == i_ax ?  1 : 0, dim)
     end
 end
 
-@inline function opposite_of(side::Side.T)
-    if     side == Side.Left   return Side.Right
-    elseif side == Side.Right  return Side.Left
-    elseif side == Side.Bottom return Side.Top
-    elseif side == Side.Top    return Side.Bottom
-    else                       return Side.Left  # Should not happen, here only for type-stability
-    end
-end
 
-@inline function offset_to(side::Side.T)
-    if     side == Side.Left   return (-1,  0)
-    elseif side == Side.Right  return ( 1,  0)
-    elseif side == Side.Bottom return ( 0, -1)
-    elseif side == Side.Top    return ( 0,  1)
-    else                       return ( 0,  0)  # Should not happen, here only for type-stability
-    end
-end
+"""
+    side_from_offset(offset::NTuple{D, <:Integer})
 
+Opposite of [`offset_to`](@ref): deduces the [`Side`](@ref) from the offset.
+If `offset` is all zeros, `Side.Left` is returned.
 
-@inline function side_from_offset(offset::Tuple)
-    if     offset[1] < 0 return Side.Left
-    elseif offset[1] > 0 return Side.Right
-    elseif offset[2] < 0 return Side.Bottom
-    elseif offset[2] > 0 return Side.Top
-    else                 return Side.Left  # Should not happen, here only for type-stability (responsability of the caller)
+```jldoctest
+julia> Armon.side_from_offset((-1, 0))
+Left::Side.T = 1
+
+julia> Armon.side_from_offset((0, 1, 0))
+Top::Side.T = 4
+```
+"""
+function side_from_offset(offset::NTuple{D, <:Integer}) where {D}
+    for (i_ax, o) in enumerate(offset)
+        o < 0 && return first_side(Axis.T(i_ax))
+        o > 0 && return last_side(Axis.T(i_ax))
     end
+    return Side.Left  # Should not happen, here only for type-stability (responsability of the caller)
 end
 
 

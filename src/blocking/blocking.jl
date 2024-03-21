@@ -164,7 +164,7 @@ function border_domain(bsize::BlockSize, side::Side.T; single_strip=true)
 
     domain = block_domain_range(bsize, bl_corner, tr_corner)
     single_strip && return domain
-    if side in first_sides()
+    if side in first_sides(ndims(bsize))
         return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
     else
         return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
@@ -184,9 +184,9 @@ another block along `side`.
 """
 function ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
     domain = border_domain(bsize, side)
-    domain = shift_dir(domain, axis_of(side), side in first_sides() ? -ghosts(bsize) : ghosts(bsize))
+    domain = shift_dir(domain, axis_of(side), side in first_sides(ndims(bsize)) ? -ghosts(bsize) : ghosts(bsize))
     single_strip && return domain
-    if side in first_sides()
+    if side in first_sides(ndims(bsize))
         return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
     else
         return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
@@ -415,7 +415,7 @@ function row_range_from_corners(grid, bl_blk_pos, tr_blk_pos, include_ghosts, la
         # The default is to iterate over all rows, so we want the number of rows in `tr_blk_pos`
         edge_size = (1, (grid.edge_size[2:end] .+ (include_ghosts ? 2*ghosts(grid) : 0))...)
         last_offset = ifelse.(
-            in_grid.(Ref(tr_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
+            in_grid.(Ref(tr_blk_pos), Ref(grid.static_sized_grid), axes_of(ndims(grid))),
             static_row_count,
             edge_size
         )

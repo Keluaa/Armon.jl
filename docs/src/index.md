@@ -136,12 +136,3 @@ memory_required
 @threaded
 @threads
 ```
-
-## Utility
-
-```@docs
-Axis
-Side
-SolverException
-@section
-```

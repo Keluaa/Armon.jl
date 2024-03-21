@@ -7,7 +7,7 @@
     @kernel_init begin
         # `incr` is the stride of `axis` going towards the edge along `side`
         incr = stride_along(bsize, axis)
-        incr = ifelse(side in first_sides(), -incr, incr)
+        incr = ifelse(side in first_sides(ndims(bsize)), -incr, incr)
     end
 
     i = @index_2D_lin()
@@ -70,12 +70,12 @@ end
 
         # Offsets going towards the ghost cells
         sg  = stride_along(bsize, axis)
-        sg₁ = ifelse(side₁ in first_sides(), -sg, sg)
+        sg₁ = ifelse(side₁ in first_sides(ndims(bsize)), -sg, sg)
         sg₂ = -sg₁
 
         # Convertion from `i₁` to `i₂`, exploiting the fact that both blocks have the same size
         d₂ = stride_along(bsize, axis) * (real_size_along(bsize, axis) - 1)
-        d₂ = ifelse(side₂ in first_sides(), -d₂, d₂)
+        d₂ = ifelse(side₂ in first_sides(ndims(bsize)), -d₂, d₂)
     end
 
     i₁ = @index_2D_lin()
@@ -126,8 +126,8 @@ end
         # Offsets going towards the ghost cells
         sg₁ = stride_along(bsize₁, axis)
         sg₂ = stride_along(bsize₂, axis)
-        sg₁ = ifelse(side₁ in first_sides(), -sg₁, sg₁)
-        sg₂ = ifelse(side₂ in first_sides(), -sg₂, sg₂)
+        sg₁ = ifelse(side₁ in first_sides(ndims(bsize₁)), -sg₁, sg₁)
+        sg₂ = ifelse(side₂ in first_sides(ndims(bsize₁)), -sg₂, sg₂)
     end
 
     i₁ = @index_2D_lin()
@@ -137,13 +137,13 @@ end
     I₁ = position(bsize₁, i₁)
 
     # TODO: cleanup
-    I₂x = ifelse(side₂ in sides_along(Axis.X), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[1]), I₁[1])
-    I₂y = ifelse(side₂ in sides_along(Axis.Y), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[2]), I₁[2])
+    I₂x = ifelse(side₂ in sides_along(Axis.X), ifelse(side₂ in first_sides(ndims(bsize₁)), 1, real_block_size(bsize₂)[1]), I₁[1])
+    I₂y = ifelse(side₂ in sides_along(Axis.Y), ifelse(side₂ in first_sides(ndims(bsize₁)), 1, real_block_size(bsize₂)[2]), I₁[2])
     I₂ = (I₂x, I₂y)
     # TODO: Unreadable but efficient and dimension-agnostic?
     # I₂ = ifelse.(
     #     in.(side₂, (sides_along(Axis.X), sides_along(Axis.Y))),
-    #     ifelse.(side₂ in first_sides(), 1, real_block_size(bsize₂)),
+    #     ifelse.(side₂ in first_sides(ndims(bsize₁)), 1, real_block_size(bsize₂)),
     #     I₁
     # )
 

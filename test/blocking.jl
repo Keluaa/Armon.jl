@@ -14,6 +14,7 @@
         )
         ref_params = get_reference_params(:Sod, Float64; N, block_size, nghost)
         grid = Armon.BlockGrid(ref_params)
+        dim = ndims(grid)
 
         @testset "Grid" begin
             if prod(block_size) > 0
@@ -65,7 +66,7 @@
                         @test blk.neighbour.neighbours[Int(opposite_side)] == blk
                     end
                 else
-                    for (side, neighbour) in zip(instances(Armon.Side.T), blk.neighbours)
+                    for (side, neighbour) in zip(Armon.sides_of(dim), blk.neighbours)
                         if neighbour isa Armon.RemoteTaskBlock
                             @test neighbour.neighbour == blk
                         else 
@@ -155,9 +156,9 @@ end
             @test ghost_ok   == length(real_cells)
         end
 
-        @testset "$side domain" for side in instances(Armon.Side.T)
+        @testset "$side domain" for side in Armon.sides_of(ndims(bsize))
             border = Armon.border_domain(bsize, side)
-            expected_size = Armon.real_size_along(bsize, Armon.next_axis(Armon.axis_of(side)))
+            expected_size = Armon.real_size_along(bsize, Armon.next_axis(Armon.axis_of(side), ndims(bsize)))
             @test length(border) == expected_size
             if Armon.axis_of(side) == Armon.Axis.X
                 @test size(border) == (1, expected_size)

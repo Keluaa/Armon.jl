@@ -44,6 +44,7 @@ end
 function BlockGrid(params::ArmonParameters{T}) where {T}
     grid_size, static_sized_grid, remainder_block_size = grid_dimensions(params)
     cell_size = params.N
+    dim = length(cell_size)
     static_sized_block_count = prod(static_sized_grid)
     dyn_sized_block_count = prod(grid_size) - static_sized_block_count
 
@@ -112,7 +113,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     remote_i = 1
     for (side, edge_positions) in RemoteBlockRegions(grid_size), pos in edge_positions
         # Position of the neighbouring block in the grid
-        local_pos = pos + CartesianIndex(offset_to(opposite_of(side)))
+        local_pos = pos + CartesianIndex(offset_to(opposite_of(side), dim))
 
         if has_neighbour(params, side)
             # The buffer must be the same size as the side of our block which is a neighbour to...
@@ -121,7 +122,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
             buffer_size *= length(comm_vars()) * params.nghost
 
             neighbour = neighbour_at(params, side)  # rank
-            global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
+            global_pos = CartesianIndex(params.cart_coords .+ offset_to(side, dim))  # pos in the cart_comm
 
             block = RemoteTaskBlock{buffer_array}(buffer_size, pos, neighbour, global_pos, params.cart_comm)
         else
@@ -135,10 +136,10 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
     # Initialize all block neighbours references and exchanges
     for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
-        left_idx   = idx + CartesianIndex(offset_to(Side.Left))
-        right_idx  = idx + CartesianIndex(offset_to(Side.Right))
-        bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom))
-        top_idx    = idx + CartesianIndex(offset_to(Side.Top))
+        left_idx   = idx + CartesianIndex(offset_to(Side.Left, dim))
+        right_idx  = idx + CartesianIndex(offset_to(Side.Right, dim))
+        bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom, dim))
+        top_idx    = idx + CartesianIndex(offset_to(Side.Top, dim))
 
         this_block   = block_at(grid, idx)
         left_block   = block_at(grid, left_idx)
@@ -284,16 +285,15 @@ Base.size(it::RemoteBlockRegions) = (length(it),)
 
 function Base.iterate(rbr::RemoteBlockRegions{D}, state=0) where {D}
     if state == 0
-        # TODO: dimension agnostic
-        s = iterate(instances(Side.T))
+        s = iterate(sides_of(D))
     else
-        s = iterate(instances(Side.T), state)
+        s = iterate(sides_of(D), state)
     end
 
     s === nothing && return nothing
     side, s = s
 
-    o = offset_to(side)
+    o = offset_to(side, D)
     first_idx = CartesianIndex(ifelse.(o .== 0,             1, ifelse.(o .> 0, rbr.grid_size .+ 1, 0)))
     last_idx  = CartesianIndex(ifelse.(o .== 0, rbr.grid_size, ifelse.(o .> 0, rbr.grid_size .+ 1, 0)))
 
@@ -477,6 +477,7 @@ buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
 ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
 static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = block_size(BS)
 real_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = real_block_size(BS)
+Base.ndims(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = Base.ndims(BS)
 
 
 """
@@ -718,7 +719,7 @@ function block_origin(grid::BlockGrid, pos, include_ghosts=false)
         return ifelse.(grid.grid_size .> 1, bs .* (Tuple(pos) .- 1) .+ 1, 1)
     else
         return ifelse.(
-            in_grid.(Ref(Tuple(pos)), Ref(grid.static_sized_grid), instances(Axis.T)),
+            in_grid.(Ref(Tuple(pos)), Ref(grid.static_sized_grid), axes_of(ndims(grid))),
             bs .* (Tuple(pos) .- 1) .+ 1,
             bs .* grid.static_sized_grid .+ 1
         )
@@ -745,7 +746,7 @@ function print_grid_dimensions(
 
     edge_block_count = prod(grid_size) - static_block_count
     edge_pos = String[]
-    for axis in instances(Axis.T)
+    for axis in axes_of(length(grid_size))
         static_grid[Int(axis)] ≥ grid_size[Int(axis)] && continue
         push!(edge_pos, lowercasefirst(string(last_side(axis))))
     end
