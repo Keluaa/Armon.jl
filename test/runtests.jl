@@ -101,7 +101,8 @@ function do_tests(tests_to_do)
                 if MPI_PROCS > 0 && world_size < MPI_PROCS
                     @info "Launching $MPI_PROCS MPI sub-processes"
                     project_dir = abspath(@__DIR__, "..")
-                    mpi_cmd = `$(mpiexec()) -n $MPI_PROCS $(Base.julia_cmd()) --project=$(project_dir) --color=yes $(@__FILE__)`
+                    mpi_cmd = `$(mpiexec()) -n $MPI_PROCS $(Base.julia_cmd()) --project=$(project_dir) --color=yes $(@__FILE__) mpi`
+                    mpi_cmd = pipeline(mpi_cmd; stdout=stdout, stderr=stderr)
                     @testset "MPI" begin
                         @test success(mpi_cmd)
                     end

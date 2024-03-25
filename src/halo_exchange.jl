@@ -294,15 +294,16 @@ function block_ghost_exchange(
     end
 
     bint = blk.exchanges[Int(side)]
+    bint_state = block_interface_state(bint)[1]
 
     # Exchange between one local block and a remote block from another sub-domain
-    if exchange_state(blk, side) == BlockExchangeState.NotReady
+    if bint_state == BlockExchangeState.NotReady
         exchange_ended = start_exchange(params, blk, other_blk, side)
         side_flag = side in first_sides() ? 0b10 : 0b01
-        interface_start_exchange!(bint, side_flag; for_MPI=true)
+        !exchange_ended && interface_start_exchange!(bint, side_flag; for_MPI=true)
     else
         exchange_ended = finish_exchange(params, blk, other_blk, side)
-        interface_end_exchange!(bint; for_MPI=true)
+        exchange_ended && interface_end_exchange!(bint; for_MPI=true)
     end
 
     return exchange_ended ? BlockExchangeState.Done : BlockExchangeState.InProgress
