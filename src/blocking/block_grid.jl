@@ -133,7 +133,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         end
     end
 
-    # Initialize all block neighbours references
+    # Initialize all block neighbours references and exchanges
     for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
         left_idx   = idx + CartesianIndex(offset_to(Side.Left))
         right_idx  = idx + CartesianIndex(offset_to(Side.Right))
@@ -146,6 +146,14 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         bottom_block = block_at(grid, bottom_idx)
         top_block    = block_at(grid, top_idx)
         this_block.neighbours = Neighbours{TaskBlock}((left_block, right_block, bottom_block, top_block))
+
+        # Blocks sharing a side must share the same `BlockInterface`
+        this_block.exchanges = Neighbours{BlockInterface}((
+            isdefined(left_block,   :exchanges) ? left_block.exchanges[Int(Side.Right)] : BlockInterface(),
+            isdefined(right_block,  :exchanges) ? right_block.exchanges[Int(Side.Left)] : BlockInterface(),
+            isdefined(bottom_block, :exchanges) ? bottom_block.exchanges[Int(Side.Top)] : BlockInterface(),
+            isdefined(top_block,    :exchanges) ? top_block.exchanges[Int(Side.Bottom)] : BlockInterface(),
+        ))
 
         for blk in this_block.neighbours
             blk isa RemoteTaskBlock || continue

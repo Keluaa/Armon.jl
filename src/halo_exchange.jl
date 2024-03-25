@@ -97,66 +97,12 @@ end
 end
 
 
-"""
-    check_block_ready_for_exchange(blk₁, blk₂, side)
-
-Check if `blk₂` is ready to exchange its border cells with `blk₁` along `side` (relative to `blk₁`).
-
-Returns `true` if the exchange can proceed.
-"""
-function check_block_ready_for_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side.T)
-    side₁_state = exchange_state(blk₁, side₁)
-    if side₁_state == BlockExchangeState.NotReady
-        exchange_state!(blk₁, side₁, BlockExchangeState.Ready)
-    elseif side₁_state in (BlockExchangeState.InProgress, BlockExchangeState.Done)
-        return false
-    end
-    # `side₁_state` is `Ready`
-
-    side₂ = opposite_of(side₁)
-    side₂_state = exchange_state(blk₂, side₂)
-    if side₂_state in (BlockExchangeState.NotReady, BlockExchangeState.InProgress)
-        return false
-    elseif side₂_state == BlockExchangeState.Done
-        error("unexpected `Done` exchange state for block $(blk₂.pos)")
-    end
-    # `side₂_state` is `Ready`
-
-    age₁ = exchange_age(blk₁)
-    age₂ = exchange_age(blk₂)
-    if age₁ > age₂
-        return false
-    elseif age₁ < age₂
-        error("invalid exchange age between blocks $(blk₁.pos) and $(blk₂.pos): `$age₁ < $age₂`")
-    end
-    # `age₁ == age₂`: `blk₁` and `blk₂` are at the same exchange step.
-
-    # Try to start the exchange (`blk₂` might get here before `blk₁`). To be sure this decision is
-    # made on the same value, we do it on the Left/Bottom-most block.
-    choice_side, choice_blk = side₁ in first_sides() ? (side₁, blk₁) : (side₂, blk₂)
-    if !replace_exchange_state!(choice_blk, choice_side, BlockExchangeState.Ready => BlockExchangeState.InProgress)
-        return false  # `blk₂` does the exchange
-    end
-
-    other_side, other_blk = side₁ in first_sides() ? (side₂, blk₂) : (side₁, blk₁)
-    exchange_state!(other_blk, other_side, BlockExchangeState.InProgress)  # No async issues here
-
-    return true  # `blk₁` does the exchange
-end
-
-
-function post_exchange(blk₁::LocalTaskBlock, blk₂::LocalTaskBlock, side₁::Side.T)
-    exchange_state!(blk₁, side₁, BlockExchangeState.Done)
-    exchange_state!(blk₂, opposite_of(side₁), BlockExchangeState.Done)
-    return BlockExchangeState.Done
-end
-
-
 function block_ghost_exchange(
     params::ArmonParameters, state::SolverState,
     blk₁::LocalTaskBlock{V, Size}, blk₂::LocalTaskBlock{V, Size}, side::Side.T
 ) where {V, Size <: StaticBSize}
-    !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
+    do_xchg, xchg_state = mark_ready_for_exchange!(blk₁, side)
+    !do_xchg && return xchg_state
 
     # Exchange between two blocks with the same dimensions
     domain = border_domain(blk₁.size, side)
@@ -165,7 +111,7 @@ function block_ghost_exchange(
         blk₁.size, state.axis, side
     )
 
-    return post_exchange(blk₁, blk₂, side)
+    return exchange_done!(blk₁, side)
 end
 
 
@@ -223,7 +169,8 @@ function block_ghost_exchange(
     params::ArmonParameters, state::SolverState,
     blk₁::LocalTaskBlock{V}, blk₂::LocalTaskBlock{V}, side::Side.T
 ) where {V}
-    !check_block_ready_for_exchange(blk₁, blk₂, side) && return exchange_state(blk₁, side)
+    do_xchg, xchg_state = mark_ready_for_exchange!(blk₁, side)
+    !do_xchg && return xchg_state
 
     # Exchange between two blocks with (possibly) different dimensions, but the same length along `side`
     domain = border_domain(blk₁.size, side)
@@ -233,7 +180,7 @@ function block_ghost_exchange(
         state.axis, side
     )
 
-    return post_exchange(blk₁, blk₂, side)
+    return exchange_done!(blk₁, side)
 end
 
 
@@ -346,16 +293,19 @@ function block_ghost_exchange(
         return BlockExchangeState.Done
     end
 
+    bint = blk.exchanges[Int(side)]
+
     # Exchange between one local block and a remote block from another sub-domain
     if exchange_state(blk, side) == BlockExchangeState.NotReady
         exchange_ended = start_exchange(params, blk, other_blk, side)
+        side_flag = side in first_sides() ? 0b10 : 0b01
+        interface_start_exchange!(bint, side_flag; for_MPI=true)
     else
         exchange_ended = finish_exchange(params, blk, other_blk, side)
+        interface_end_exchange!(bint; for_MPI=true)
     end
 
-    new_state = exchange_ended ? BlockExchangeState.Done : BlockExchangeState.InProgress
-    exchange_state!(blk, side, new_state)
-    return new_state
+    return exchange_ended ? BlockExchangeState.Done : BlockExchangeState.InProgress
 end
 
 
@@ -370,21 +320,32 @@ Returns `true` if exchanges were not completed, and the block is waiting on anot
 the exchange.
 """
 function block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    # TODO: skip the whole interface logic if both blocks are in the same thread
+
     # Exchange with the Left/Bottom neighbour
     side = first_side(state.axis)
-    other_blk = blk.neighbours[Int(side)]
-    left_exchange_state = block_ghost_exchange(params, state, blk, other_blk, side)
+    if !is_side_done(blk, side)
+        other_blk = blk.neighbours[Int(side)]
+        left_exchange_state = block_ghost_exchange(params, state, blk, other_blk, side)
+        left_exchange_state == BlockExchangeState.Done && side_is_done!(blk, side, true)
+    else
+        left_exchange_state = BlockExchangeState.Done
+    end
 
     # Exchange with the Right/Top neighbour
     other_side = opposite_of(side)
-    other_blk = blk.neighbours[Int(other_side)]
-    right_exchange_state = block_ghost_exchange(params, state, blk, other_blk, other_side)
+    if !is_side_done(blk, other_side)
+        other_blk = blk.neighbours[Int(other_side)]
+        right_exchange_state = block_ghost_exchange(params, state, blk, other_blk, other_side)
+        right_exchange_state == BlockExchangeState.Done && side_is_done!(blk, other_side, true)
+    else
+        right_exchange_state = BlockExchangeState.Done
+    end
 
     if left_exchange_state == right_exchange_state == BlockExchangeState.Done
-        # Both sides are `Done`: this exchange step is finished.
-        exchange_state!(blk, side, BlockExchangeState.NotReady)
-        exchange_state!(blk, other_side, BlockExchangeState.NotReady)
-        incr_exchange_age!(blk)
+        # Both sides are `Done`: this exchange step is finished, reset the interface.
+        side_is_done!(blk, side, false)
+        side_is_done!(blk, other_side, false)
         return false
     else
         return true  # Still waiting for neighbours
@@ -395,14 +356,11 @@ end
 function block_ghost_exchange(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     # We must repeatedly update all blocks' states until the exchanges are done, as they are designed
     # to work independantly and asynchronously in a state machine, which isn't the case here.
-    waiting_for = trues(grid.grid_size)
-    wait_lock = ReentrantLock()  # Required lock as `@iter_blocks` might use multithreading
+    waiting_for = ones(Bool, grid.grid_size)
     while any(waiting_for)
         @iter_blocks for blk in all_blocks(grid)
             if waiting_for[blk.pos] && !block_ghost_exchange(params, state, blk)
-                lock(wait_lock) do 
-                    waiting_for[blk.pos] = false
-                end
+                waiting_for[blk.pos] = false
             end
         end
     end

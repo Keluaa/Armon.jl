@@ -174,7 +174,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
     # TODO: use meta-blocks, one for each core/thread, containing a set of `LocalTaskBlock`,
     # with a predefined repartition and device
 
-    timeout = 60e9  # 60 sec  # TODO: should depend on the total workload, or be deactivatable
+    timeout = UInt(120e9)  # 120 sec  # TODO: should depend on the total workload, or be deactivatable
     threads_count = params.use_threading ? Threads.nthreads() : 1
 
     @threaded :outside_kernel for _ in 1:threads_count
@@ -185,13 +185,18 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         thread_blocks_idx = simple_block_distribution(tid, threads_count, grid.grid_size)
 
         t_start = time_ns()
-        step_count = 0
+        step_count = 1  # TODO: monitor the maximum `step_count` reached, if it is small, then ok, but with MPI this will not be the case
         while step_count < max_step_count
-            if time_ns() - t_start > timeout
-                blocks_pos = CartesianIndices(grid.grid_size)[thread_blocks_idx]
-                blocks = block_at.(Ref(grid), blocks_pos)
-                eoc_str = join(string.(Tuple.(blocks_pos)) .* ": " .* (string∘finished_cycle∘solver_state).(blocks), ", ")
-                solver_error(:timeout, "cycle took too long in thread $tid, blocks: $eoc_str")
+            if step_count % 100 == 0
+                # A safepoint might be needed in some cases as threads waiting for other threads
+                # would never allocate and therefore might prevent the GC to run.
+                GC.safepoint()
+
+                if time_ns() - t_start > timeout
+                    solver_error(:timeout, "cycle took too long in thread $tid")
+                end
+
+                # TODO: we are busy waiting for MPI comms/dependencies!! Stop using Polyester in this case and `yield()`!
             end
 
             all_finished_cycle = true

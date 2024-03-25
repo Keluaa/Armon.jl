@@ -67,23 +67,17 @@ other blocks, apart from steps requiring synchronization.
 """
 mutable struct LocalTaskBlock{D, H, Size <: BlockSize, SState <: SolverState} <: TaskBlock{D}
     state        :: SState             # Solver state for the block
-    exchange_age :: Atomic{Int}        # Incremented every time an exchange is completed
-    exchanges    :: Neighbours{Atomic{BlockExchangeState.T}}  # State of ghost cells exchanges for each side
     size         :: Size               # Size (in cells) of the block
     pos          :: CartesianIndex{2}  # Position in the local block grid
     neighbours   :: Neighbours{TaskBlock}
+    exchanges    :: Neighbours{BlockInterface}  # State of ghost cells exchanges for each side
     device_data  :: BlockData{D}
     host_data    :: BlockData{H}  # Host data uses the same arrays as device data if `D == H`
     # TODO: device? storing the associated GPU stream, or CPU cores (or maybe not, to allow relocations?)
 
     function LocalTaskBlock{D, H, Size, SState}(size::Size, pos, blk_state::SState, device_kwargs, host_kwargs) where {D, H, Size, SState}
-        # `neighbours` is set afterwards, when all blocks are created.
-        block = new{D, H, Size, SState}(
-            blk_state, Atomic(0),
-            Neighbours(Atomic{BlockExchangeState.T}, BlockExchangeState.NotReady),
-            size, pos #= undef =#
-        )
-
+        # `exchanges` and `neighbours` are set afterwards, when all blocks are created.
+        block = new{D, H, Size, SState}(blk_state, size, pos, #= undef =#)
         cell_count = prod(block_size(size))
         if D != H
             block.device_data = BlockData{D}(cell_count; device_kwargs...)
@@ -113,23 +107,9 @@ saved_vars(blk::LocalTaskBlock; on_device=true) = saved_vars(block_data(blk; on_
 comm_vars(blk::LocalTaskBlock; on_device=true)  = comm_vars(block_data(blk; on_device))
 
 
-exchange_age(blk::LocalTaskBlock) = @atomic blk.exchange_age.x
-incr_exchange_age!(blk::LocalTaskBlock) = @atomic blk.exchange_age.x += 1
-
-exchange_state(blk::LocalTaskBlock, side::Side.T) = @atomic blk.exchanges[Int(side)].x
-exchange_state!(blk::LocalTaskBlock, side::Side.T, state::BlockExchangeState.T) = @atomic blk.exchanges[Int(side)].x = state
-function replace_exchange_state!(blk::LocalTaskBlock, side::Side.T, transition::Pair{BlockExchangeState.T, BlockExchangeState.T})
-    _, ok = @atomicreplace blk.exchanges[Int(side)].x transition
-    return ok
-end
-
-
 function reset!(blk::LocalTaskBlock)
     reset!(blk.state)
-    @atomic blk.exchange_age.x = 0
-    for exchange_state in blk.exchanges
-        @atomic exchange_state.x = BlockExchangeState.NotReady
-    end
+    foreach(reset!, blk.exchanges)
 end
 
 

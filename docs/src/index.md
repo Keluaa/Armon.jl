@@ -93,11 +93,15 @@ TimeStepState.AllContributed
 
 ```@docs
 block_ghost_exchange
-check_block_ready_for_exchange
 start_exchange
 finish_exchange
+BlockInterface
+mark_ready_for_exchange!
+exchange_done!
+side_is_done!
+is_side_done
+BlockExchangeState
 BlockExchangeState.NotReady
-BlockExchangeState.Ready
 BlockExchangeState.InProgress
 BlockExchangeState.Done
 ```

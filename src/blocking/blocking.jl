@@ -257,20 +257,36 @@ function (::Type{Neighbours})(f::Base.Callable, default)
 end
 
 
-@enumx BlockExchangeState::UInt8 begin
-    "There are steps to do before border cells are ready"
-    NotReady=0
-    "Border cells are ready, waiting for the other side to be `Ready` as well"
-    Ready=1
-    "One of the blocks is performing the exchange"
-    InProgress=2
-    "The exchange is done"
-    Done=3
+"""
+    BlockInterface
+
+Represents the interface between two neighbouring [`TaskBlock`](@ref)s.
+It synchronizes the state of the blocks to make sure the halo exchange happens when both blocks are
+ready, and that the operation is done by only one of the blocks.
+"""
+mutable struct BlockInterface
+    """
+    0b00XX: ready flag, 0bXX00: exchange state
+
+    Ready flag:
+     - `0b00`: no side ready
+     - `0b10`: left side ready
+     - `0b01`: right side ready
+     - `0b11`: both sides ready
+    """
+    flags :: Atomic{UInt8}
+    # Non-atomics to be used only by their respective blocks, to avoid repeating the same exchange
+    # multiple times in the same step.
+    is_left_side_done :: Bool
+    is_right_side_done :: Bool
+
+    BlockInterface() = new(Atomic{UInt8}(0), false, false)
 end
 
 
 include("blocks.jl")
 include("block_grid.jl")
+include("interface.jl")
 
 
 """
