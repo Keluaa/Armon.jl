@@ -146,6 +146,11 @@ function next_cycle!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) wher
     global_dt.cycle += 1
     global_dt.time += global_dt.current_dt
 
+    if params.cst_dt
+        global_dt.current_dt = global_dt.next_cycle_dt = params.Dt
+        return
+    end
+
     if time_step_state(global_dt) == TimeStepState.DoingMPI
         wait_for_dt!(params, global_dt)
     end
