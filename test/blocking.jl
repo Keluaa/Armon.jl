@@ -1,17 +1,18 @@
 @testset "Blocking" begin
 
 @testset "BlockGrid" begin
-    @testset "$block_size" for block_size in (
-            ( 32,  32),  # Normal mix of static and edge blocks
-            ( 16,  48),  # Uneven mix of static and edge blocks
-            ( 57,  57),  # Edge blocks too small, merged with closest static blocks
-            ( 64,  57),  # Same but uneven
-            (106, 106),  # Edge blocks too small, merged with closest static blocks (only edge blocks left)
-            (108, 108),  # Perfect match: only a single static block
-            (  0,   0),  # No blocking, only edge blocks
+    @testset "$(join(N, '×')) - $(join(block_size, '×')) - $nghost" for (N, block_size, nghost) in (
+            ((100, 100), ( 32,  32), 4),  # Normal mix of static and edge blocks
+            ((100, 100), ( 16,  48), 4),  # Uneven mix of static and edge blocks
+            ((100, 100), ( 57,  57), 4),  # Edge blocks too small, merged with closest static blocks
+            ((100, 100), ( 64,  57), 4),  # Same but uneven
+            ((100, 100), (106, 106), 4),  # Edge blocks too small, merged with closest static blocks (only edge blocks left)
+            ((100, 100), (108, 108), 4),  # Perfect match: only a single static block
+            ((100, 100), (  0,   0), 4),  # No blocking, only edge blocks
+            ((100,  50), ( 64,  64), 4),  # Enough
+            ((240, 240), ( 64,  32), 4),
         )
-        nghost = 4
-        ref_params = get_reference_params(:Sod, Float64; N=(100, 100), block_size, nghost)
+        ref_params = get_reference_params(:Sod, Float64; N, block_size, nghost)
         grid = Armon.BlockGrid(ref_params)
 
         @testset "Grid" begin
@@ -42,9 +43,9 @@
                 blk_bytes += sizeof(blk)
             end
 
-            @test real_cell_count == prod(ref_params.N)
+            @test real_cell_count == prod(N)
             if prod(grid.grid_size) == 1
-                @test all_cell_count  == prod(ref_params.N .+ 2*ref_params.nghost)
+                @test all_cell_count  == prod(N .+ 2*ref_params.nghost)
             end
 
             total_mem = all_cell_count * sizeof(Float64) * length(Armon.block_vars())
@@ -83,12 +84,7 @@
                 @test blk isa Armon.LocalTaskBlock
             end
 
-            # Remote blocks
-            for pos in Iterators.flatten((
-                    CartesianIndex(                  0, 1):CartesianIndex(                  0, grid.grid_size[2]),  # left
-                    CartesianIndex(grid.grid_size[1]+1, 1):CartesianIndex(grid.grid_size[1]+1, grid.grid_size[2]),  # right
-                    CartesianIndex(1,                   0):CartesianIndex(grid.grid_size[1],                   0),  # bottom
-                    CartesianIndex(1, grid.grid_size[2]+1):CartesianIndex(grid.grid_size[1], grid.grid_size[2]+1))) # top
+            for (_, region) in Armon.RemoteBlockRegions(grid.grid_size), pos in region
                 blk = Armon.block_at(grid, pos)
                 @test blk.pos == pos
                 @test blk isa Armon.RemoteTaskBlock

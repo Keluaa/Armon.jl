@@ -44,6 +44,8 @@ all_blocks
 block_idx
 edge_block_idx
 remote_block_idx
+EdgeBlockRegions
+RemoteBlockRegions
 @iter_blocks
 block_pos_containing_cell
 ```

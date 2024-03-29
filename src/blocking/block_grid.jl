@@ -95,7 +95,13 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         else
             blks = edge_blocks
             idx = edge_block_idx(grid, pos)
-            blk_size = DynamicBSize(ifelse.(Tuple(pos) .== grid_size, remainder_block_size, params.block_size), ghost)
+            blk_size = DynamicBSize(
+                ifelse.(Tuple(pos) .== grid_size .&& remainder_block_size .!= 0,
+                    remainder_block_size,
+                    params.block_size
+                ),
+                ghost
+            )
         end
 
         blk_state = SolverState(params, global_dt)
@@ -103,34 +109,28 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     end
 
     # Allocate all remote blocks
-    # X (Left, Right) then Y (Bottom, Top)
     remote_i = 1
-    for axis in (Axis.X, Axis.Y), side in sides_along(axis)
-        # Range of all blocks along `side`
-        blocks_x = axis == Axis.X ? (side == Side.Left   ? (1:1) : (grid_size[1]:grid_size[1])) : (1:grid_size[1])
-        blocks_y = axis == Axis.Y ? (side == Side.Bottom ? (1:1) : (grid_size[2]:grid_size[2])) : (1:grid_size[2])
+    for (side, edge_positions) in RemoteBlockRegions(grid_size), pos in edge_positions
+        # Position of the neighbouring block in the grid
+        local_pos = pos + CartesianIndex(offset_to(opposite_of(side)))
 
-        for our_pos in CartesianIndices((blocks_x, blocks_y))
-            pos = our_pos + CartesianIndex(offset_to(side))
+        if has_neighbour(params, side)
+            # The buffer must be the same size as the side of our block which is a neighbour to...
+            buffer_size = real_face_size(block_at(grid, local_pos).size, side)
+            # ...for each variable to communicate of each ghost cell
+            buffer_size *= length(comm_vars()) * params.nghost
 
-            if has_neighbour(params, side)
-                # The buffer must be the same size as the side of our block which is a neighbour to...
-                buffer_size = real_face_size(block_at(grid, our_pos).size, side)
-                # ...for each variable to communicate of each ghost cell
-                buffer_size *= length(comm_vars()) * params.nghost
+            neighbour = neighbour_at(params, side)  # rank
+            global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
 
-                neighbour = neighbour_at(params, side)  # rank
-                global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
-
-                block = RemoteTaskBlock{buffer_array}(buffer_size, pos, neighbour, global_pos, params.cart_comm)
-            else
-                # "Fake" remote block for non-existant neighbour at the edge of the global domain
-                block = RemoteTaskBlock{buffer_array}(pos)
-            end
-
-            remote_blocks[remote_i] = block
-            remote_i += 1
+            block = RemoteTaskBlock{buffer_array}(buffer_size, pos, neighbour, global_pos, params.cart_comm)
+        else
+            # "Fake" remote block for non-existant neighbour at the edge of the global domain
+            block = RemoteTaskBlock{buffer_array}(pos)
         end
+
+        remote_blocks[remote_i] = block
+        remote_i += 1
     end
 
     # Initialize all block neighbours references and exchanges
@@ -161,12 +161,143 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         end
     end
 
-    # Sanity check
-    if sum(prod.(real_block_size.(all_blocks(grid)))) != prod(grid.cell_size)
-        error("failed to create a grid for the $(cell_size) domain with $(params.block_size) blocks and $(params.nghost) ghosts")
+    return grid
+end
+
+
+"""
+    EdgeBlockRegions(grid::BlockGrid; real_sizes=false)
+    EdgeBlockRegions(
+        grid_size::NTuple{D, Int}, static_sized_grid::NTuple{D, Int},
+        block_size::NTuple{D, Int}, remainder_block_size::NTuple{D, Int}; ghosts=0
+    )
+
+Iterator over edge blocks, their positions and their size in each edge region of the `grid`.
+
+`ghosts` only affects the size of edge blocks: `B .- 2*ghosts`. If `real_sizes == true`, then `ghosts`
+is `ghosts(grid)`, therefore the real block size of edge blocks is returned.
+
+There is a maximum of `2^D-1` edge regions in a grid
+([see this explanation](https://en.wikipedia.org/wiki/Binomial_theorem#Geometric_explanation)).
+When `grid_size[i] != static_sized_grid[i]`, there cannot be an edge region, hence there are exactly
+`2^sum(grid_size .!= static_sized_grid)-1` regions.
+
+```jldoctest
+julia> collect(Armon.EdgeBlockRegions((5, 5), (4, 4), (32, 32), (16, 16)))
+3-element Vector{Tuple{Int64, CartesianIndices{2, Tuple{UnitRange{Int64}, UnitRange{Int64}}}, Tuple{Int64, Int64}}}:
+ (4, CartesianIndices((5:5, 1:4)), (16, 32))
+ (4, CartesianIndices((1:4, 5:5)), (32, 16))
+ (1, CartesianIndices((5:5, 5:5)), (16, 16))
+
+julia> collect(Armon.EdgeBlockRegions((5, 5, 5), (4, 5, 4), (32, 32, 32), (16, 16, 16)))
+3-element Vector{Tuple{Int64, CartesianIndices{3, Tuple{UnitRange{Int64}, UnitRange{Int64}, UnitRange{Int64}}}, Tuple{Int64, Int64, Int64}}}:
+ (20, CartesianIndices((5:5, 1:5, 1:4)), (16, 32, 32))
+ (20, CartesianIndices((1:4, 1:5, 5:5)), (32, 32, 16))
+ (5, CartesianIndices((5:5, 1:5, 5:5)), (16, 32, 16))
+```
+"""
+struct EdgeBlockRegions{D, AE}
+    axis_edges :: AE
+    iter       :: Iterators.ProductIterator{AE}
+    grid_size  :: NTuple{D, Int}
+    static_sized_grid    :: NTuple{D, Int}
+    remainder_block_size :: NTuple{D, Int}
+    block_size :: NTuple{D, Int}
+    ghosts     :: Int
+
+    function EdgeBlockRegions(
+        grid_size::NTuple{D, Int}, static_sized_grid::NTuple{D, Int},
+        block_size::NTuple{D, Int}, remainder_block_size::NTuple{D, Int};
+        ghosts::Int=0
+    ) where {D}
+        # `false` => when axis `d` has no edge region, `true` => when axis `d` has an edge region
+        # By iterating over `(false, true)` for axes with a non-empty edge, and `(false,)` without
+        # an edge, we cover all possible regions.
+        axis_edges = ifelse.(grid_size .!= static_sized_grid, Ref((false, true)), Ref((false,)))
+        iter = Iterators.product(axis_edges...)
+        return new{D, typeof(axis_edges)}(
+            axis_edges, iter,
+            grid_size, static_sized_grid, remainder_block_size, block_size, ghosts
+        )
+    end
+end
+
+EdgeBlockRegions(grid::BlockGrid; real_sizes=false) =
+    EdgeBlockRegions(
+        grid.grid_size, grid.static_sized_grid, static_block_size(grid), grid.edge_size;
+        ghosts=real_sizes ? ghosts(grid) : 0
+    )
+
+Base.eltype(::Type{<:EdgeBlockRegions{D}}) where {D} = Tuple{Int, CartesianIndices{D, NTuple{D, UnitRange{Int}}}, NTuple{D, Int}}
+Base.length(it::EdgeBlockRegions) = 2^sum(it.grid_size .!= it.static_sized_grid) - 1
+Base.size(it::EdgeBlockRegions) = (length(it),)
+
+function Base.iterate(ebr::EdgeBlockRegions, state=0)
+    if state == 0
+        s0 = iterate(ebr.iter)  # Discard the first element, which is all `false`, i.e. the static sized region
+        s0 === nothing && return nothing
+        _, state = s0
     end
 
-    return grid
+    s = iterate(ebr.iter, state)
+    s === nothing && return nothing
+    side_states, s = s
+
+    # Use `grid_size - 1` over `static_sized_grid` to handle the edge case with multiple edge blocks
+    # but no static blocks.
+    region_block_count = prod(ifelse.(side_states, 1, max.(ebr.static_sized_grid, ebr.grid_size .- 1)))
+    first_pos = CartesianIndex(ifelse.(side_states, ebr.grid_size, 1))
+    last_pos  = CartesianIndex(ifelse.(side_states, ebr.grid_size, max.(ebr.static_sized_grid, ebr.grid_size .- 1)))
+    region_block_size = ifelse.(side_states, ebr.remainder_block_size, ebr.block_size) .- 2*ebr.ghosts
+
+    return (region_block_count, first_pos:last_pos, region_block_size), s
+end
+
+
+"""
+    RemoteBlockRegions(grid::BlockGrid)
+    RemoteBlockRegions(grid_size::NTuple{D, Int})
+
+Iterator of all remote block positions in each region (the faces of the `grid`).
+There is always `2*D` regions.
+
+```jldoctest
+julia> collect(Armon.RemoteBlockRegions((5, 3)))
+4-element Vector{CartesianIndices{2, Tuple{UnitRange{Int64}, UnitRange{Int64}}}}:
+ (Armon.Side.Left, CartesianIndices((-1:-1, 1:3)))
+ (Armon.Side.Right, CartesianIndices((6:6, 1:3)))
+ (Armon.Side.Bottom, CartesianIndices((1:5, -1:-1)))
+ (Armon.Side.Top, CartesianIndices((1:5, 4:4)))
+```
+"""
+struct RemoteBlockRegions{D}
+    grid_size :: NTuple{D, Int}
+
+    RemoteBlockRegions(grid_size::NTuple{D, Int}) where {D} = new{D}(grid_size)
+end
+
+RemoteBlockRegions(grid::BlockGrid) = RemoteBlockRegions(grid.grid_size)
+
+Base.eltype(::Type{<:RemoteBlockRegions{D}}) where {D} = Tuple{Side.T, CartesianIndices{D, NTuple{D, UnitRange{Int}}}}
+Base.length(::RemoteBlockRegions{D}) where {D} = 2*D
+Base.size(it::RemoteBlockRegions) = (length(it),)
+
+function Base.iterate(rbr::RemoteBlockRegions{D}, state=0) where {D}
+    if state == 0
+        # TODO: dimension agnostic
+        s = iterate(instances(Side.T))
+    else
+        s = iterate(instances(Side.T), state)
+    end
+
+    s === nothing && return nothing
+    side, s = s
+
+    o = offset_to(side)
+    first_idx = CartesianIndex(ifelse.(o .== 0,             1, ifelse.(o .> 0, rbr.grid_size .+ 1, 0)))
+    last_idx  = CartesianIndex(ifelse.(o .== 0, rbr.grid_size, ifelse.(o .> 0, rbr.grid_size .+ 1, 0)))
+
+    return (side, first_idx:last_idx), s
 end
 
 
@@ -208,8 +339,6 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
     grid_size = domain_size .÷ real_block_size
     remainder = domain_size .% real_block_size
 
-    prod(grid_size) == 0 && (grid_size = ntuple(Returns(0), D))
-
     # Edge-case: the remainder is smaller than the number of ghost cells. This creates problems during
     # the halo-exchange since ghosts cells at the edge of the static sized grid depend on all real cells
     # of the neighbouring edge block BUT ALSO the ghosts of that same edge block, themselves depending
@@ -224,90 +353,96 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
 
     static_sized_grid = grid_size  # Grid of blocks with a static size
     any(remainder .> 0) && (grid_size = grid_size .+ (remainder .> 0))
+    prod(static_sized_grid) == 0 && (static_sized_grid = ntuple(Returns(0), D))
 
     if prod(grid_size) < 1
-        solver_error(:config, "could not partition $domain_size domain into $block_size blocks with $ghost ghost cells")
+        solver_error(:config, "could not partition $domain_size domain using $block_size blocks with $ghost ghost cells")
     end
 
-    # (x, y) size of dynamic blocks, including ghost cells. A block for a X axis edge will have a
-    # size of (x, block_size.y), and for the Y axis edge the size would be (block_size.x, y). In the
-    # edge corner the block would be of size (x, y).
-    if prod(remainder) == 0
-        remainder_block_size = ntuple(Returns(0), D)
-    elseif prod(static_sized_grid) > 0
-        remainder_block_size = remainder .+ 2 * ghost
+    # (x, y) size of edge blocks, including ghost cells. A block for a X axis edge will have a size
+    # of (x, block_size.y), and for the Y axis edge the size would be (block_size.x, y). In the edge
+    # corner the block would be of size (x, y). Axes without an edge region have a remainder of 0.
+    remainder_block_size = ifelse.(remainder .> 0, remainder .+ 2 * ghost, 0)
+
+    # Sanity checks
+    # `static blocks + edge blocks = whole grid`
+    if prod(static_sized_grid) > 0
+        valid_grid = all(static_sized_grid .+ (remainder_block_size .> 0) .== grid_size)
     else
-        # Edge-case for when the block size is bigger than the domain
-        remainder_block_size = domain_size .+ 2 * ghost
+        valid_grid = all(remainder_block_size .> 0)
+    end
+    # `real cells in static blocks + real cells in edge blocks = real domain`
+    static_block_cells = prod(static_sized_grid) * prod(real_block_size)
+    r = EdgeBlockRegions(grid_size, static_sized_grid, block_size, remainder_block_size; ghosts=ghost)
+    edge_block_cells = sum(first.(r) .* prod.(last.(r)))
+    valid_domain = static_block_cells + edge_block_cells == prod(domain_size)
+
+    if !(valid_grid && valid_domain)
+        err_msg = "failed to create a valid grid"
+        !valid_grid   && (err_msg *= " (invalid grid)")
+        !valid_domain && (err_msg *= " (invalid domain)")
+        solver_error(:config, "$err_msg: \
+                               block_size=$block_size, domain_size=$domain_size, ghost=$ghost, \
+                               grid_size=$grid_size, static_sized_grid=$static_sized_grid, \
+                               remainder_block_size=$remainder_block_size")
     end
 
     return grid_size, static_sized_grid, remainder_block_size
 end
 
 
-"Linear index of a block in the statically-sized grid"
-block_idx(grid::BlockGrid, idx::CartesianIndex{2}) =
+"""
+    block_idx(grid::BlockGrid, idx::CartesianIndex)
+
+Linear index in `grid.blocks` of the block at `idx` in the statically-sized grid.
+"""
+block_idx(grid::BlockGrid, idx::CartesianIndex) =
     LinearIndices(CartesianIndices(grid.static_sized_grid))[idx]
 
 
-"Linear index of a block at the (dynamically-sized) edges of the grid"
-function edge_block_idx(grid::BlockGrid, idx::CartesianIndex{2})
-    # A 2D grid has 2 edge regions:
-    #  - Last X column (including last block of last Y row if they overlap)
-    #  - Last Y row
-    # They are stored contigously.
-    i = 0
+"""
+    edge_block_idx(grid::BlockGrid, idx::CartesianIndex)
+
+Linear index in `grid.edge_blocks` of the block at `idx`, along the (dynamically-sized) edges of the
+`grid`.
+"""
+function edge_block_idx(grid::BlockGrid, idx::CartesianIndex)
     offset = 0
-
-    if grid.static_sized_grid[1] < grid.grid_size[1]
-        if grid.static_sized_grid[1] < idx[1]
-            offset = idx[2]
-        else
-            offset = grid.static_sized_grid[2] + 1
+    for (block_count, blocks_pos, _) in EdgeBlockRegions(grid)
+        if idx in blocks_pos
+            pos_idx = idx - first(blocks_pos) + one(idx)  # `block_pos[pos_idx] == idx`
+            return LinearIndices(blocks_pos)[pos_idx] + offset
         end
+        offset += block_count
     end
-
-    if grid.static_sized_grid[2] < grid.grid_size[2]
-        if grid.static_sized_grid[2] < idx[2]
-            i = idx[1] + offset - 1  # -1 to account for the overlap
-        else
-            i = offset
-        end
-    else
-        i = offset
-    end
-
-    i == 0 && error("Index $idx is not at the edge of the grid $grid")
-    return i
+    error("Block index $idx is not at the edge of the grid $grid")
 end
 
 
-"Linear index of a remote block at the edges of the grid"
-function remote_block_idx(grid::BlockGrid, idx::CartesianIndex{2})
+"""
+    remote_block_idx(grid::BlockGrid, idx::CartesianIndex)
+
+Linear index in `grid.remote_blocks` of the remote block at `idx` in the `grid`.
+"""
+function remote_block_idx(grid::BlockGrid, idx::CartesianIndex)
     offset = 0
-    for axis in instances(Axis.T), side in sides_along(axis)
-        ai = Int(axis)  # Axis index
-
-        side_length = grid.grid_size[ai]
-        edge_length = prod(grid.grid_size) ÷ side_length
-
-        side_idx = side in first_sides() ? 1 : side_length
-        side_idx += offset_to(side)[ai]
-
-        edge_idx = Tuple(idx)[mod1(ai + 1, 2)]  # TODO: not dimension-agnostic :(
-
-        if Tuple(idx)[ai] == side_idx && 1 ≤ edge_idx ≤ edge_length
-            return offset + edge_idx
-        else
-            offset += edge_length
+    for (_, blocks_pos) in RemoteBlockRegions(grid)
+        if idx in blocks_pos
+            pos_idx = idx - first(blocks_pos) + one(idx)  # `block_pos[pos_idx] == idx`
+            return LinearIndices(blocks_pos)[pos_idx] + offset
         end
+        offset += length(blocks_pos)
     end
-
-    throw(ArgumentError("Block index $idx is not on the remote edges of the grid"))
+    error("Block index $idx is not on the remote edges of the grid")
 end
 
 
-function block_at(grid::BlockGrid, idx::CartesianIndex{2})
+"""
+    block_at(grid::BlockGrid, idx::CartesianIndex)
+
+The [`TaskBlock`](@ref) at position `idx` in the `grid`.
+"""
+function block_at(grid::BlockGrid, idx::CartesianIndex)
     if in_grid(idx, grid.static_sized_grid)
         return grid.blocks[block_idx(grid, idx)]
     elseif in_grid(idx, grid.grid_size)
@@ -457,19 +592,9 @@ function memory_required(
     # Static blocks
     cell_count = prod(static_sized_grid) * prod(block_size)
 
-    # Edge blocks on the right, along the Y axis (excluding the top-right corner)
-    if static_sized_grid[1] < grid_size[1]
-        cell_count += static_sized_grid[2] * (remainder_block_size[1] * block_size[2])
-    end
-
-    # Edge blocks on the top, along the X axis (excluding the top-right corner)
-    if static_sized_grid[2] < grid_size[2]
-        cell_count += static_sized_grid[1] * (remainder_block_size[2] * block_size[1])
-    end
-
-    # Edge block on the top-right corner
-    if static_sized_grid[1] < grid_size[1] && static_sized_grid[2] < grid_size[2]
-        cell_count += prod(remainder_block_size)
+    # Edge blocks
+    for (block_count, _, edge_block_size) in EdgeBlockRegions(grid_size, static_sized_grid, block_size, remainder_block_size)
+        cell_count += block_count * prod(edge_block_size)
     end
 
     arrays_byte_count = cell_count * length(block_vars()) * sizeof(T)
@@ -485,11 +610,11 @@ function memory_required(
     sizeof_edge_block = sizeof(LocalTaskBlock{DeviceArray, HostArray, typeof(edge_block_size), SState})
     blocks_overhead += edge_block_count * sizeof_edge_block
 
-    remote_block_count = sum(grid_size) * 2
+    remote_block_count = sum((length∘last).(RemoteBlockRegions(grid_size)))
     blocks_overhead += remote_block_count * sizeof(RemoteTaskBlock{BufferArray})
 
     # MPI Buffers size
-    domain_perimeter = sum(N) * 2
+    domain_perimeter = sum(N) * 2  # TODO: dimension agnostic
     MPI_buffer_byte_count = domain_perimeter * #= send+recv =# 2 * length(comm_vars()) * ghost * sizeof(T)
 
     return arrays_byte_count, MPI_buffer_byte_count, blocks_overhead

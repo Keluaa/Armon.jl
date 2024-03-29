@@ -6,10 +6,6 @@ MPI.Init(; threadlevel=:multiple)
 MPI.Barrier(MPI.COMM_WORLD)
 
 
-NX = 100
-NY = 100
-
-
 TEST_CUDA_MPI = if parse(Bool, get(ENV, "TEST_CUDA_MPI", "false"))
     import CUDA
     CUDA.functional()
@@ -60,22 +56,13 @@ function read_sub_domain_from_global_domain_file!(params::ArmonParameters, data:
         global_rows = Armon.inflate(global_rows, params.nghost)
     end
 
-    # Ranges of the sub-domain
-    col_range = 1:params.N[2]
-    row_range = 1:params.N[1]
-    if params.write_ghosts
-        offset = params.nghost
-    else
-        offset = 0
-    end
-
     # Position of the origin and end of this sub-domain
-    (cx, cy) = params.cart_coords
-    pos_x = cx * length(row_range) + 1 - offset
-    pos_y = cy * length(col_range) + 1 - offset
-    end_x = pos_x + length(row_range) - 1 + offset * 2
-    end_y = pos_y + length(col_range) - 1 + offset * 2
-    col_offset = cy * length(col_range)
+    offset = params.write_ghosts ? params.nghost : 0
+    pos_x = params.N_origin[1] - offset
+    pos_y = params.N_origin[2] - offset
+    end_x = pos_x + params.N[1] - 1 + offset * 2
+    end_y = pos_y + params.N[2] - 1 + offset * 2
+    col_offset = params.cart_coords[2] * params.N[2]
 
     # Ranges of the sub-domain in the global domain
     sub_domain_rows = pos_y:end_y
@@ -225,7 +212,7 @@ end
 function dump_neighbours(P, proc_in_grid, global_comm)
     !proc_in_grid && return
 
-    ref_params = ref_params_for_sub_domain(:Sod, Float64, P; N=(NX, NY), global_comm)
+    ref_params = ref_params_for_sub_domain(:Sod, Float64, P; N=(100, 100), global_comm)
     coords = ref_params.cart_coords
     neighbour_coords = Dict{Armon.Side.T, Tuple{Int, Int}}()
 
@@ -300,7 +287,7 @@ end
 
 
 function test_halo_exchange(P, global_comm)
-    ref_params = ref_params_for_sub_domain(:DebugIndexes, Float64, P; N=(NX, NY), global_comm)
+    ref_params = ref_params_for_sub_domain(:DebugIndexes, Float64, P; N=(100, 100), global_comm)
     block_grid = BlockGrid(ref_params)
     coords = ref_params.cart_coords
 
@@ -360,7 +347,7 @@ end
 
 
 function test_reference(prefix, comm, test, type, P; kwargs...)
-    ref_params = ref_params_for_sub_domain(test, type, P; N=(NX, NY), global_comm=comm, kwargs...)
+    ref_params = ref_params_for_sub_domain(test, type, P; N=(100, 100), global_comm=comm, kwargs...)
 
     diff_count, data, ref_data = try
         dt, cycles, data = run_armon_reference(ref_params)
@@ -397,24 +384,37 @@ function test_reference(prefix, comm, test, type, P; kwargs...)
 end
 
 
-# All grids must be able to perfectly divide the number of cells in each direction
-# of the reference case (100×100)
-domain_combinations = [
-    (1, 1),
-    (1, 2),
-    (1, 4),
-    (4, 1),
-    (2, 2),
-    (4, 4),
-    (5, 2),
-    (2, 5),
-    (5, 5)
-]
+function test_conservation(test, P, N; maxcycle=10000, maxtime=10000, kwargs...)
+    ref_params = ref_params_for_sub_domain(test, Float64, P;
+        maxcycle, maxtime, N, kwargs...
+    )
+
+    data = BlockGrid(ref_params)
+    Armon.init_test(ref_params, data)
+
+    init_mass, init_energy = Armon.conservation_vars(ref_params, data)
+    Armon.time_loop(ref_params, data)
+    end_mass, end_energy = Armon.conservation_vars(ref_params, data)
+
+    @root_test   init_mass ≈ end_mass   atol=1e-12
+    @root_test init_energy ≈ end_energy atol=1e-12
+end
+
 
 total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
 
 @testset "MPI" begin
-    @testset "$(join(P, '×'))" for P in domain_combinations
+    @testset "$(join(P, '×'))" for P in (
+        (1, 1),
+        (1, 2),
+        (1, 4),
+        (4, 1),
+        (2, 2),
+        (4, 4),
+        (5, 2),
+        (2, 5),
+        (5, 5)
+    )
         enough_processes = prod(P) ≤ total_proc_count
         if enough_processes
             is_root && @info "Testing with a $P domain"
@@ -456,24 +456,20 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
             @testset "Conservation" begin
                 @testset "$test" for test in (:Sod, :Sod_y, :Sod_circ)
                     if enough_processes && proc_in_grid
-                        ref_params = ref_params_for_sub_domain(test, Float64, P;
-                            maxcycle=10000, maxtime=10000,
-                            N=(NX, NY), global_comm=comm
-                        )
-
-                        data = BlockGrid(ref_params)
-                        Armon.init_test(ref_params, data)
-
-                        init_mass, init_energy = Armon.conservation_vars(ref_params, data)
-                        Armon.time_loop(ref_params, data)
-                        end_mass, end_energy = Armon.conservation_vars(ref_params, data)
-                    else
-                        init_mass, init_energy = 0., 0.
-                        end_mass,  end_energy  = 0., 0.
+                        test_conservation(test, P, (100, 100); global_comm=comm)
                     end
+                end
+            end
 
-                    @root_test   init_mass ≈ end_mass    atol=1e-12  skip=!enough_processes
-                    @root_test init_energy ≈ end_energy  atol=1e-12  skip=!enough_processes
+            @testset "Uneven domain" begin
+                @testset "$(join(domain, '×'))" for domain in (
+                        (107, 113),
+                        (20, 20),
+                        (37, 241)
+                    )
+                    if enough_processes && proc_in_grid
+                        test_conservation(:Sod_circ, P, domain; maxcycle=100, global_comm=comm)
+                    end
                 end
             end
         end

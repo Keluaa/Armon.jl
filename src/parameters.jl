@@ -245,6 +245,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     # Domain parameters
     nghost::Int
     N::NTuple{2, Int}
+    N_origin::NTuple{2, Int}  # Position of the first cell in the global domain
     domain_size::NTuple{2, Flt_T}
     origin::NTuple{2, Flt_T}
     cfl::Flt_T
@@ -378,12 +379,6 @@ function init_MPI(params::ArmonParameters;
         solver_error(:config, "Mismatched dimensions: expected a grid of $(length(N)) processes, got: $(length(P))")
     end
 
-    if any(params.N .% P .!= 0)
-        P_str = join(P, '×')
-        N_str = join(params.N, '×')
-        solver_error(:config, "The dimensions of the global domain $N_str are not divisible by the number of processors $P_str")
-    end
-
     params.use_MPI = use_MPI
     params.reorder_grid = reorder_grid
     params.gpu_aware = gpu_aware
@@ -398,6 +393,12 @@ function init_MPI(params::ArmonParameters;
         # Create a cartesian grid communicator of P processes. `reorder=true` can be very important
         # for performance since it will optimize the layout of the processes.
         C_COMM = MPI.Cart_create(global_comm, P; reorder=reorder_grid)
+        if C_COMM == MPI.COMM_NULL
+            p_str = join(P, '×')
+            solver_error(:config, "`MPI_Cart_create` could not create a $p_str cartesian topology \
+                                   using $(params.proc_size) processes")
+        end
+
         params.cart_comm = C_COMM
         params.cart_coords = Tuple(MPI.Cart_coords(C_COMM))
 
@@ -603,7 +604,21 @@ function init_indexing(params::ArmonParameters; options...)
     params.global_grid = params.N
 
     # Dimensions of an array of the sub-domain
-    params.N = params.N .÷ params.proc_dims
+    params.N =
+        # Spread the global domain evenly to all processes
+        params.global_grid .÷ params.proc_dims .+
+        # The processes at the edge of the process grid get the remaining cells
+        ifelse.(params.cart_coords .== params.proc_dims .- 1, params.global_grid .% params.proc_dims, 0)
+
+    if any(params.proc_dims .> 1 .&& params.N .< params.nghost)
+        # We want more real cells than ghost cells to avoid having to depend on processes farther
+        # than the direct neighbours.
+        solver_error(:config, "domain $(params.global_grid) is too small to be split by \
+                               $(params.proc_dims) processes while keeping more than $(params.nghost) \
+                               cells along each axis")
+    end
+
+    params.N_origin = params.cart_coords .* (params.global_grid .÷ params.proc_dims) .+ 1
 
     compute_steps_ranges(params)
 

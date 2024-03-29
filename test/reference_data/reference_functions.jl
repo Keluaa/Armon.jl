@@ -68,9 +68,9 @@ no_zero(x::Flt) where {Flt <: AbstractFloat} = ifelse(iszero(x), nextfloat(zero(
 
 function count_differences(
     ref_params::ArmonParameters{T}, grid::BlockGrid,
-    blk::Armon.LocalTaskBlock, ref_blk::Armon.LocalTaskBlock;
+    blk::Armon.LocalTaskBlock{<:Any, <:Any, BS}, ref_blk::Armon.LocalTaskBlock{<:Any, <:Any, BS};
     atol=abs_tol(T, ref_params.test), rtol=rel_tol(T, ref_params.test), save_diff=false, on_device=false
-) where {T}
+) where {T, BS}
     diff_var = Armon.block_data(blk; on_device).work_1
     save_diff && (diff_var .= 0)
 

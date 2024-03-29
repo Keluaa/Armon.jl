@@ -178,7 +178,7 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
 
     # Position of the origin of this block
     real_static_bsize = params.block_size .- 2*params.nghost
-    blk_global_pos = params.cart_coords .* params.N .+ (Tuple(blk.pos) .- 1) .* real_static_bsize
+    blk_global_pos = params.N_origin .- 1 .+ (Tuple(blk.pos) .- 1) .* real_static_bsize
 
     # Cell dimensions
     ΔX = params.domain_size ./ params.global_grid

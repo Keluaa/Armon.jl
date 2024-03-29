@@ -115,7 +115,7 @@ function compare_block(
     different = false
 
     real_static_bsize = params.block_size .- 2*params.nghost
-    blk_global_pos = params.cart_coords .* params.N .+ (Tuple(our_blk.pos) .- 1) .* real_static_bsize
+    blk_global_pos = params.N_origin .- 1 .+ (Tuple(our_blk.pos) .- 1) .* real_static_bsize
 
     ref_vars = get_vars(ref_blk, vars; on_device=false)
     our_vars = get_vars(our_blk, vars; on_device=false)
