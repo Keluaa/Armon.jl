@@ -24,7 +24,7 @@ end
 TEST_TYPES_MPI = (Float64,)
 TEST_CASES_MPI = (:Sod, :Sod_y, :Sod_circ)
 # TEST_CASES_MPI = (:Sod, :Sod_y, :Sod_circ, :Sedov, :Bizarrium)
-@warn "Sedov and Bizarrium test cases are broken with MPI"  # TODO: fix
+is_root && @warn "Sedov and Bizarrium test cases are broken with MPI"  # TODO: fix
 
 
 TEST_KOKKOS_MPI = parse(Bool, get(ENV, "TEST_KOKKOS_MPI", "false"))
@@ -151,7 +151,21 @@ macro MPI_test(comm, expr, kws...)
 
     # Run `expr` only if !skip, reduce the test result, then only the root prints and calls @test
     return esc(quote
-        let comm = $comm, skip::Bool = $skip, test_rank_ok::Int = skip ? false : $expr;
+        let comm = $comm, skip::Bool = $skip, test_rank_ok::Int = if skip
+                false
+            else
+                try
+                    $expr
+                catch e
+                    global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
+                    local_rank = MPI.Comm_rank(comm)
+                    rank_str = "[$global_rank (local: $local_rank)] caught an error: "
+                    err_str = "ERROR: " * sprint(showerror, e; context=stdout)
+                    bt_str = sprint(Base.show_backtrace, catch_backtrace(); context=stdout)
+                    println(rank_str * "\n" * err_str * "\n" * bt_str)  # Print as single string, to avoid interleaved messages
+                    MPI.Abort(MPI.COMM_WORLD, 1)  # Cannot recover in an MPI app
+                end
+            end;
             test_result = skip ? 0 : MPI.Allreduce(test_rank_ok, MPI.PROD, comm)
             test_result = test_result > 0
             if !test_result && !skip
@@ -398,6 +412,8 @@ function test_conservation(test, P, N; maxcycle=10000, maxtime=10000, kwargs...)
 
     @root_test   init_mass ≈ end_mass   atol=1e-12
     @root_test init_energy ≈ end_energy atol=1e-12
+
+    return true
 end
 
 
@@ -467,9 +483,9 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
                         (20, 20),
                         (37, 241)
                     )
-                    if enough_processes && proc_in_grid
+                    @MPI_test comm begin
                         test_conservation(:Sod_circ, P, domain; maxcycle=100, global_comm=comm)
-                    end
+                    end skip=!enough_processes || !proc_in_grid
                 end
             end
         end

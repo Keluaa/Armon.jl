@@ -402,33 +402,25 @@ end
 
 
 function row_range_from_corners(grid, bl_blk_pos, tr_blk_pos, include_ghosts, last_offset=nothing)
-    if include_ghosts
-        static_row_count = (1, static_block_size(grid)[2:end]...)
-        edge_row_count = (1, (grid.edge_size[2:end] .+ 2*ghosts(grid))...)
-    else
-        static_row_count = (1, real_block_size(grid)[2:end]...)
-        edge_row_count = (1, grid.edge_size[2:end]...)
-    end
+    bs = include_ghosts ? static_block_size(grid) : real_block_size(grid)
+    static_row_count = (1, bs[2:end]...)
 
-    first_row_pos = ifelse.(
-        in_grid.(Ref(bl_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
-        static_row_count .* (bl_blk_pos .- 1) .+ 1,
-        static_row_count .* grid.static_sized_grid .+ 1
-    )
+    first_row_pos = block_origin(grid, bl_blk_pos, include_ghosts)
+    first_row_pos = ((first_row_pos[1] - 1) ÷ ifelse(bs[1] == 0, 1, bs[1]) + 1, first_row_pos[2:end]...)
+
+    last_row_pos = block_origin(grid, tr_blk_pos, include_ghosts)
+    last_row_pos = ((last_row_pos[1] - 1) ÷ ifelse(bs[1] == 0, 1, bs[1]) + 1, last_row_pos[2:end]...)
 
     if last_offset === nothing
-        last_row_pos = ifelse.(
+        # The default is to iterate over all rows, so we want the number of rows in `tr_blk_pos`
+        edge_size = (1, (grid.edge_size[2:end] .+ (include_ghosts ? 2*ghosts(grid) : 0))...)
+        last_offset = ifelse.(
             in_grid.(Ref(tr_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
-            static_row_count .* tr_blk_pos,
-            static_row_count .* grid.static_sized_grid .+ edge_row_count
-        )
-    else
-        last_row_pos = ifelse.(
-            in_grid.(Ref(tr_blk_pos), Ref(grid.static_sized_grid), instances(Axis.T)),
-            static_row_count .* (tr_blk_pos .- 1) .+ last_offset,
-            static_row_count .* grid.static_sized_grid .+ last_offset
+            static_row_count,
+            edge_size
         )
     end
+    last_row_pos = last_row_pos .+ last_offset .- 1
 
     return first_row_pos, last_row_pos
 end

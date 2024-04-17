@@ -310,13 +310,23 @@ from the `block_size` (the size of blocks in the `static_sized_grid`), the `doma
 real cells) and the number of `ghost` cells, common to all blocks.
 
 `grid_size` is the `static_sized_grid` including the edge blocks.
-Edge blocks along the axis `d` have a size of `remainder_block_size[d]` along `d`, and `block_size`
-for the other axes.
+Edge blocks along the axis `d` have a size of `remainder_block_size[d]` along `d` only if they are
+at the edge of the grid along `d`, or `block_size` otherwise.
 
 `block_size` includes the `ghost` cells in its dimensions, which must all be greater than `2*ghost`.
 
 If `prod(block_size) == 0`, then `block_size` is ignored and the grid is made of only a single block
 of size `domain_size`.
+
+!!! note
+
+    Blocks must not be smaller than `ghost`, therefore edge blocks might be made bigger than
+    `block_size`.
+
+!!! note
+    
+    In case `domain_size` is smaller than `block_size .- 2*ghost` along any axis, the grid will
+    contain only edge blocks.
 """
 grid_dimensions(params::ArmonParameters) = grid_dimensions(params.block_size, params.N, params.nghost)
 
@@ -343,19 +353,21 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
     # the halo-exchange since ghosts cells at the edge of the static sized grid depend on all real cells
     # of the neighbouring edge block BUT ALSO the ghosts of that same edge block, themselves depending
     # on a remote block (or on the global border conditions).
-    # To solve this, those remaining cells are merged with the neighbouring static sized blocks.
+    # To solve this, those remaining cells are merged with the neighbouring static sized blocks, by
+    # creating more edge blocks with a size bigger than `block_size`.
     remainder_too_small = 0 .< remainder .< ghost .&& grid_size .> 0
-    if any(remainder_too_small)
-        remainder = remainder .+ real_block_size .* remainder_too_small
-        grid_size = grid_size .- remainder_too_small
-        prod(grid_size) == 0 && (grid_size = ntuple(Returns(0), D))
-    end
+    remainder = remainder .+ real_block_size .* remainder_too_small
 
-    static_sized_grid = grid_size  # Grid of blocks with a static size
-    any(remainder .> 0) && (grid_size = grid_size .+ (remainder .> 0))
+    # This deals with the edge case where the `domain_size` is smaller than `block_size` in one axis,
+    # resulting in all blocks to be edge blocks, but with a grid potentially bigger than `1×1`.
+    grid_size = (domain_size .- remainder) .÷ real_block_size
+
+    static_sized_grid = grid_size  # Grid of blocks with a static size of `block_size`
     prod(static_sized_grid) == 0 && (static_sized_grid = ntuple(Returns(0), D))
 
-    if prod(grid_size) < 1
+    grid_size = grid_size .+ (remainder .> 0)  # Include edge blocks in the `grid_size`
+
+    if any(grid_size .< 1)
         solver_error(:config, "could not partition $domain_size domain using $block_size blocks with $ghost ghost cells")
     end
 
@@ -682,6 +694,32 @@ function block_pos_containing_cell(grid::BlockGrid, pos)
 end
 
 
+"""
+    block_origin(grid::BlockGrid, pos, include_ghosts=false)
+
+A `Tuple` of the position of the cell at the bottom left corner of the [`LocalTaskBlock`](@ref) at
+`pos` in the `grid`.
+
+If `include_ghosts == true`, then the cell position includes all ghost cells of the `grid`.
+
+`pos` can be any of `Integer`, `NTuple{N, Integer}` or `CartesianIndex`.
+"""
+function block_origin(grid::BlockGrid, pos, include_ghosts=false)
+    bs = include_ghosts ? static_block_size(grid) : real_block_size(grid)
+    if in_grid(pos, grid.static_sized_grid)
+        return bs .* (Tuple(pos) .- 1) .+ 1
+    elseif any(grid.static_sized_grid .== 0)
+        return ifelse.(grid.grid_size .> 1, bs .* (Tuple(pos) .- 1) .+ 1, 1)
+    else
+        return ifelse.(
+            in_grid.(Ref(Tuple(pos)), Ref(grid.static_sized_grid), instances(Axis.T)),
+            bs .* (Tuple(pos) .- 1) .+ 1,
+            bs .* grid.static_sized_grid .+ 1
+        )
+    end
+end
+
+
 function print_grid_dimensions(
     io::IO, grid_size::Tuple, static_grid::Tuple, static_block_size::Tuple,
     cell_size::Tuple, ghost; pad=20
@@ -697,12 +735,14 @@ function print_grid_dimensions(
     real_size = join(static_block_size .- 2*ghost, '×')
     real_count = prod(static_block_size .- 2*ghost)
     ghost_count = static_cell_count - real_count
-    real_ghost_ratio = @sprintf("%.02g%%", ghost_count / static_cell_count * 100)
+    real_ghost_ratio = @sprintf("%.03g%%", ghost_count / static_cell_count * 100)
 
     edge_block_count = prod(grid_size) - static_block_count
-    edge_pos = []
-    static_grid[1] < grid_size[1] && push!(edge_pos, "right")
-    static_grid[2] < grid_size[2] && push!(edge_pos, "top")
+    edge_pos = String[]
+    for axis in instances(Axis.T)
+        static_grid[Int(axis)] ≥ grid_size[Int(axis)] && continue
+        push!(edge_pos, lowercasefirst(string(last_side(axis))))
+    end
     if !isempty(edge_pos)
         edge_pos_str = "at the " * join(edge_pos, ", ", " and ") * " edge"
         length(edge_pos) > 1 && (edge_pos_str *= "s")
@@ -712,13 +752,13 @@ function print_grid_dimensions(
 
     static_block_cells = static_block_count * prod(static_block_size .- 2*ghost)
     edge_block_cells = prod(cell_size) - static_block_cells
-    edge_cell_ratio = @sprintf("%.02g%%", edge_block_cells / prod(cell_size) * 100)
-    edge_block_ratio = @sprintf("%.02g%%", edge_block_count / block_count * 100)
+    edge_cell_ratio = @sprintf("%.03g%%", edge_block_cells / prod(cell_size) * 100)
+    edge_block_ratio = @sprintf("%.03g%%", edge_block_count / block_count * 100)
 
     remote_block_count = 2*sum(grid_size)
     remote_buffers_size = 2*sum(cell_size) * ghost
 
-    static_block_ratio = @sprintf("%.02g%%", static_block_count / block_count * 100)
+    static_block_ratio = @sprintf("%.03g%%", static_block_count / block_count * 100)
 
     print_parameter(io, pad, "block size", "$static_block_str cells ($static_cell_count total)")
 
@@ -727,21 +767,21 @@ function print_grid_dimensions(
         # No blocking: there is only a single block in the grid
         total_cells = prod(cell_size .+ 2*ghost)
         ghost_count = total_cells - prod(cell_size)
-        real_ghost_ratio = @sprintf("%.02g%%", ghost_count / total_cells * 100)
+        real_ghost_ratio = @sprintf("%.03g%%", ghost_count / total_cells * 100)
         print_parameter(io, pad, "static grid", "0 static blocks")
         print_parameter(io, pad, "edge grid", "1 edge block, containing all cells, \
             with $ghost ghost cells ($ghost_count total, $real_ghost_ratio of the block)")
     else
         print_parameter(io, pad, "static grid", "$static_grid_str static blocks \
-            ($static_block_count total, $static_block_ratio)")
+            ($static_block_count total, $static_block_ratio of all blocks)")
         print_parameter(io, pad, "static block",
             "$real_size real cells ($real_count total), \
             with $ghost ghost cells ($ghost_count total, $real_ghost_ratio of the block)")
-        print_parameter(io, pad, "edge grid", "$edge_block_count edge blocks ($edge_block_ratio)")
+        print_parameter(io, pad, "edge grid", "$edge_block_count edge blocks ($edge_block_ratio of all blocks)")
         print_parameter(io, pad, "edge blocks", "$edge_pos_str, containing $edge_cell_ratio of all real cells")
     end
     print_parameter(io, pad, "remote grid", "$remote_block_count remote blocks, \
-        containing $remote_buffers_size cells (max)"; nl=false)
+        containing up to $remote_buffers_size cells"; nl=false)
 end
 
 

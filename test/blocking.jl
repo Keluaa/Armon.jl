@@ -188,6 +188,9 @@ end
         (5, ( 47, 100), (17, 37)),
         (4, ( 96,  96), (32, 32)),  # No edge blocks
         (4, ( 16,  16), (32, 32)),  # Only edge blocks
+        (4, (100,  50), (64, 64)),  # Only edge blocks, multiple along X
+        (4, ( 50, 100), (64, 64)),  # Only edge blocks, multiple along Y
+        (4, (107,  57), (64, 64)),  # Only edge blocks, multiple along X, with a fused block at the end
         (3, ( 16,  33), ( 0,  0)),  # No blocking, only edge blocks
         (4, (100, 100), (57, 57)),  # Edge blocks bigger than static blocks
         (0, (100, 100), (32, 32)),  # 0 ghosts
@@ -202,6 +205,7 @@ end
         grid = Armon.BlockGrid(params)
         Armon.init_test(params, grid)
 
+        # Iterate through all real cells of all blocks
         i = 1
         fail_pos = nothing
         for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid)
