@@ -263,7 +263,7 @@ There is always `2*D` regions.
 
 ```jldoctest
 julia> collect(Armon.RemoteBlockRegions((5, 3)))
-4-element Vector{CartesianIndices{2, Tuple{UnitRange{Int64}, UnitRange{Int64}}}}:
+4-element Vector{Tuple{Armon.Side.T, CartesianIndices{2, Tuple{UnitRange{Int64}, UnitRange{Int64}}}}}:
  (Armon.Side.Left, CartesianIndices((0:0, 1:3)))
  (Armon.Side.Right, CartesianIndices((6:6, 1:3)))
  (Armon.Side.Bottom, CartesianIndices((1:5, 0:0)))

@@ -39,6 +39,7 @@ CUDA = "4.1 - 5, 5"
 EnumX = "1"
 KernelAbstractions = "0.9"
 MPI = "0.20.16"
+Polyester = "0.7 - 0.7.11, ≥0.7.13"
 julia = ">= 1.9"
 oneAPI = "1"
 
