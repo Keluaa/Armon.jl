@@ -49,6 +49,7 @@ RemoteBlockRegions
 @iter_blocks
 block_pos_containing_cell
 block_origin
+block_at
 ```
 
 ### Block size and iteration
