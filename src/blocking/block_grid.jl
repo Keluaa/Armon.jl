@@ -264,9 +264,9 @@ There is always `2*D` regions.
 ```jldoctest
 julia> collect(Armon.RemoteBlockRegions((5, 3)))
 4-element Vector{CartesianIndices{2, Tuple{UnitRange{Int64}, UnitRange{Int64}}}}:
- (Armon.Side.Left, CartesianIndices((-1:-1, 1:3)))
+ (Armon.Side.Left, CartesianIndices((0:0, 1:3)))
  (Armon.Side.Right, CartesianIndices((6:6, 1:3)))
- (Armon.Side.Bottom, CartesianIndices((1:5, -1:-1)))
+ (Armon.Side.Bottom, CartesianIndices((1:5, 0:0)))
  (Armon.Side.Top, CartesianIndices((1:5, 4:4)))
 ```
 """
@@ -367,6 +367,12 @@ function grid_dimensions(block_size::NTuple{D, Int}, domain_size::NTuple{D, Int}
 
     grid_size = grid_size .+ (remainder .> 0)  # Include edge blocks in the `grid_size`
 
+    if prod(static_sized_grid) == 0
+        # Edge case: for grids made only of edge blocks, axes with `remainder[ax] == 0` should instead
+        # be `real_block_size`.
+        remainder = ifelse.(remainder .== 0, real_block_size, remainder)
+    end
+
     if any(grid_size .< 1)
         solver_error(:config, "could not partition $domain_size domain using $block_size blocks with $ghost ghost cells")
     end
@@ -422,7 +428,7 @@ function edge_block_idx(grid::BlockGrid, idx::CartesianIndex)
     offset = 0
     for (block_count, blocks_pos, _) in EdgeBlockRegions(grid)
         if idx in blocks_pos
-            pos_idx = idx - first(blocks_pos) + one(idx)  # `block_pos[pos_idx] == idx`
+            pos_idx = idx - first(blocks_pos) + oneunit(idx)  # `block_pos[pos_idx] == idx`
             return LinearIndices(blocks_pos)[pos_idx] + offset
         end
         offset += block_count
@@ -440,7 +446,7 @@ function remote_block_idx(grid::BlockGrid, idx::CartesianIndex)
     offset = 0
     for (_, blocks_pos) in RemoteBlockRegions(grid)
         if idx in blocks_pos
-            pos_idx = idx - first(blocks_pos) + one(idx)  # `block_pos[pos_idx] == idx`
+            pos_idx = idx - first(blocks_pos) + oneunit(idx)  # `block_pos[pos_idx] == idx`
             return LinearIndices(blocks_pos)[pos_idx] + offset
         end
         offset += length(blocks_pos)

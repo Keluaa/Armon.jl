@@ -191,6 +191,8 @@ end
         (4, (100,  50), (64, 64)),  # Only edge blocks, multiple along X
         (4, ( 50, 100), (64, 64)),  # Only edge blocks, multiple along Y
         (4, (107,  57), (64, 64)),  # Only edge blocks, multiple along X, with a fused block at the end
+        (4, ( 53,  56), (64, 64)),  # One edge block, but one of the side fits the block size exactly
+        (4, ( 53, 112), (64, 64)),  # Two edge blocks, but one of the side fits the block size exactly
         (3, ( 16,  33), ( 0,  0)),  # No blocking, only edge blocks
         (4, (100, 100), (57, 57)),  # Edge blocks bigger than static blocks
         (0, (100, 100), (32, 32)),  # 0 ghosts
