@@ -248,15 +248,6 @@ in_grid(idx, grid, axis::Axis.T) = in_grid(1, idx, grid, axis)
 in_grid(start, idx, grid, axis::Axis.T) = (Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))[Int(axis)]
 
 
-const Neighbours = @NamedTuple{left::T, right::T, bottom::T, top::T} where {T}
-
-function (::Type{Neighbours})(f::Base.Callable, default)
-    # Default constructor, e.g: `Neighbours(Int, 0)` => Neighbours{Int}(left=0, right=0, ...)
-    values = ntuple(_ -> f(default), fieldcount(Neighbours))
-    return Neighbours{eltype(values)}(values)
-end
-
-
 """
     BlockInterface
 

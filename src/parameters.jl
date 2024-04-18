@@ -296,7 +296,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     global_comm::MPI.Comm
     cart_comm::MPI.Comm
     cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
-    neighbours::Dict{Side.T, Int}  # Ranks of the neighbours of this process
+    neighbours::Neighbours{Int32, 2}  # Ranks of the neighbours of this process
     global_grid::NTuple{2, Int}  # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
@@ -375,8 +375,10 @@ function init_MPI(params::ArmonParameters;
     global_comm = something(global_comm, MPI.COMM_WORLD)
     params.global_comm = global_comm
 
-    if length(P) != length(params.N)
-        solver_error(:config, "Mismatched dimensions: expected a grid of $(length(N)) processes, got: $(length(P))")
+    dim = length(params.N)
+
+    if length(P) != dim
+        solver_error(:config, "Mismatched dimensions: expected a grid of $dim processes, got: $(length(P))")
     end
 
     params.use_MPI = use_MPI
@@ -402,25 +404,16 @@ function init_MPI(params::ArmonParameters;
         params.cart_comm = C_COMM
         params.cart_coords = Tuple(MPI.Cart_coords(C_COMM))
 
-        # TODO: dimension agnostic
-        params.neighbours = Dict(
-            Side.Left   => MPI.Cart_shift(C_COMM, 0, -1)[2],
-            Side.Right  => MPI.Cart_shift(C_COMM, 0,  1)[2],
-            Side.Bottom => MPI.Cart_shift(C_COMM, 1, -1)[2],
-            Side.Top    => MPI.Cart_shift(C_COMM, 1,  1)[2]
-        )
+        params.neighbours = Neighbours(dim) do axis, side
+            return MPI.Cart_shift(C_COMM, Int(axis) - 1, offset_to(side, 1)[1])[2]
+        end
     else
         params.rank = 0
         params.proc_size = 1
-        params.proc_dims = ntuple(Returns(1), length(params.N))
+        params.proc_dims = ntuple(Returns(1), dim)
         params.cart_comm = global_comm
-        params.cart_coords = ntuple(Returns(0), length(params.N))
-        params.neighbours = Dict(
-            Side.Left   => MPI.PROC_NULL,
-            Side.Right  => MPI.PROC_NULL,
-            Side.Bottom => MPI.PROC_NULL,
-            Side.Top    => MPI.PROC_NULL
-        )
+        params.cart_coords = ntuple(Returns(0), dim)
+        params.neighbours = Neighbours(Returns(MPI.PROC_NULL), dim)
     end
 
     params.root_rank = 0
@@ -800,7 +793,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     if p.use_MPI
         print_parameter(io, pad, "coords", join(p.cart_coords, "×"), nl=false)
         print(io, " (rank: ", p.rank, "/", p.proc_size-1, ")")
-        neighbours_list = filter(≠(MPI.PROC_NULL) ∘ last, p.neighbours) |> collect .|> first
+        neighbours_list = filter(s -> has_neighbour(p, s), sides_of(ndims(p)))
         neighbours_str = join(neighbours_list, ", ", " and ") |> lowercase
         print(io, ", with $(neighbour_count(p)) neighbour", neighbour_count(p) != 1 ? "s" : "")
         println(io, neighbour_count(p) > 0 ? " on the " * neighbours_str : "")
@@ -855,8 +848,8 @@ data_type(::ArmonParameters{T}) where T = T
 neighbour_at(params::ArmonParameters, side::Side.T) = params.neighbours[side]
 has_neighbour(params::ArmonParameters, side::Side.T) = params.neighbours[side] ≠ MPI.PROC_NULL
 
-neighbour_count(params::ArmonParameters) = count(≠(MPI.PROC_NULL), values(params.neighbours))
-neighbour_count(params::ArmonParameters, dir::Axis.T) = count(≠(MPI.PROC_NULL), neighbour_at.(params, sides_along(dir)))
+neighbour_count(params::ArmonParameters) = count(s -> has_neighbour(params, s), sides_of(ndims(p)))
+neighbour_count(params::ArmonParameters, dir::Axis.T) = count(s -> has_neighbour(params, s), sides_along(dir))
 
 
 # Default copy method

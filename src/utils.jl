@@ -27,7 +27,7 @@ module Axis
     Base.typemin(::Type{T}) = T(UInt8(1))
     Base.typemax(::Type{T}) = T(UInt8(126))  # Nearest multiple of two before `typemax(UInt8)÷2`
 
-    axis_name(a::UInt8) = a ≤ 3 ? (:X, :Y, :Z)[a] : Symbol(:Axis_, a)
+    axis_name(a::UInt8) = 1 ≤ a ≤ 3 ? (:X, :Y, :Z)[a] : Symbol(:Axis_, a)
     axis_name(a::T) = axis_name(UInt8(a))
     Base.Symbol(a::T) = axis_name(a)
     Base.Enums._symbol(a::T) = axis_name(a)
@@ -108,7 +108,7 @@ module Side
     Base.typemin(::Type{T}) = T(UInt8(1))
     Base.typemax(::Type{T}) = T(UInt8(254))  # Nearest multiple of two before `typemax(UInt8)`
 
-    side_name(s::UInt8) = s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Back, :Front)[s] : Symbol(:Side_, s)
+    side_name(s::UInt8) = 1 ≤ s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Back, :Front)[s] : Symbol(:Side_, s)
     side_name(s::T) = side_name(UInt8(s))
     Base.Symbol(s::T) = side_name(s)
     Base.Enums._symbol(s::T) = side_name(s)
@@ -302,6 +302,44 @@ function side_from_offset(offset::NTuple{D, <:Integer}) where {D}
     end
     return Side.Left  # Should not happen, here only for type-stability (responsability of the caller)
 end
+
+
+"""
+    Neighbours{T, D}
+
+Immutable `Vector`-like object storing one `T` for each of [`sides_of(D)`](@ref).
+Can be indexed using [`Side`](@ref) (returns a `T`), [`Axis`](@ref) or `Int` (returns a `NTuple{2, T}`,
+one `T` for each side of the axis).
+
+```jldoctest
+julia> n = Armon.Neighbours((ax, s) -> s, 2)
+2-element Armon.Neighbours{Armon.Side.T, 2}:
+ (Armon.Side.Left, Armon.Side.Right)
+ (Armon.Side.Bottom, Armon.Side.Top)
+
+julia> n[Armon.Side.Left]
+Left::Side.T = 1
+
+julia> n[Armon.Axis.X]
+(Armon.Side.Left, Armon.Side.Right)
+```
+"""
+struct Neighbours{T, D} <: AbstractVector{NTuple{2, T}}
+    val :: NTuple{D, NTuple{2, T}}
+
+    Neighbours{T, D}(val) where {T, D} = new{T, D}(val)
+    Neighbours(val::NTuple{D, NTuple{2, T}}) where {T, D} = Neighbours{T, D}(val)
+end
+
+Neighbours(f::Base.Callable, axes::Tuple{Vararg{Axis.T}}) = Neighbours(f.(axes))
+Neighbours(f::Base.Callable, dim::Integer) = Neighbours(ax -> f.(ax, sides_along(ax)), axes_of(dim))
+
+Base.@propagate_inbounds Base.getindex(neigh::Neighbours, axis::Axis.T) = neigh.val[Integer(axis)]
+Base.@propagate_inbounds Base.getindex(neigh::Neighbours, side::Side.T) = neigh[axis_of(side)][1+last_side(side)]
+Base.@propagate_inbounds Base.getindex(neigh::Neighbours, i::Int) = neigh.val[i]
+
+Base.IndexStyle(::Type{<:Neighbours}) = Base.IndexLinear()
+Base.size(::Neighbours{T, D}) where {T, D} = (D,)
 
 
 """

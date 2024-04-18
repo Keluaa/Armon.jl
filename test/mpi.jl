@@ -330,7 +330,7 @@ function test_halo_exchange(P, global_comm)
                 Armon.host_to_device!(blk)
 
                 # Halo exchange, but with one neighbour at a time
-                remote_blk = blk.neighbours[Int(side)]
+                remote_blk = blk.neighbours[side]
                 @root_test length(domain) * length(Armon.comm_vars()) == length(remote_blk.send_buf.data)
                 if !Armon.start_exchange(ref_params, blk, remote_blk, side)
                     MPI.Waitall(remote_blk.requests)
