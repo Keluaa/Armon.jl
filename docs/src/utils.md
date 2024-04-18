@@ -24,6 +24,7 @@ axis_of
 opposite_of
 offset_to
 side_from_offset
+Neighbours
 ```
 
 ## NUMA utilities

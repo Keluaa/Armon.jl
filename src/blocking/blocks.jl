@@ -69,8 +69,8 @@ mutable struct LocalTaskBlock{D, H, Size <: BlockSize, SState <: SolverState} <:
     state        :: SState             # Solver state for the block
     size         :: Size               # Size (in cells) of the block
     pos          :: CartesianIndex{2}  # Position in the local block grid
-    neighbours   :: Neighbours{TaskBlock}
-    exchanges    :: Neighbours{BlockInterface}  # State of ghost cells exchanges for each side
+    neighbours   :: Neighbours{TaskBlock, 2}
+    exchanges    :: Neighbours{BlockInterface, 2}  # State of ghost cells exchanges for each side
     device_data  :: BlockData{D}
     host_data    :: BlockData{H}  # Host data uses the same arrays as device data if `D == H`
     # TODO: device? storing the associated GPU stream, or CPU cores (or maybe not, to allow relocations?)

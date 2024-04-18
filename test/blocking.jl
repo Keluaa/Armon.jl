@@ -63,15 +63,16 @@
                         @test blk.neighbour.neighbour == blk
                     else
                         opposite_side = Armon.side_from_offset(Tuple(blk.pos) .- Tuple(blk.neighbour.pos))
-                        @test blk.neighbour.neighbours[Int(opposite_side)] == blk
+                        @test blk.neighbour.neighbours[opposite_side] == blk
                     end
                 else
-                    for (side, neighbour) in zip(Armon.sides_of(dim), blk.neighbours)
+                    for side in Armon.sides_of(dim)
+                        neighbour = blk.neighbours[side]
                         if neighbour isa Armon.RemoteTaskBlock
                             @test neighbour.neighbour == blk
                         else 
                             opposite_side = Armon.opposite_of(side)
-                            @test neighbour.neighbours[Int(opposite_side)] == blk
+                            @test neighbour.neighbours[opposite_side] == blk
                         end
                     end
                 end

@@ -326,7 +326,7 @@ function block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::
     # Exchange with the Left/Bottom neighbour
     side = first_side(state.axis)
     if !is_side_done(blk, side)
-        other_blk = blk.neighbours[Int(side)]
+        other_blk = blk.neighbours[side]
         left_exchange_state = block_ghost_exchange(params, state, blk, other_blk, side)
         left_exchange_state == BlockExchangeState.Done && side_is_done!(blk, side, true)
     else
@@ -336,7 +336,7 @@ function block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::
     # Exchange with the Right/Top neighbour
     other_side = opposite_of(side)
     if !is_side_done(blk, other_side)
-        other_blk = blk.neighbours[Int(other_side)]
+        other_blk = blk.neighbours[other_side]
         right_exchange_state = block_ghost_exchange(params, state, blk, other_blk, other_side)
         right_exchange_state == BlockExchangeState.Done && side_is_done!(blk, other_side, true)
     else
