@@ -151,9 +151,10 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
 end
 
 
-function simple_block_distribution(tid, threads, grid_size)
+function simple_block_distribution(tid, threads, block_count)
     # TODO: improve by taking into account the individual workload of each block
-    block_count = prod(grid_size)
+    # Spread `block_count` among `threads`, the remaining blocks are given to the first
+    # `remaining_blocks` threads: there will be max ±1 blocks per thread.
     blocks_per_thread = fld(block_count, threads)
     remaining_blocks = block_count - threads * blocks_per_thread
 
@@ -170,19 +171,119 @@ function simple_block_distribution(tid, threads, grid_size)
 end
 
 
-function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_count=typemax(Int))
-    # TODO: use meta-blocks, one for each core/thread, containing a set of `LocalTaskBlock`,
-    # with a predefined repartition and device
+function solver_cycle_async_init(params, tree::BlockTree)
+    is_leaf(tree) && error("BlockTree must have sub blocks")
+    length(params.block_tree_levels) != 4 && error("expected a BlockTree of depth 4, got: $(length(params.block_tree_levels))")
 
-    timeout = UInt(120e9)  # 120 sec  # TODO: should depend on the total workload, or be deactivatable
+    threads_count = params.use_threading ? min(length(tree.sub_blocks), Threads.nthreads()) : 1
+
+    threads_depth = length(params.block_tree_levels) - 1
+    if params.block_tree_levels[threads_depth] != threads_count
+        error("expected the second-to-last level to have $threads_count blocks, got: $(params.block_tree_levels[threads_depth])")
+    end
+
+    return threads_count
+end
+
+
+function solver_cycle_async_init_thread(params, ::BlockTree, _, _)
+    return length(params.block_tree_levels) - 1  # threads_depth
+end
+
+
+function solver_cycle_async_step(params, tree::BlockTree, threads_depth)
+    all_finished_cycle = true
+    visit_all_tree_block(tree; min_depth=threads_depth-1, max_depth=threads_depth-1) do _, sub_t
+        tid > length(sub_t.sub_blocks) && return
+        sb_all_finished_cycle = apply_until_true(sub_t.sub_blocks[tid]) do blk
+            return block_state_machine(params, blk)
+        end
+        all_finished_cycle &= sb_all_finished_cycle
+    end
+    return all_finished_cycle
+end
+
+
+function solver_cycle_async_init(params, ::BlockGrid)
     threads_count = params.use_threading ? Threads.nthreads() : 1
+    return threads_count
+end
 
-    @threaded :outside_kernel for _ in 1:threads_count
-        # TODO: optimize thread block iteration to make iter-block comms faster by iterating over the first-wise edges first
-        # TODO: thread block iteration should be done along the current axis
 
+function solver_cycle_async_init_thread(_, grid::BlockGrid, tid, threads_count)
+    return simple_block_distribution(tid, threads_count, prod(grid.grid_size))  # thread_blocks_idx
+end
+
+
+function solver_cycle_async_step(params, grid::BlockGrid, thread_blocks_idx)
+    all_finished_cycle = true
+    for blk_idx in thread_blocks_idx
+        blk_pos = CartesianIndices(grid.grid_size)[blk_idx]
+        # One path for each type of block to avoid runtime dispatch
+        if in_grid(blk_pos, grid.static_sized_grid)
+            blk = grid.blocks[block_idx(grid, blk_pos)]
+            all_finished_cycle &= block_state_machine(params, blk)
+        else
+            blk = grid.edge_blocks[edge_block_idx(grid, blk_pos)]
+            all_finished_cycle &= block_state_machine(params, blk)
+        end
+    end
+    return all_finished_cycle
+end
+
+
+function thread_workload(_, bt::BlockTree, tid, threads_depth)
+    tid_level_blocks = 0
+    blocks_count = 0
+
+    visit_all_tree_block(bt; min_depth=threads_depth-1, max_depth=threads_depth-1) do _, sub_t
+        tid > length(sub_t.sub_blocks) && return
+        last_level_blocks += 1
+        blocks_count += tree_block_count(sub_t.sub_blocks[tid])
+    end
+
+    return tid_level_blocks, blocks_count
+end
+
+
+function thread_workload(_, bg::BlockGrid, tid, threads_depth)
+    return 1, length(thread_blocks_idx)
+end
+
+
+"""
+    threads_workload(params::ArmonParameters, grid)
+
+Estimate the workload of each thread when using `solver_cycle_async` (i.e. `params.async_cycle == true`).
+Returns a `thread_count × 3` `Matrix`: the first column is the thread ID (sorted by ascending order),
+the second is the number of batches, the third is the number of [`LocalTaskBlock`](@ref).
+"""
+function threads_workload(params::ArmonParameters, grid)
+    threads_count = solver_cycle_async_init(params, grid)
+    workload = Matrix{Int64}(undef, (threads_count, 3))
+    workload .= 0
+
+    @threaded :outside_kernel for i in 1:threads_count
         tid = Threads.threadid()
-        thread_blocks_idx = simple_block_distribution(tid, threads_count, grid.grid_size)
+        distrib = solver_cycle_async_init_thread(params, grid, tid, threads_count)
+        tid_level_blocks, blocks_count = thread_workload(params, grid, tid, distrib)
+        workload[i, 1]  = tid
+        workload[i, 2] += tid_level_blocks
+        workload[i, 3] += blocks_count
+    end
+
+    return sortslices(workload; by=first, dims=1)  # Sort by tid
+end
+
+
+function solver_cycle_async(params::ArmonParameters, grid, block_grid::BlockGrid, max_step_count=typemax(Int))
+    timeout = UInt(120e9)  # 120 sec  # TODO: should depend on the total workload, or be deactivatable
+    threads_count = solver_cycle_async_init(params, grid)
+
+    # TODO: is Polyester.jl still needed here? The low overhead is not important here
+    @threaded :outside_kernel for _ in 1:threads_count
+        tid = Threads.threadid()
+        distrib = solver_cycle_async_init_thread(params, grid, tid, threads_count)
 
         t_start = time_ns()
         step_count = 1  # TODO: monitor the maximum `step_count` reached, if it is small, then ok, but with MPI this will not be the case
@@ -199,28 +300,18 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
                 # TODO: we are busy waiting for MPI comms/dependencies!! Stop using Polyester in this case and `yield()`!
             end
 
-            all_finished_cycle = true
-            for blk_idx in thread_blocks_idx
-                blk_pos = CartesianIndices(grid.grid_size)[blk_idx]
-                # One path for each type of block to avoid runtime dispatch
-                if in_grid(blk_pos, grid.static_sized_grid)
-                    blk = grid.blocks[block_idx(grid, blk_pos)]
-                    all_finished_cycle &= block_state_machine(params, blk)
-                else
-                    blk = grid.edge_blocks[edge_block_idx(grid, blk_pos)]
-                    all_finished_cycle &= block_state_machine(params, blk)
-                end
-            end
-            all_finished_cycle && break
-
+            # Since blocks may need multiple calls to `block_state_machine` for them to reach the end
+            # of the cycle, we must loop until all blocks are updated. One step is one call to
+            # `block_state_machine` on every block of `grid`.
+            solver_cycle_async_step(params, grid, distrib) && break
             step_count += 1
         end
     end
 
     # We cannot use checkpoints for each individual blocks, as it would require barriers.
-    # Therefore we only rely on the last one at the end of a cycle as well as the time step.
-    step_checkpoint(params, first_state(grid), grid, "time_step")        && return true
-    step_checkpoint(params, first_state(grid), grid, "projection_remap") && return true
+    # Therefore we only rely on a last one at the end of a cycle as well as for the time step.
+    step_checkpoint(params, first_state(block_grid), block_grid, "time_step")        && return true
+    step_checkpoint(params, first_state(block_grid), block_grid, "projection_remap") && return true
     return false
 end
 
@@ -269,6 +360,11 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
     total_cycles_time = 0.
     t1 = time_ns()
 
+    use_block_tree = !isempty(params.block_tree_levels)
+    if use_block_tree
+        block_tree = BlockTree(grid, params.block_tree_levels)
+    end
+
     # Main solver loop
     while global_dt.time < maxtime && global_dt.cycle < maxcycle
         cycle_start = time_ns()
@@ -276,7 +372,11 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
         stop = @section "solver_cycle" begin
             try
                 if params.async_cycle
-                    solver_cycle_async(params, grid)
+                    if use_block_tree
+                        solver_cycle_async(params, block_tree, grid)
+                    else
+                        solver_cycle_async(params, grid, grid)
+                    end
                 else
                     solver_cycle(params, grid)
                 end

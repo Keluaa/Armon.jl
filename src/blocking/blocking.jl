@@ -287,6 +287,7 @@ end
 include("blocks.jl")
 include("block_grid.jl")
 include("interface.jl")
+include("block_tree.jl")
 
 
 """

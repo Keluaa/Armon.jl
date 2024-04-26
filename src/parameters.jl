@@ -285,6 +285,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
     block_size::NTuple{2, Int}
+    block_tree_levels::Vector{Int}
 
     # MPI
     use_MPI::Bool
@@ -434,7 +435,7 @@ function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
-    use_two_step_reduction = false,
+    use_two_step_reduction = false, block_tree_levels = Int[],
     options...
 )
     params.use_threading = use_threading
@@ -444,6 +445,7 @@ function init_device(params::ArmonParameters;
     params.use_cache_blocking = use_cache_blocking
     params.use_two_step_reduction = use_two_step_reduction
     params.async_cycle = async_cycle
+    params.block_tree_levels = block_tree_levels
 
     if use_cache_blocking && use_threading && params.use_MPI
         thread_level = MPI.Query_thread()
@@ -452,6 +454,10 @@ function init_device(params::ArmonParameters;
                                    initialized with `threadlevel ≥ MPI.THREAD_MULTIPLE`, \
                                    got: $thread_level")
         end
+    end
+
+    if !isempty(block_tree_levels) && !(use_cache_blocking && async_cycle)
+        solver_error(:config, "Block trees can only be used alongside asynchronous cache blocking")
     end
 
     if !use_cache_blocking
@@ -812,6 +818,9 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
 
     grid_size, static_sized_grid, _ = grid_dimensions(p)
     print_grid_dimensions(io, grid_size, static_sized_grid, p.block_size, p.N, p.nghost; pad)
+    if !isempty(p.block_tree_levels)
+        print_parameter(io, pad, "block tree", join(p.block_tree_levels, '×'))
+    end
 end
 
 

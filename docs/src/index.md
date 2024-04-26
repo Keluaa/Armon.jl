@@ -40,7 +40,7 @@ device_to_host!
 host_to_device!
 buffers_on_device
 device_is_host
-all_blocks
+all_blocks(::BlockGrid)
 block_idx
 edge_block_idx
 remote_block_idx
@@ -50,6 +50,20 @@ RemoteBlockRegions
 block_pos_containing_cell
 block_origin
 block_at
+```
+
+## Block Tree
+
+```@docs
+BlockTree
+all_blocks(::BlockTree)
+is_leaf
+depth
+tree_block_count
+visit_all_tree_block
+iter_tree_block
+apply_until_true
+block_levels_for_machine
 ```
 
 ### Block size and iteration
@@ -143,5 +157,6 @@ memory_required
 Axis
 Side
 SolverException
+threads_workload
 @section
 ```
