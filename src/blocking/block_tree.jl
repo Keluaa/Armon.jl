@@ -38,8 +38,8 @@ function BlockTree(grid::BlockGrid, branches_per_level::Vector{Int})
 
     # Basic sanity check
     if tree_block_count(bt) ≠ prod(grid.grid_size)
-        # solver_error(:config, "failed to create a BlockTree, block count mismatch: $(tree_block_count(bt)) ≠ $(prod(grid.grid_size))")
-        @warn "failed to create a BlockTree, block count mismatch: $(tree_block_count(bt)) ≠ $(prod(grid.grid_size))"
+        solver_error(:config, "failed to create a BlockTree, block count mismatch: \
+                               $(tree_block_count(bt)) ≠ $(prod(grid.grid_size))")
     end
 
     return bt

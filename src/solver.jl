@@ -173,9 +173,10 @@ end
 
 function solver_cycle_async_init(params, tree::BlockTree)
     is_leaf(tree) && error("BlockTree must have sub blocks")
-    length(params.block_tree_levels) != 4 && error("expected a BlockTree of depth 4, got: $(length(params.block_tree_levels))")
+    max_depth = length(params.block_tree_levels)
+    max_depth < 2 && error("expected a BlockTree of at least depth 2, got: $max_depth")
 
-    threads_count = params.use_threading ? min(length(tree.sub_blocks), Threads.nthreads()) : 1
+    threads_count = params.use_threading ? Threads.nthreads() : 1
 
     threads_depth = length(params.block_tree_levels) - 1
     if params.block_tree_levels[threads_depth] != threads_count
@@ -238,7 +239,7 @@ function thread_workload(_, bt::BlockTree, tid, threads_depth)
 
     visit_all_tree_block(bt; min_depth=threads_depth-1, max_depth=threads_depth-1) do _, sub_t
         tid > length(sub_t.sub_blocks) && return
-        last_level_blocks += 1
+        tid_level_blocks += 1
         blocks_count += tree_block_count(sub_t.sub_blocks[tid])
     end
 
@@ -246,7 +247,7 @@ function thread_workload(_, bt::BlockTree, tid, threads_depth)
 end
 
 
-function thread_workload(_, bg::BlockGrid, tid, threads_depth)
+function thread_workload(_, bg::BlockGrid, tid, thread_blocks_idx)
     return 1, length(thread_blocks_idx)
 end
 

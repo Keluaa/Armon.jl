@@ -471,7 +471,9 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
 
             @testset "Tree blocking" begin
                 @MPI_test comm begin
-                    test_reference("CPU", comm, :Sod_circ, Float64, P; block_size=(32, 32), async_cycle=true, block_tree_levels=[1, 5, 1, 5])
+                    test_reference("CPU", comm, :Sod_circ, Float64, P;
+                        block_size=(32, 32), async_cycle=true, block_tree_levels=[1, 5, Threads.nthreads(), 5]
+                    )
                 end skip=!enough_processes || !proc_in_grid
             end
 

@@ -292,24 +292,25 @@ end
 
 
 @testset "BlockTree" begin
+    T = Threads.nthreads()
     @testset "$(join(grid_size, '×')) - $blocks_per_level" for (grid_size, blocks_per_level) in (
-        ((5, 5), (5, 5)),
-        ((5, 5), (1, 5, 1, 1, 5)),
-        ((5, 5), (1, 5, 1, 1, 6)),
-        ((5, 2), (5, 5)),
-        ((1, 1), (1, 1))
+        ((5, 5), (T, cld(25, T))),
+        ((5, 5), (1, 5, 1, T, cld(25, 5*T))),
+        ((5, 2), (T, cld(10, T))),
+        ((1, 1), (T, 1)),
     )
         block_size = (20, 20)
         N = grid_size .* (block_size .- 2*4)
         params = ArmonParameters(;
             test=:DebugIndexes, nghost=4, N, block_size,
-            use_MPI=false, data_type=Float64
+            use_MPI=false, data_type=Float64, async_cycle=true, block_tree_levels=collect(blocks_per_level)
         )
         grid = BlockGrid(params)
         @test grid.grid_size == grid_size
 
         bt = Armon.BlockTree(grid, collect(blocks_per_level))
         @test Armon.tree_block_count(bt) == prod(grid_size)
+        @test Armon.depth(bt) == 0
 
         # Check for no overlap between blocks and all blocks are assigned
         in_meta_block = zeros(grid.grid_size)
@@ -321,6 +322,7 @@ end
         !all(in_meta_block .== 1) && @debug "problematic blocks at: $(Tuple.(findall(≠(1), in_meta_block)))"
 
         @test count(Returns(true), Armon.all_blocks(bt)) == prod(grid_size)
+        @test (tot = 0; Armon.iter_tree_block(_ -> tot += 1, bt); tot) == prod(grid_size)
 
         total_blocks = 0
         Armon.visit_all_tree_block(bt) do pos, sub_blk
@@ -334,12 +336,24 @@ end
         @test Armon.ghosts(bt)            == Armon.ghosts(grid)
 
         @testset "Thread workload" begin
-            workload = Armon.threads_workload(params, grid)
+            workload = Armon.threads_workload(params, bt)
             @test size(workload) == (Threads.nthreads(), 3)
             @test sum(workload[:, 3]) == prod(grid_size)
             min_work, max_work = extrema(workload[:, 3])
             @test max_work - min_work ≤ last(blocks_per_level)
         end
+    end
+
+    @testset "Machine cache levels" begin
+        params = ArmonParameters(;
+            test=:DebugIndexes, nghost=4, N=(100, 100), block_size=(32, 32),
+            use_MPI=false, data_type=Float64
+        )
+
+        grid_size, _, _ = Armon.grid_dimensions(params)
+        levels = Armon.block_levels_for_machine(params)
+        @test prod(levels) ≥ prod(grid_size)
+        @test levels == Armon.block_levels_for_machine(Float64, prod(grid_size), params.block_size, length(Armon.main_vars()))
     end
 end
 
