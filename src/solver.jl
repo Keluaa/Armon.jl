@@ -191,7 +191,7 @@ function solver_cycle_async_init_thread(params, ::BlockTree, _, _)
 end
 
 
-function solver_cycle_async_step(params, tree::BlockTree, threads_depth)
+function solver_cycle_async_step(params, tree::BlockTree, tid, threads_depth)
     all_finished_cycle = true
     visit_all_tree_block(tree; min_depth=threads_depth-1, max_depth=threads_depth-1) do _, sub_t
         tid > length(sub_t.sub_blocks) && return
@@ -215,7 +215,7 @@ function solver_cycle_async_init_thread(_, grid::BlockGrid, tid, threads_count)
 end
 
 
-function solver_cycle_async_step(params, grid::BlockGrid, thread_blocks_idx)
+function solver_cycle_async_step(params, grid::BlockGrid, tid, thread_blocks_idx)
     all_finished_cycle = true
     for blk_idx in thread_blocks_idx
         blk_pos = CartesianIndices(grid.grid_size)[blk_idx]
@@ -303,7 +303,7 @@ function solver_cycle_async(params::ArmonParameters, grid, block_grid::BlockGrid
             # Since blocks may need multiple calls to `block_state_machine` for them to reach the end
             # of the cycle, we must loop until all blocks are updated. One step is one call to
             # `block_state_machine` on every block of `grid`.
-            solver_cycle_async_step(params, grid, distrib) && break
+            solver_cycle_async_step(params, grid, tid, distrib) && break
             step_count += 1
         end
     end

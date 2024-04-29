@@ -83,6 +83,14 @@ reduction in a single step. It might cause issues on some GPU backends: a more "
 could avoid those by doing it in two steps.
 
 
+    block_tree_levels = Int[]
+
+During a cycle, iterate blocks using a tree structure. Each node at level `l` has up to
+`block_tree_levels[l]` children. This helps with cache locality and improves performance when levels
+are correctly sized according to hardware caches.
+Only useful with cache blocking and `async_cycle == true`.
+
+
 ## Profiling
 
     profiling = Symbol[]
@@ -819,6 +827,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     grid_size, static_sized_grid, _ = grid_dimensions(p)
     print_grid_dimensions(io, grid_size, static_sized_grid, p.block_size, p.N, p.nghost; pad)
     if !isempty(p.block_tree_levels)
+        println(io)
         print_parameter(io, pad, "block tree", join(p.block_tree_levels, '×'))
     end
 end

@@ -118,6 +118,10 @@ end
         @testset "$test - Async cycles" for test in (:Sod_circ, :Bizarrium, :Sedov)
             cmp_cpu_with_reference(test, Float64; use_threading=false, use_simd=false, async_cycle=true)
         end
+
+        @testset "$test - Block tree" for test in (:Sod_circ, :Bizarrium, :Sedov)
+            cmp_cpu_with_reference(test, Float64; use_threading=false, use_simd=false, async_cycle=true, block_tree_levels=[1, 1, 1, 4])
+        end
     end
 
     @testset "Axis invariance" begin

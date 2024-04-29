@@ -332,6 +332,14 @@ end
         @test Armon.static_block_size(bt) == Armon.static_block_size(grid)
         @test Armon.real_block_size(bt)   == Armon.real_block_size(grid)
         @test Armon.ghosts(bt)            == Armon.ghosts(grid)
+
+        @testset "Thread workload" begin
+            workload = Armon.threads_workload(params, grid)
+            @test size(workload) == (Threads.nthreads(), 3)
+            @test sum(workload[:, 3]) == prod(grid_size)
+            min_work, max_work = extrema(workload[:, 3])
+            @test max_work - min_work ≤ last(blocks_per_level)
+        end
     end
 end
 
