@@ -1,14 +1,15 @@
 module Armon
 
-using Printf
-using Polyester
-using ThreadPinning
+using EnumX
+using Hwloc
 using KernelAbstractions
 using MPI
 using MacroTools
-using TimerOutputs
+using Polyester
 using Preferences
-using EnumX
+using Printf
+using ThreadPinning
+using TimerOutputs
 
 export ArmonParameters, BlockGrid, SolverStats, armon, data_type, memory_required
 export device_to_host!, host_to_device!

@@ -232,7 +232,7 @@ function start_exchange(
 ) where {D, H, B}
     buffer_are_on_device = D == B
     if !buffer_are_on_device
-        # MPI buffers are not located where the up-to-date data is: we must to a copy first.
+        # MPI buffers are not located where the up-to-date data is: we must do a copy first.
         device_to_host!(blk)
     end
 
@@ -265,8 +265,22 @@ function finish_exchange(
     params::ArmonParameters,
     blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
-    # Finish the exchange between one local block and a remote block from another sub-domain
-    !MPI.Testall(other_blk.requests) && return false  # Still waiting
+    # TODO: I got a weird error in this CI run: https://github.com/Keluaa/Armon.jl/actions/runs/8878184267/job/24373309474?pr=14
+    # once the problem is identified and fixed we can remove all of this
+    statuses = Vector{MPI.Status}(undef, length(other_blk.requests))
+    try
+        !MPI.Testall(other_blk.requests, statuses) && return false  # Still waiting
+    catch e
+        !(e isa MPI.API.MPIError && e.code == MPI.API.MPI_ERR_IN_STATUS[]) && rethrow(e)
+        err_str = "[$(params.rank)] `MPI.Testall` failed when communicating with $(other_blk.rank):"
+        for (i, status) in enumerate(statuses)
+            status.MPI_ERROR == 0 && continue
+            other_blk.requests[i]
+            err_str *= "\n" * " - req $i: " * sprint(Base.show, MPI.API.MPIError(status.MPI_ERROR))
+        end
+        println(stderr, err_str)
+        rethrow(e)
+    end
 
     recv_domain = ghost_domain(blk.size, side; single_strip=false)
     buffer_are_on_device = D == B
