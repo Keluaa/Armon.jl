@@ -232,7 +232,7 @@ function start_exchange(
 ) where {D, H, B}
     buffer_are_on_device = D == B
     if !buffer_are_on_device
-        # MPI buffers are not located where the up-to-date data is: we must to a copy first.
+        # MPI buffers are not located where the up-to-date data is: we must do a copy first.
         device_to_host!(blk)
     end
 
@@ -265,7 +265,6 @@ function finish_exchange(
     params::ArmonParameters,
     blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
-    # Finish the exchange between one local block and a remote block from another sub-domain
     !MPI.Testall(other_blk.requests) && return false  # Still waiting
 
     recv_domain = ghost_domain(blk.size, side; single_strip=false)
