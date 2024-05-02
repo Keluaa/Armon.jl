@@ -12,7 +12,7 @@ end
 
 Enumeration of the axes of the domain
 """
-@enumx Axis X=1 Y=2
+@enumx Axis::UInt8 X=1 Y=2
 
 next_axis(axis::Axis.T) = Axis.T(mod1(Int(axis) + 1, length(instances(Axis.T))))
 

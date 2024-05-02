@@ -4,9 +4,11 @@
 
 Solver output.
 
-`data` is nothing if `parameters.return_data` is `false`.
+`data` is `nothing` if `parameters.return_data` is `false`.
 
-`timer` is nothing if `parameters.measure_time` is `false`.
+`timer` is `nothing` if `parameters.measure_time` is `false`.
+
+`grid_log` is `nothing` if `parameters.log_blocks` is `false`.
 """
 struct SolverStats
     final_time::Float64
@@ -17,6 +19,7 @@ struct SolverStats
     giga_cells_per_sec::Float64
     data::Union{Nothing, BlockGrid}
     timer::Union{Nothing, TimerOutput}
+    grid_log::Union{Nothing, BlockGridLog}
 end
 
 
@@ -51,8 +54,12 @@ the ghost cells exchange ([`block_ghost_exchange`](@ref)) or compute the its tim
 Returns `true` if we reached the end of the current cycle for `blk`.
 """
 function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
-    @label next_step
     state = blk.state
+    steps_completed = 0
+    steps_vars = zero(UInt16)
+    steps_var_count = 0
+
+    @label next_step
     blk_state = state.step
     new_state = blk_state
     stop_processing = false
@@ -146,7 +153,17 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     end
 
     state.step = new_state
+    steps_completed += 1
+    if params.log_blocks
+        steps_vars |= SOLVER_STEPS_VARS[blk_state]
+        steps_var_count += count_ones(SOLVER_STEPS_VARS[blk_state])
+    end
     !stop_processing && @goto next_step
+
+    if steps_completed > 0 && params.log_blocks
+        push_log!(state, BlockLogEvent(state, new_state, steps_completed, steps_vars, steps_var_count))
+    end
+
     return new_state == SolverStep.NewCycle
 end
 
@@ -434,7 +451,8 @@ function armon(params::ArmonParameters{T}) where T
     stats = SolverStats(
         final_time, dt, cycles, solve_time / 1e9, prod(params.N), cells_per_sec,
         params.return_data ? data : nothing,
-        params.measure_time ? flatten_sections(timer, ("Inner blocks", "Edge blocks")) : nothing
+        params.measure_time ? flatten_sections(timer, ("Inner blocks", "Edge blocks")) : nothing,
+        params.log_blocks ? collect_logs(data) : nothing
     )
 
     if params.return_data || params.write_output || params.write_slices
