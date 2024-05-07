@@ -500,11 +500,20 @@ function init_profiling(params::ArmonParameters;
     params.time_async = time_async
 
     params.log_blocks = log_blocks
-    if estimated_blk_log_size == 0 && log_blocks
-        sweep_count = length(split_axes(params.axis_splitting, data_type(params), 1))
-        estimated_blk_log_size = min(params.maxcycle, 1000) * sweep_count
+    if log_blocks
+        if length(BLOCK_LOG_THREAD_LOCAL_STORAGE) != Threads.nthreads()
+            empty!(BLOCK_LOG_THREAD_LOCAL_STORAGE)
+            foreach(tid -> (BLOCK_LOG_THREAD_LOCAL_STORAGE[tid] = Int32(0)), 1:Threads.nthreads())
+        end
+
+        if estimated_blk_log_size == 0
+            sweep_count = length(split_axes(params.axis_splitting, data_type(params), 1))
+            estimated_blk_log_size = min(params.maxcycle, 1000) * sweep_count
+        end
+        params.estimated_blk_log_size = estimated_blk_log_size
+    else
+        params.estimated_blk_log_size = 0
     end
-    params.estimated_blk_log_size = log_blocks ? estimated_blk_log_size : 0
 
     params.timer = TimerOutput()
     disable_timer!(params.timer)

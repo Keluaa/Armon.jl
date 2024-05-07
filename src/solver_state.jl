@@ -188,14 +188,15 @@ end
 
 
 struct BlockLogEvent
-    cycle           :: Int32   # Cycle at which the event occured
-    tid             :: UInt8   # Thread which processed the block
+    cycle           :: Int16   # Cycle at which the event occured
+    tid             :: UInt16  # Thread which processed the block
     axis            :: Axis.T  # Final axis of the block
     new_state       :: SolverStep.T  # Final state of the block
     steps_count     :: UInt8   # Number of solver steps done
     steps_vars      :: UInt16  # Flag with a 1 when a variable was used
     steps_var_count :: Int16   # Number of times all variables were used
     tid_blk_idx     :: Int32   # Number of blocks processed by the thread before this event
+    stalls          :: Int64   # Number of times `block_state_machine` was called without completing a step
 end
 
 
@@ -223,6 +224,7 @@ mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, Te
     global_dt          :: GlobalTimeStep{T}
     steps_ranges       :: StepsRanges
     blk_logs           :: Vector{BlockLogEvent}
+    total_stalls       :: Int
 
     function SolverState{T}(
         splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC, global_dt, steps_ranges, log_size
@@ -234,7 +236,7 @@ mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, Te
         return new{T, S, R, RL, P, TC}(
             SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
             splitting, riemann, limiter, projection, test_case,
-            global_dt, steps_ranges, blk_logs
+            global_dt, steps_ranges, blk_logs, 0
         )
     end
 end
@@ -303,28 +305,31 @@ function reset!(state::SolverState{T}) where {T}
     state.axis_splitting_idx = 1
     state.cycle = 0
     empty!(state.blk_logs)
+    state.total_stalls = 0
 end
 
 
 """
-    BLOCK_LOG_THREAD_LOCAL_STORAGE::Dict{Int, Int}
+    BLOCK_LOG_THREAD_LOCAL_STORAGE::Dict{UInt16, Int32}
 
 Incremented by 1 every time a `BlockLogEvent` is created in a thread, i.e. each time a block has
 solver kernels applied to it through [`block_state_machine`](@ref).
 
 Since only differences between values are interesting, no need to reset it.
 """
-const BLOCK_LOG_THREAD_LOCAL_STORAGE = Dict{Int, Int}(tid => 0 for tid in Threads.nthreads())
+const BLOCK_LOG_THREAD_LOCAL_STORAGE = Dict{UInt16, Int32}()
 
 
 function BlockLogEvent(blk_state::SolverState, new_state::SolverStep.T, steps_count, steps_vars, steps_var_count)
-    tid = convert(UInt8, Threads.threadid())
+    tid = convert(UInt16, Threads.threadid())
     steps_count = convert(UInt8, steps_count)
     tid_block_event_counter = BLOCK_LOG_THREAD_LOCAL_STORAGE[tid] += 1
+    stalls = blk_state.total_stalls
+    blk_state.total_stalls = 0
     return BlockLogEvent(
         blk_state.cycle, tid, blk_state.axis, new_state,
         steps_count, steps_vars, steps_var_count,
-        tid_block_event_counter
+        tid_block_event_counter, stalls
     )
 end
 
@@ -334,61 +339,98 @@ push_log!(state::SolverState, blk_log::BlockLogEvent) = push!(state.blk_logs, bl
 
 struct BlockGridLog
     blk_logs           :: Array{Vector{BlockLogEvent}}
+    blk_sizes          :: Array{NTuple{2, Int}}
+    ghosts             :: Int
     mean_blk_cells     :: Float64  # Mean number of cells in all blocks
     mean_vars_per_cell :: Float64  # Mean number of variables in all cells
     var_data_type_size :: Int      # Byte size of variables' data type
 end
 
 
+mutable struct LogStat{T}
+    min  :: T
+    max  :: T
+    tot  :: T
+    mean :: Float64
+
+    LogStat{T}() where {T} = new{T}(typemax(T), typemin(T), zero(T), zero(Float64))
+end
+
+
+function Base.:*(ls::LogStat{T}, x::V) where {T, V}
+    r_ls = LogStat{typeof(ls.min * x)}()
+    r_ls.min = ls.min * x; r_ls.max = ls.max * x; r_ls.tot = ls.tot * x; r_ls.mean = ls.mean * x
+    return r_ls
+end
+
+function Base.:*(ls₁::LogStat{T}, ls₂::LogStat{V}) where {T, V}
+    r_ls = LogStat{typeof(ls₁.min * ls₂.min)}()
+    r_ls.min = ls₁.min * ls₂.min; r_ls.max = ls₁.max * ls₂.max
+    r_ls.tot = ls₁.tot * ls₂.tot; r_ls.mean = ls₁.mean * ls₂.mean
+    return r_ls
+end
+
+
+mutable struct BlockGridLogThreadStats
+    tot_blk        :: Int
+    tot_events     :: Int
+    tot_bytes      :: Int  # Size (in bytes) of all real cell main variables in all of the thread's blocks
+    tot_used_bytes :: Int  # Abount of bytes which were used at least once by the thread's blocks
+    tot_stalls     :: Int  # Number of calls to `block_state_machine` which didn't progress a block's state
+
+    BlockGridLogThreadStats() = new(0, 0, 0, 0, 0)
+end
+
+
 mutable struct BlockGridLogStats
-    tot_blk                       :: Int
-    tot_events                    :: Int
-    tot_steps                     :: Int
+    tot_blk                 :: Int
 
     # Number of blocks with an inconsistent processing thread (>0 invalidates most measurements)
-    inconsistent_threads          :: Int
+    inconsistent_threads    :: Int
 
-    # Number of events per block
-    min_events_per_blk            :: Int
-    max_events_per_blk            :: Int
-    mean_events_per_blk           :: Float64
+    events_per_blk          :: LogStat{Int}  # Number of events per block
+    steps_per_event         :: LogStat{Int}  # Number of solver steps per event
+    blk_before_per_event    :: LogStat{Int}  # Number of blocks processed by the thread between events of the same block
+    indep_vars_per_event    :: LogStat{Int}  # Number of unique variables used during the event
+    indep_bytes_per_event   :: LogStat{Int}  # Bytes of unique variables used during the event
+    vars_per_event          :: LogStat{Int}  # Total number of variables used during the event
+    stalls_per_event        :: LogStat{Int}  # Number of calls to `block_state_machine` which didn't progress the block's state
 
-    # Number of solver steps per event
-    min_steps_per_event           :: Int
-    max_steps_per_event           :: Int
-    mean_steps_per_event          :: Float64
-
-    # Number of blocks processed by the thread between events of the same block
-    min_blk_before_per_event      :: Int
-    max_blk_before_per_event      :: Int
-    mean_blk_before_per_event     :: Float64
-
-    # Number of unique variables used during the event
-    min_indep_vars_per_event      :: Int
-    max_indep_vars_per_event      :: Int
-    mean_indep_vars_per_event     :: Float64
-
-    # Total number of variables used during the event
-    min_vars_per_event            :: Int
-    max_vars_per_event            :: Int
-    mean_vars_per_event           :: Float64
+    event_size              :: LogStat{Float64}  # Total bytes used during a block event
+    event_indep_size        :: LogStat{Float64}  # Unique bytes used during a block event
+    bytes_prev_blk          :: LogStat{Float64}  # Total bytes processed by the thread between the same block
+    indep_bytes_prev_blk    :: LogStat{Float64}  # Unique bytes processed by the thread between the same block
 
     # Number of times an event stopped at each solver step
-    steps_stats                   :: Dict{SolverStep.T, Int}
+    steps_stats             :: Dict{SolverStep.T, Int}
 
-    mean_blk_cells                :: Float64
-    mean_vars_per_cell            :: Float64
-    var_data_type_size            :: Int
+    # Thread stats
+    threads_stats           :: Dict{UInt16, BlockGridLogThreadStats}
+    active_threads          :: Int
+    blk_per_thread          :: LogStat{Int}
+    events_per_thread       :: LogStat{Int}
+    stalls_per_thread       :: LogStat{Int}      # Stalls for all of the thread's blocks
+    bytes_prev_thread       :: LogStat{Float64}  # Total bytes processed by the thread between each solver iteration
+    indep_bytes_prev_thread :: LogStat{Float64}  # Unique bytes processed by the thread between each solver interation
+
+    # Stats from the original `BlockGrid`
+    blk_ghosts              :: Int
+    mean_blk_cells          :: Float64
+    mean_vars_per_cell      :: Float64
+    var_data_type_size      :: Int
+    mean_blk_size           :: Float64
 
     BlockGridLogStats() = new(
-        0, 0, 0, 0,
-        typemax(Int), typemin(Int), zero(Float64),
-        typemax(Int), typemin(Int), zero(Float64),
-        typemax(Int), typemin(Int), zero(Float64),
-        typemax(Int), typemin(Int), zero(Float64),
-        typemax(Int), typemin(Int), zero(Float64),
+        0, 0,
+        LogStat{Int}(), LogStat{Int}(), LogStat{Int}(), LogStat{Int}(),
+        LogStat{Int}(), LogStat{Int}(), LogStat{Int}(),
+        LogStat{Float64}(), LogStat{Float64}(),
+        LogStat{Float64}(), LogStat{Float64}(),
         Dict{SolverStep.T, Int}(step => 0 for step in instances(SolverStep.T)),
-        zero(Float64), zero(Float64), 0
+        Dict{UInt16, BlockGridLogThreadStats}(), 0,
+        LogStat{Int}(), LogStat{Int}(), LogStat{Int}(),
+        LogStat{Float64}(), LogStat{Float64}(),
+        0, zero(Float64), zero(Float64), 0, zero(Float64)
     )
 end
 
@@ -412,118 +454,135 @@ const STEPS_VARS_FLAGS = (;
     mask   = 0b1000_0000_0000_0000,
 )
 
-# Those are the arrays used by kernels.
-# Therefore `count_ones(SOLVER_STEPS_VARS[step])` represents the number of arrays the kernels of `step`
-# can bring into the cache.
+# Flags for the arrays used by kernels: `count_ones(SOLVER_STEPS_VARS[step][2])` represents the
+# number of arrays the kernels of `step` can bring into the cache. If `SOLVER_STEPS_VARS[step][1] == true`
+# then the kernel uses one of `STEPS_VARS_FLAGS.u` or `STEPS_VARS_FLAGS.v` depending on the current
+# axis.
 # TODO: deduce them from kernel + steps definitions?
-const SOLVER_STEPS_VARS = Dict{SolverStep.T, UInt16}(
-    SolverStep.NewCycle     => 0,
-    SolverStep.TimeStep     => STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c,
-    SolverStep.InitTimeStep => STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c,
-    SolverStep.NewSweep     => 0,
-    SolverStep.EOS          => STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g,
-    SolverStep.Exchange     => STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g,
-    SolverStep.Fluxes       => STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ,
-    SolverStep.CellUpdate   => STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ,
-    SolverStep.Remap        => STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4,
-    SolverStep.EndCycle     => 0,
-    SolverStep.ErrorState   => 0,
+const SOLVER_STEPS_VARS = Dict{SolverStep.T, Tuple{Bool, UInt16}}(
+    SolverStep.NewCycle     => (false, 0),
+    SolverStep.TimeStep     => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
+    SolverStep.InitTimeStep => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
+    SolverStep.NewSweep     => (false, 0),
+    SolverStep.EOS          => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
+    SolverStep.Exchange     => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
+    SolverStep.Fluxes       => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
+    SolverStep.CellUpdate   => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
+    SolverStep.Remap        => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4),
+    SolverStep.EndCycle     => (false, 0),
+    SolverStep.ErrorState   => (false, 0),
 )
 
 
-function accumulate_grid_stats!(grid_stats::BlockGridLogStats, ::CartesianIndex, blk_events::Vector{BlockLogEvent})
-    grid_stats.tot_blk += 1
+function accumulate_grid_stats!(stat::LogStat, value)
+    stat.min = min(stat.min, value)
+    stat.max = max(stat.max, value)
+    stat.tot += value
+end
+
+
+function accumulate_grid_stats!(gs::BlockGridLogStats, ::CartesianIndex, blk_events::Vector{BlockLogEvent}, blk_size)
+    gs.tot_blk += 1
 
     event_count = length(blk_events)
-    grid_stats.tot_events += event_count
-    grid_stats.min_events_per_blk = min(grid_stats.min_events_per_blk, event_count)
-    grid_stats.max_events_per_blk = max(grid_stats.max_events_per_blk, event_count)
+    accumulate_grid_stats!(gs.events_per_blk, event_count)
 
-    min_steps = typemax(Int)
-    max_steps = typemin(Int)
-    tot_steps = 0
+    block_cells = prod(blk_size .- gs.blk_ghosts)  # We only consider real cells
+    tot_blk_bytes = 0
+    used_blk_vars = UInt16(0)
+    tot_stalls = 0
+
     expected_tid = first(blk_events).tid
-    inconsistent_tids = 0
     prev_tid_blk_idx = first(blk_events).tid_blk_idx
-    min_blk_before = typemax(Int)
-    max_blk_before = typemin(Int)
-    tot_blk_before = 0
-    min_indep_vars_per_event = typemax(Int)
-    max_indep_vars_per_event = typemin(Int)
-    tot_indep_vars_per_event = 0
-    min_vars_per_event = typemax(Int)
-    max_vars_per_event = typemin(Int)
-    tot_vars_per_event = 0
     for event in blk_events
-        tot_steps += event.steps_count
-        min_steps = min(min_steps, event.steps_count)
-        max_steps = max(max_steps, event.steps_count)
+        accumulate_grid_stats!(gs.steps_per_event, event.steps_count)
 
+        used_blk_vars |= event.steps_vars
         indep_var_count = count_ones(event.steps_vars)
-        tot_indep_vars_per_event += indep_var_count
-        min_indep_vars_per_event = min(min_indep_vars_per_event, indep_var_count)
-        max_indep_vars_per_event = max(max_indep_vars_per_event, indep_var_count)
+        accumulate_grid_stats!(gs.indep_vars_per_event, indep_var_count)
 
-        tot_vars_per_event += event.steps_var_count
-        min_vars_per_event = min(min_vars_per_event, event.steps_var_count)
-        max_vars_per_event = max(max_vars_per_event, event.steps_var_count)
+        event_bytes = indep_var_count * block_cells * gs.var_data_type_size
+        tot_blk_bytes += event_bytes
+        accumulate_grid_stats!(gs.indep_bytes_per_event, event_bytes)
+
+        accumulate_grid_stats!(gs.vars_per_event, event.steps_var_count)
+
+        tot_stalls += event.stalls
+        accumulate_grid_stats!(gs.stalls_per_event, event.stalls)
 
         if event.tid == expected_tid
             blk_before = event.tid_blk_idx - prev_tid_blk_idx
+            prev_tid_blk_idx = event.tid_blk_idx
             if blk_before != 0  # 0 if it is the first event of the block, but we only care about differences
-                min_blk_before = min(min_blk_before, blk_before)
-                max_blk_before = max(max_blk_before, blk_before)
-                tot_blk_before += blk_before
-                prev_tid_blk_idx = event.tid_blk_idx
+                accumulate_grid_stats!(gs.blk_before_per_event, blk_before)
             end
         else
-            inconsistent_tids += 1
+            gs.inconsistent_threads += 1
         end
 
-        grid_stats.steps_stats[event.new_state] += 1
+        gs.steps_stats[event.new_state] += 1
     end
 
-    grid_stats.inconsistent_threads += inconsistent_tids
-    grid_stats.min_steps_per_event = min(grid_stats.min_steps_per_event, min_steps)
-    grid_stats.max_steps_per_event = max(grid_stats.max_steps_per_event, max_steps)
-    grid_stats.tot_steps += tot_steps
-    grid_stats.min_blk_before_per_event = min(grid_stats.min_blk_before_per_event, min_blk_before)
-    grid_stats.max_blk_before_per_event = max(grid_stats.max_blk_before_per_event, max_blk_before)
-    grid_stats.mean_blk_before_per_event += tot_blk_before
-    grid_stats.min_indep_vars_per_event = min(grid_stats.min_indep_vars_per_event, min_indep_vars_per_event)
-    grid_stats.max_indep_vars_per_event = max(grid_stats.max_indep_vars_per_event, max_indep_vars_per_event)
-    grid_stats.mean_indep_vars_per_event += tot_indep_vars_per_event
-    grid_stats.min_vars_per_event = min(grid_stats.min_vars_per_event, min_vars_per_event)
-    grid_stats.max_vars_per_event = max(grid_stats.max_vars_per_event, max_vars_per_event)
-    grid_stats.mean_vars_per_event += tot_vars_per_event
+    tot_used_blk_bytes = count_ones(used_blk_vars) * block_cells * gs.var_data_type_size
 
-    return grid_stats
+    ts = get!(BlockGridLogThreadStats, gs.threads_stats, expected_tid)
+    ts.tot_blk += 1
+    ts.tot_events += event_count
+    ts.tot_bytes += tot_blk_bytes
+    ts.tot_used_bytes += tot_used_blk_bytes
+    ts.tot_stalls += tot_stalls
+
+    return gs
 end
 
 
 function analyse_log_stats(f, grid_log::BlockGridLog)
     for pos in eachindex(Base.IndexCartesian(), grid_log.blk_logs)
         !isassigned(grid_log.blk_logs, pos) && continue
-        f(pos, grid_log.blk_logs[pos])
+        f(pos, grid_log.blk_logs[pos], grid_log.blk_sizes[pos])
     end
 end
 
 
 function analyse_log_stats(grid_log::BlockGridLog)
-    grid_stats = BlockGridLogStats()
-    analyse_log_stats((args...) -> accumulate_grid_stats!(grid_stats, args...), grid_log)
+    gs = BlockGridLogStats()
+    gs.blk_ghosts = grid_log.ghosts
+    gs.mean_blk_cells = grid_log.mean_blk_cells
+    gs.mean_vars_per_cell = grid_log.mean_vars_per_cell
+    gs.var_data_type_size = grid_log.var_data_type_size
+    gs.mean_blk_size = gs.mean_blk_cells * gs.mean_vars_per_cell * gs.var_data_type_size
 
-    grid_stats.mean_events_per_blk = grid_stats.tot_events / grid_stats.tot_blk
-    grid_stats.mean_steps_per_event = grid_stats.tot_steps / grid_stats.tot_events
-    grid_stats.mean_blk_before_per_event /= grid_stats.tot_events - grid_stats.tot_blk  # `N - 1` since we only care about differences
-    grid_stats.mean_indep_vars_per_event /= grid_stats.tot_events
-    grid_stats.mean_vars_per_event /= grid_stats.tot_events
+    analyse_log_stats((args...) -> accumulate_grid_stats!(gs, args...), grid_log)
 
-    grid_stats.mean_blk_cells = grid_log.mean_blk_cells
-    grid_stats.mean_vars_per_cell = grid_log.mean_vars_per_cell
-    grid_stats.var_data_type_size = grid_log.var_data_type_size
+    tot_events = gs.events_per_blk.tot
+    gs.events_per_blk.mean = tot_events / gs.tot_blk
+    gs.steps_per_event.mean = gs.steps_per_event.tot / tot_events
+    gs.blk_before_per_event.mean = gs.blk_before_per_event.tot / (tot_events - gs.tot_blk)  # `N - 1` since we only care about differences
+    gs.indep_vars_per_event.mean = gs.indep_vars_per_event.tot / tot_events
+    gs.indep_bytes_per_event.mean = gs.indep_bytes_per_event.tot / tot_events
+    gs.vars_per_event.mean = gs.vars_per_event.tot / tot_events
+    gs.stalls_per_event.mean = gs.stalls_per_event.tot / tot_events
 
-    return grid_stats
+    gs.active_threads = length(gs.threads_stats)
+    for (_, ts) in gs.threads_stats
+        accumulate_grid_stats!(gs.blk_per_thread, ts.tot_blk)
+        accumulate_grid_stats!(gs.events_per_thread, ts.tot_events)
+        accumulate_grid_stats!(gs.stalls_per_thread, ts.tot_stalls)
+    end
+    gs.blk_per_thread.mean    = gs.blk_per_thread.tot    / gs.active_threads
+    gs.events_per_thread.mean = gs.events_per_thread.tot / gs.active_threads
+    gs.stalls_per_thread.mean = gs.stalls_per_thread.tot / gs.active_threads
+
+    gs.event_size = gs.vars_per_event * gs.mean_blk_cells * gs.var_data_type_size
+    gs.event_indep_size = gs.indep_vars_per_event * gs.mean_blk_cells * gs.var_data_type_size
+
+    gs.bytes_prev_blk = gs.blk_before_per_event * gs.event_size
+    gs.indep_bytes_prev_blk = gs.blk_before_per_event * gs.event_indep_size
+
+    gs.bytes_prev_thread = gs.bytes_prev_blk * gs.blk_per_thread
+    gs.indep_bytes_prev_thread = gs.indep_bytes_prev_blk * gs.blk_per_thread
+
+    return gs
 end
 
 
@@ -536,41 +595,45 @@ function as_SI_magnitude(x)
 end
 
 
-function Base.show(io::IO, ::MIME"text/plain", grid_stats::BlockGridLogStats)
+function Base.show(io::IO, ls::LogStat)
+    print(io, @sprintf("%6.2f", ls.mean), ", ", ls.min, "..", ls.max, "\t(mean, min..max)")
+end
+
+
+function Base.show(io::IO, ::MIME"text/plain", gs::BlockGridLogStats)
     println(io, "BlockGrid solve stats:")
-    println(io, " - total blocks\t\t\t", grid_stats.tot_blk)
-    println(io, " - total events\t\t\t", grid_stats.tot_events)
-    println(io, " - total steps \t\t\t", grid_stats.tot_steps)
-    printstyled(io, " - inconsistent threads\t\t", grid_stats.inconsistent_threads, "\n";
-        color=grid_stats.inconsistent_threads == 0 ? :normal : :red)
-    println(io, " - events per block\t\t", @sprintf("%5.2f", grid_stats.mean_events_per_blk), ", ",
-        grid_stats.min_events_per_blk, "..", grid_stats.max_events_per_blk, "\t(mean, min..max)")
-    println(io, " - steps per event\t\t", @sprintf("%5.2f", grid_stats.mean_steps_per_event), ", ",
-        grid_stats.min_steps_per_event, "..", grid_stats.max_steps_per_event, "\t(mean, min..max)")
-    println(io, " - vars per event\t\t", @sprintf("%5.2f", grid_stats.mean_vars_per_event), ", ",
-        grid_stats.min_vars_per_event, "..", grid_stats.max_vars_per_event, "\t(mean, min..max)")
-    println(io, " - indep vars per event\t\t", @sprintf("%5.2f", grid_stats.mean_indep_vars_per_event), ", ",
-        grid_stats.min_indep_vars_per_event, "..", grid_stats.max_indep_vars_per_event, "\t(mean, min..max)")
-    println(io, " - blocks before event\t\t", @sprintf("%5.2f", grid_stats.mean_blk_before_per_event), ", ",
-        grid_stats.min_blk_before_per_event, "..", grid_stats.max_blk_before_per_event, "\t(mean, min..max)")
-    println(io, " - mean block cells\t\t", @sprintf("%5.2f", grid_stats.mean_blk_cells))
-    println(io, " - mean vars per cell\t\t", @sprintf("%5.2f", grid_stats.mean_vars_per_cell), ", ",
-        grid_stats.var_data_type_size, " bytes per var")
+    println(io, " - total blocks\t\t\t", gs.tot_blk)
+    println(io, " - total events\t\t\t", gs.events_per_blk.tot)
+    println(io, " - total steps \t\t\t", gs.steps_per_event.tot)
+    printstyled(io, " - inconsistent threads\t\t", gs.inconsistent_threads, "\n";
+        color=gs.inconsistent_threads == 0 ? :normal : :red)
+    println(io, " - events per block\t\t", gs.events_per_blk)
+    println(io, " - steps per event\t\t", gs.steps_per_event)
+    println(io, " - vars per event\t\t", gs.vars_per_event)
+    println(io, " - indep vars per event\t\t", gs.indep_vars_per_event)
+    println(io, " - blocks before event\t\t", gs.blk_before_per_event)
+    println(io, " - mean block cells\t\t", @sprintf("%5.2f", gs.mean_blk_cells))
+    println(io, " - mean vars per cell\t\t", @sprintf("%5.2f", gs.mean_vars_per_cell), ", ",
+        gs.var_data_type_size, " bytes per var")
 
-    mean_blk_size = grid_stats.mean_blk_cells * grid_stats.mean_vars_per_cell * grid_stats.var_data_type_size
-    mean_evt_size = grid_stats.mean_blk_cells * grid_stats.mean_vars_per_event * grid_stats.var_data_type_size
-    mean_evt_size_indep = grid_stats.mean_blk_cells * grid_stats.mean_indep_vars_per_event * grid_stats.var_data_type_size
-    mean_bytes_before_event = grid_stats.mean_blk_before_per_event * mean_evt_size
-    mean_bytes_before_event_indep = grid_stats.mean_blk_before_per_event * mean_evt_size_indep
+    println(io, " - blocks per thread\t\t", gs.blk_per_thread, ", ", gs.active_threads, " active threads")
+    println(io, " - events per thread\t\t", gs.events_per_thread)
 
-    println(io, " - mean block size\t\t", @sprintf("%6.2f %sB", as_SI_magnitude(mean_blk_size)...))
-    println(io, " - mean event size\t\t", @sprintf("%6.2f %sB", as_SI_magnitude(mean_evt_size)...), ", ",
-        @sprintf("%6.2f %sB", as_SI_magnitude(mean_evt_size_indep)...), "\t(total, unique)")
-    println(io, " - mean bytes before event\t", @sprintf("%6.2f %sB", as_SI_magnitude(mean_bytes_before_event)...), ", ",
-        @sprintf("%6.2f %sB", as_SI_magnitude(mean_bytes_before_event_indep)...), "\t(total, unique)")
+    println(io, " - mean block size\t\t", @sprintf("%6.2f %sB", as_SI_magnitude(gs.mean_blk_size)...))
+    println(io, " - mean event size\t\t", @sprintf("%6.2f %sB", as_SI_magnitude(gs.event_size.mean)...), ", ",
+        @sprintf("%6.2f %sB", as_SI_magnitude(gs.event_indep_size.mean)...), "\t(total, unique)")
+    println(io, " - mean bytes before block\t", @sprintf("%6.2f %sB", as_SI_magnitude(gs.bytes_prev_blk.mean)...), ", ",
+        @sprintf("%6.2f %sB", as_SI_magnitude(gs.indep_bytes_prev_blk.mean)...), "\t(total, unique)")
+
+    println(io, " - mean bytes per thread iter\t",
+        @sprintf("%6.2f %sB", as_SI_magnitude(gs.bytes_prev_thread.mean)...), ", ",
+        @sprintf("%6.2f %sB", as_SI_magnitude(gs.indep_bytes_prev_thread.mean)...), "\t(total, unique)")
+
+    println(io, " - stalls per event\t\t", gs.stalls_per_event)
+    println(io, " - stalls per thread\t\t", gs.stalls_per_thread)
 
     print(io, " - steps stop count")
-    for (step, cnt) in filter(≠(0) ∘ last, grid_stats.steps_stats |> collect |> sort!)
+    for (step, cnt) in filter(≠(0) ∘ last, gs.steps_stats |> collect |> sort!)
         println(io)
         print(io, "    - $step = $cnt")
     end

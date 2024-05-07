@@ -155,13 +155,24 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     state.step = new_state
     steps_completed += 1
     if params.log_blocks
-        steps_vars |= SOLVER_STEPS_VARS[blk_state]
-        steps_var_count += count_ones(SOLVER_STEPS_VARS[blk_state])
+        axis_dependent, var_flags = SOLVER_STEPS_VARS[blk_state]
+        if axis_dependent
+            # TODO: dimension agnostic
+            var_flags |= state.axis == Axis.X ? STEPS_VARS_FLAGS.u : STEPS_VARS_FLAGS.v
+        end
+        steps_vars |= var_flags
+        steps_var_count += count_ones(var_flags)
     end
     !stop_processing && @goto next_step
 
-    if steps_completed > 0 && params.log_blocks
-        push_log!(state, BlockLogEvent(state, new_state, steps_completed, steps_vars, steps_var_count))
+    if params.log_blocks
+        # `> 1` since `stop_processing` means that we did not finish `blk_state`, apart from `EndCycle`.
+        # This allows to exclude stalls from logs.
+        if steps_completed > 1 
+            push_log!(state, BlockLogEvent(state, new_state, steps_completed, steps_vars, steps_var_count))
+        else
+            state.total_stalls += 1
+        end
     end
 
     return new_state == SolverStep.NewCycle
