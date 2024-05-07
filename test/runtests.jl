@@ -34,6 +34,7 @@ if isinteractive()
      - stability      Type stability
      - domains        Domain 2D indexing
      - blocking       Blocking tests
+     - logging        Block logging tests
      - convergence    Convergence to the reference solutions
      - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
@@ -59,7 +60,7 @@ main_options = main_options .|> Symbol |> union
 
 if :all in main_options
     expanded_options = [:quality, :stability, :domains, :blocking, :convergence, :conservation,
-                        :kokkos, :gpu, :mpi]
+                        :logging, :kokkos, :gpu, :mpi]
 elseif :short in main_options
     expanded_options = [:quality, :stability, :convergence, :conservation]
 else
@@ -97,6 +98,7 @@ function do_tests(tests_to_do)
             elseif test === :conservation   run_file("conservation.jl")
             elseif test === :gpu            run_file("gpu.jl")
             elseif test === :kokkos         run_file("kokkos.jl")
+            elseif test === :logging        run_file("logging.jl")
             elseif test === :mpi
                 if MPI_PROCS > 0 && world_size < MPI_PROCS
                     @info "Launching $MPI_PROCS MPI sub-processes"

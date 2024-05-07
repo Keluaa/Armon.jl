@@ -501,6 +501,10 @@ function init_profiling(params::ArmonParameters;
 
     params.log_blocks = log_blocks
     if log_blocks
+        if !(params.use_cache_blocking && params.async_cycle)
+            solver_error(:config, "`log_blocks=true` requires cache blocking with async cycles")
+        end
+
         if length(BLOCK_LOG_THREAD_LOCAL_STORAGE) != Threads.nthreads()
             empty!(BLOCK_LOG_THREAD_LOCAL_STORAGE)
             foreach(tid -> (BLOCK_LOG_THREAD_LOCAL_STORAGE[tid] = Int32(0)), 1:Threads.nthreads())

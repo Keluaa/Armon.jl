@@ -137,6 +137,16 @@ memory_required
 @threads
 ```
 
+## Logging
+
+```@docs
+BlockLogEvent
+collect_logs
+analyse_log_stats
+BlockGridLogStats
+BLOCK_LOG_THREAD_LOCAL_STORAGE
+```
+
 ## Utility
 
 ```@docs
