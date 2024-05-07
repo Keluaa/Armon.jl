@@ -272,6 +272,8 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     time_async::Bool
     enable_profiling::Bool
     profiling_info::Set{Symbol}
+    log_blocks::Bool
+    estimated_blk_log_size::Int
     return_data::Bool
 
     # Performance
@@ -481,6 +483,7 @@ end
 
 function init_profiling(params::ArmonParameters;
     profiling = Symbol[], measure_time = true, time_async = true,
+    log_blocks = false, estimated_blk_log_size = 0,
     options...
 )
     params.profiling_info = Set{Symbol}(profiling)
@@ -495,6 +498,26 @@ function init_profiling(params::ArmonParameters;
 
     params.measure_time = measure_time
     params.time_async = time_async
+
+    params.log_blocks = log_blocks
+    if log_blocks
+        if !(params.use_cache_blocking && params.async_cycle)
+            solver_error(:config, "`log_blocks=true` requires cache blocking with async cycles")
+        end
+
+        if length(BLOCK_LOG_THREAD_LOCAL_STORAGE) != Threads.nthreads()
+            empty!(BLOCK_LOG_THREAD_LOCAL_STORAGE)
+            foreach(tid -> (BLOCK_LOG_THREAD_LOCAL_STORAGE[tid] = Int32(0)), 1:Threads.nthreads())
+        end
+
+        if estimated_blk_log_size == 0
+            sweep_count = length(split_axes(params.axis_splitting, data_type(params), 1))
+            estimated_blk_log_size = min(params.maxcycle, 1000) * sweep_count
+        end
+        params.estimated_blk_log_size = estimated_blk_log_size
+    else
+        params.estimated_blk_log_size = 0
+    end
 
     params.timer = TimerOutput()
     disable_timer!(params.timer)
@@ -768,6 +791,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
         profilers_str = length(profilers) > 0 ? ": " * join(profilers, ", ") : ""
         print_parameter(io, pad, "profiling", (p.enable_profiling ? "ON" : "OFF") * profilers_str)
     end
+    print_parameter(io, pad, "block log", p.log_blocks)
     print_parameter(io, pad, "verbosity", p.silent)
     print_parameter(io, pad, "check result", p.check_result)
 

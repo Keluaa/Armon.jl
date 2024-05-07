@@ -172,7 +172,7 @@ end
 Enumeration of each state a [`LocalTaskBlock`](@ref) can be in.
 [`block_state_machine`](@ref) advances this state.
 """
-@enumx SolverStep begin
+@enumx SolverStep::UInt8 begin
     NewCycle
     TimeStep
     InitTimeStep
@@ -184,6 +184,65 @@ Enumeration of each state a [`LocalTaskBlock`](@ref) can be in.
     Remap
     EndCycle
     ErrorState
+end
+
+
+# Bit flags for each of the variables of a block
+const STEPS_VARS_FLAGS = (;
+    x      = 0b0000_0000_0000_0001,
+    y      = 0b0000_0000_0000_0010,
+    ρ      = 0b0000_0000_0000_0100,
+    u      = 0b0000_0000_0000_1000,
+    v      = 0b0000_0000_0001_0000,
+    E      = 0b0000_0000_0010_0000,
+    p      = 0b0000_0000_0100_0000,
+    c      = 0b0000_0000_1000_0000,
+    g      = 0b0000_0001_0000_0000,
+    uˢ     = 0b0000_0010_0000_0000,
+    pˢ     = 0b0000_0100_0000_0000,
+    work_1 = 0b0000_1000_0000_0000,
+    work_2 = 0b0001_0000_0000_0000,
+    work_3 = 0b0010_0000_0000_0000,
+    work_4 = 0b0100_0000_0000_0000,
+    mask   = 0b1000_0000_0000_0000,
+)
+
+# Flags for the arrays used by kernels: `count_ones(SOLVER_STEPS_VARS[step][2])` represents the
+# number of arrays the kernels of `step` can bring into the cache. If `SOLVER_STEPS_VARS[step][1] == true`
+# then the kernel uses one of `STEPS_VARS_FLAGS.u` or `STEPS_VARS_FLAGS.v` depending on the current
+# axis.
+# TODO: deduce them from kernel + steps definitions?
+const SOLVER_STEPS_VARS = Dict{SolverStep.T, Tuple{Bool, UInt16}}(
+    SolverStep.NewCycle     => (false, 0),
+    SolverStep.TimeStep     => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
+    SolverStep.InitTimeStep => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
+    SolverStep.NewSweep     => (false, 0),
+    SolverStep.EOS          => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
+    SolverStep.Exchange     => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
+    SolverStep.Fluxes       => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
+    SolverStep.CellUpdate   => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
+    SolverStep.Remap        => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4),
+    SolverStep.EndCycle     => (false, 0),
+    SolverStep.ErrorState   => (false, 0),
+)
+
+
+"""
+    BlockLogEvent
+
+Info about a block, emitted after a call to [`block_state_machine`](@ref) which successfully advanced
+the internal state of the block, only if `params.log_blocks == true`.
+"""
+struct BlockLogEvent
+    cycle           :: Int16   # Cycle at which the event occured
+    tid             :: UInt16  # Thread which processed the block
+    axis            :: Axis.T  # Final axis of the block
+    new_state       :: SolverStep.T  # Final state of the block
+    steps_count     :: UInt8   # Number of solver steps done
+    steps_vars      :: UInt16  # Flag with a 1 when a variable was used
+    steps_var_count :: Int16   # Number of times all variables were used
+    tid_blk_idx     :: Int32   # Number of blocks processed by the thread before this event
+    stalls          :: Int64   # Number of times `block_state_machine` was called without completing a step
 end
 
 
@@ -210,16 +269,20 @@ mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, Te
     test_case          :: TestCase
     global_dt          :: GlobalTimeStep{T}
     steps_ranges       :: StepsRanges
+    blk_logs           :: Vector{BlockLogEvent}
+    total_stalls       :: Int
 
     function SolverState{T}(
-        splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC, global_dt, steps_ranges
+        splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC, global_dt, steps_ranges, log_size
     ) where {
         T, S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
     }
+        blk_logs = Vector{BlockLogEvent}()
+        log_size > 0 && sizehint!(blk_logs, log_size)
         return new{T, S, R, RL, P, TC}(
             SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
             splitting, riemann, limiter, projection, test_case,
-            global_dt, steps_ranges
+            global_dt, steps_ranges, blk_logs, 0
         )
     end
 end
@@ -232,7 +295,8 @@ function SolverState(params::ArmonParameters{T}, global_dt::GlobalTimeStep{T}) w
         params.projection_scheme,
         params.test,
         global_dt,
-        first(params.steps_ranges)
+        first(params.steps_ranges),
+        params.estimated_blk_log_size
     )
 end
 
@@ -286,4 +350,34 @@ function reset!(state::SolverState{T}) where {T}
     state.axis = Axis.X
     state.axis_splitting_idx = 1
     state.cycle = 0
+    empty!(state.blk_logs)
+    state.total_stalls = 0
 end
+
+
+"""
+    BLOCK_LOG_THREAD_LOCAL_STORAGE::Dict{UInt16, Int32}
+
+Incremented by 1 every time a `BlockLogEvent` is created in a thread, i.e. each time a block has
+solver kernels applied to it through [`block_state_machine`](@ref).
+
+Since only differences between values are interesting, no need to reset it.
+"""
+const BLOCK_LOG_THREAD_LOCAL_STORAGE = Dict{UInt16, Int32}()
+
+
+function BlockLogEvent(blk_state::SolverState, new_state::SolverStep.T, steps_count, steps_vars, steps_var_count)
+    tid = convert(UInt16, Threads.threadid())
+    steps_count = convert(UInt8, steps_count)
+    tid_block_event_counter = BLOCK_LOG_THREAD_LOCAL_STORAGE[tid] += 1
+    stalls = blk_state.total_stalls
+    blk_state.total_stalls = 0
+    return BlockLogEvent(
+        blk_state.cycle, tid, blk_state.axis, new_state,
+        steps_count, steps_vars, steps_var_count,
+        tid_block_event_counter, stalls
+    )
+end
+
+
+push_log!(state::SolverState, blk_log::BlockLogEvent) = push!(state.blk_logs, blk_log)
