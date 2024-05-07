@@ -35,6 +35,7 @@ include("projection_schemes.jl")
 include("axis_splitting.jl")
 include("halo_exchange.jl")
 include("io.jl")
+include("logging.jl")
 include("solver.jl")
 
 end

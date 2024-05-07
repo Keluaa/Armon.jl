@@ -514,22 +514,6 @@ function reset!(grid::BlockGrid, params::ArmonParameters)
 end
 
 
-function collect_logs(grid::BlockGrid{T}) where {T}
-    logs = Array{Vector{BlockLogEvent}}(undef, grid.grid_size)
-    blk_sizes = Array{NTuple{2, Int}}(undef, grid.grid_size)
-    tot_blk_cells = 0
-    for blk in all_blocks(grid)
-        logs[blk.pos] = solver_state(blk).blk_logs
-        blk_sizes[blk.pos] = real_block_size(blk)
-        tot_blk_cells += prod(real_block_size(blk))
-    end
-    mean_blk_cells = tot_blk_cells / prod(grid.grid_size)
-    mean_vars_per_cell = length(main_vars())
-    data_type_size = sizeof(T)
-    return BlockGridLog(logs, blk_sizes, ghosts(grid), mean_blk_cells, mean_vars_per_cell, data_type_size)
-end
-
-
 """
     first_state(grid::BlockGrid)
 
