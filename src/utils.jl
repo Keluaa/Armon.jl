@@ -51,6 +51,13 @@ end
     end
 end
 
+@inline function offset_to(axis::Axis.T)
+    if     axis == Axis.X return (1, 0)
+    elseif axis == Axis.Y return (0, 1)
+    else                  return (1, 0)  # Should not happen, here only for type-stability
+    end
+end
+
 @inline function offset_to(side::Side.T)
     if     side == Side.Left   return (-1,  0)
     elseif side == Side.Right  return ( 1,  0)
@@ -59,7 +66,6 @@ end
     else                       return ( 0,  0)  # Should not happen, here only for type-stability
     end
 end
-
 
 @inline function side_from_offset(offset::Tuple)
     if     offset[1] < 0 return Side.Left

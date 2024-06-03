@@ -9,8 +9,8 @@
             ((100, 100), (106, 106), 4),  # Edge blocks too small, merged with closest static blocks (only edge blocks left)
             ((100, 100), (108, 108), 4),  # Perfect match: only a single static block
             ((100, 100), (  0,   0), 4),  # No blocking, only edge blocks
-            ((100,  50), ( 64,  64), 4),  # Enough
-            ((240, 240), ( 64,  32), 4),
+            ((100,  50), ( 64,  64), 4),  # Static size along X, edge size along Y
+            ((240, 240), ( 64,  32), 4),  # Bigger test case with uneven block size
         )
         ref_params = get_reference_params(:Sod, Float64; N, block_size, nghost)
         grid = Armon.BlockGrid(ref_params)
@@ -82,6 +82,7 @@
                 blk = Armon.block_at(grid, pos)
                 @test blk.pos == pos
                 @test blk isa Armon.LocalTaskBlock
+                @test Armon.block_size_at(grid, pos) == Armon.real_block_size(blk)
             end
 
             for (_, region) in Armon.RemoteBlockRegions(grid.grid_size), pos in region

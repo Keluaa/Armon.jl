@@ -224,7 +224,7 @@ end
 
 EdgeBlockRegions(grid::BlockGrid; real_sizes=false) =
     EdgeBlockRegions(
-        grid.grid_size, grid.static_sized_grid, static_block_size(grid), grid.edge_size;
+        grid.grid_size, grid.static_sized_grid, static_block_size(grid), grid.edge_size .+ 2*ghosts(grid);
         ghosts=real_sizes ? ghosts(grid) : 0
     )
 
@@ -467,6 +467,34 @@ function block_at(grid::BlockGrid, idx::CartesianIndex)
         return grid.edge_blocks[edge_block_idx(grid, idx)]
     else
         return grid.remote_blocks[remote_block_idx(grid, idx)]
+    end
+end
+
+
+"""
+    block_size_at(grid::BlockGrid, idx)
+    block_size_at(idx, grid_size, static_sized_grid, block_size, remainder_block_size, ghosts)
+
+Theoretical size of block at `idx` in `grid`.
+If `ghosts == 0`, ghosts cells will be included in the size.
+"""
+function block_size_at(grid::BlockGrid, idx)
+    return block_size_at(idx,
+        grid.grid_size, grid.static_sized_grid, static_block_size(grid),
+        grid.edge_size .+ 2*ghosts(grid), ghosts(grid)
+    )
+end
+
+
+function block_size_at(idx, grid_size, static_sized_grid, block_size, remainder_block_size, ghosts)
+    if in_grid(idx, static_sized_grid)
+        return block_size .- 2*ghosts
+    else
+        edge_block_size = ifelse.(
+            in_grid.(Ref(idx), max.(static_sized_grid, grid_size .- 1), instances(Axis.T)),  # TODO: replace with `axes_of(dim)`
+            block_size, remainder_block_size
+        )
+        return edge_block_size .- 2*ghosts
     end
 end
 
