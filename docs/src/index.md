@@ -111,6 +111,15 @@ BlockExchangeState.InProgress
 BlockExchangeState.Done
 ```
 
+### Block distribution
+
+```@docs
+thread_workload_distribution
+simple_workload_distribution
+scotch_grid_partition
+block_grid_from_workload
+```
+
 ## Device and backends
 
 ```@docs

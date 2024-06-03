@@ -285,6 +285,7 @@ end
 
 
 include("blocks.jl")
+include("workload_distribution.jl")
 include("block_grid.jl")
 include("interface.jl")
 

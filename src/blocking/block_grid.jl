@@ -38,6 +38,7 @@ struct BlockGrid{
     blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, BS, SState}}
     edge_blocks        :: Vector{LocalTaskBlock{DeviceArray, HostArray, DynamicBSize{Ghost}, SState}}
     remote_blocks      :: Vector{RemoteTaskBlock{BufferArray}}
+    threads_workload   :: Vector{Vector{CartesianIndex{2}}}  # `tid => block index` map for all threads, distributing each block to each thread
 end
 
 
@@ -71,6 +72,8 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     grid_perimeter = sum(grid_size) * length(grid_size)  # (nx+ny) * 2
     remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
 
+    threads_workload = thread_workload_distribution(params)
+
     # Main grid container
     edge_size = remainder_block_size .- 2*ghost
     grid = BlockGrid{
@@ -79,7 +82,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         state_type, typeof(params.device)
     }(
         grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
-        blocks, edge_blocks, remote_blocks
+        blocks, edge_blocks, remote_blocks, threads_workload
     )
 
     # Allocate all local blocks

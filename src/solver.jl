@@ -179,25 +179,6 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
 end
 
 
-function simple_block_distribution(tid, threads, grid_size)
-    # TODO: improve by taking into account the individual workload of each block
-    block_count = prod(grid_size)
-    blocks_per_thread = fld(block_count, threads)
-    remaining_blocks = block_count - threads * blocks_per_thread
-
-    prev_tids_blocks = blocks_per_thread * (tid - 1)
-    tid_blocks = blocks_per_thread
-    if tid > remaining_blocks
-        prev_tids_blocks += remaining_blocks
-    else
-        prev_tids_blocks += tid - 1
-        tid_blocks += 1
-    end
-
-    return (1:tid_blocks) .+ prev_tids_blocks
-end
-
-
 function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_count=typemax(Int))
     # TODO: use meta-blocks, one for each core/thread, containing a set of `LocalTaskBlock`,
     # with a predefined repartition and device
@@ -210,7 +191,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         # TODO: thread block iteration should be done along the current axis
 
         tid = Threads.threadid()
-        thread_blocks_idx = simple_block_distribution(tid, threads_count, grid.grid_size)
+        thread_blocks_idx = grid.threads_workload[tid]
 
         t_start = time_ns()
         step_count = 1  # TODO: monitor the maximum `step_count` reached, if it is small, then ok, but with MPI this will not be the case
@@ -228,8 +209,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
             end
 
             all_finished_cycle = true
-            for blk_idx in thread_blocks_idx
-                blk_pos = CartesianIndices(grid.grid_size)[blk_idx]
+            for blk_pos in thread_blocks_idx
                 # One path for each type of block to avoid runtime dispatch
                 if in_grid(blk_pos, grid.static_sized_grid)
                     blk = grid.blocks[block_idx(grid, blk_pos)]

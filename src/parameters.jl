@@ -83,6 +83,20 @@ reduction in a single step. It might cause issues on some GPU backends: a more "
 could avoid those by doing it in two steps.
 
 
+    workload_distribution = :simple
+
+Dictates how blocks are distributed among threads when `async_cycle == true`:
+- `:simple` trivially spreads all blocks to all threads evenly
+- `:square` divides the block grid into rectangles (closely shaped as squares) for each thread, with
+  the goal of minimizing the perimeter of rectangles to reduce the interaction with other threads as
+  much as possible
+- `:sorted_square` is the same as `:square`, but additionally sorts the blocks to work on those at
+  the perimeter of the square first, reducing the likelyness of waiting for neighbouring threads
+- `:scotch` uses the [`Scotch`](https://gitlab.inria.fr/scotch/scotch) solver to partition the block grid
+- `:sorted_scotch` is the same as `:scotch`, but with the same additional sorting strategy of `:sorted_square`
+- `:weighted_sorted_scotch` takes into account the number of cells in each block instead of assuming
+  an even workload for all blocks
+
 ## Profiling
 
     profiling = Symbol[]
@@ -287,6 +301,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
     block_size::NTuple{2, Int}
+    workload_distribution::Symbol
 
     # MPI
     use_MPI::Bool
@@ -436,7 +451,7 @@ function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
-    use_two_step_reduction = false,
+    use_two_step_reduction = false, workload_distribution = :simple,
     options...
 )
     params.use_threading = use_threading
@@ -476,6 +491,11 @@ function init_device(params::ArmonParameters;
 
     length(block_size) > 2 && solver_error(:config, "Expected `block_size` to contain up to 2 elements, got: $block_size")
     params.block_size = tuple(block_size..., ntuple(Returns(1), 2 - length(block_size))...)
+
+    if !(workload_distribution in (:simple, :square, :sorted_square, :scotch, :sorted_scotch, :weighted_sorted_scotch))
+        solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
+    end
+    params.workload_distribution = workload_distribution
 
     return options
 end
@@ -758,7 +778,11 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
     print_device_info(io, pad, p)
-    print_parameter(io, pad, "async_cycle", p.async_cycle)
+    print_parameter(io, pad, "async_cycle", p.async_cycle, nl=false)
+    if p.async_cycle
+        print(io, ", distribution: ", p.workload_distribution)
+    end
+    println(io)
     print_parameter(io, pad, "MPI", p.use_MPI)
 
     println(io, " ", "─" ^ (pad*2+2))

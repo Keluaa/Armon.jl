@@ -291,4 +291,59 @@ end
     end
 end
 
+
+@testset "Workload Distribution" begin
+    function check_distribution(params, parts; kwargs...)
+        grid_size, _, _ = Armon.grid_dimensions(params)
+        distrib = Armon.thread_workload_distribution(params; threads=parts, kwargs...)
+
+        expected_workload     = prod(grid_size) ÷ parts
+        expected_remainder    = prod(grid_size) - expected_workload * parts
+        expected_max_workload = expected_workload + (expected_remainder > 0)
+
+        distrib_count = length.(distrib)
+        @test sum(distrib_count) == prod(grid_size)
+        @test maximum(distrib_count) ≤ expected_max_workload
+        @test sum(abs.(distrib_count .- expected_workload)) == expected_remainder
+
+        blk_grid = Armon.block_grid_from_workload(grid_size, distrib)
+        @test count(==(0), blk_grid) == 0  # All blocks are assigned to a thread
+    end
+
+    @testset "Simple" begin
+        @testset "$(join(N, '×')) - $(join(block_size, '×')) - $nghost" for (N, block_size, nghost) in (
+                ((100, 100), (16, 16), 4),
+                ((240, 240), (64, 32), 4),
+                ((240, 240), (32, 17), 4),
+            )
+            ref_params = get_reference_params(:Sod, Float64; nghost, N, block_size, workload_distribution=:simple)
+            check_distribution(ref_params, 1)
+            check_distribution(ref_params, 4)
+            check_distribution(ref_params, 7)
+            check_distribution(ref_params, 64)
+            check_distribution(ref_params, 59)
+        end
+    end
+
+    @testset "Scotch" begin
+        # Fixed seed for test reproductibility
+        Armon.Scotch.random_seed(12345)
+        Armon.Scotch.random_reset()
+
+        @testset "$(join(N, '×')) - $(join(block_size, '×')) - $nghost" for (N, block_size, nghost) in (
+                ((100, 100), (16, 16), 4),
+                ((240, 240), (64, 32), 4),
+                ((240, 240), (32, 17), 4),
+            )
+            ref_params = get_reference_params(:Sod, Float64; nghost, N, block_size, workload_distribution=:scotch)
+            # retry 20 times to ensure that we hit the optimal partitioning at least once
+            check_distribution(ref_params, 1; retries=10)
+            check_distribution(ref_params, 4; retries=10)
+            check_distribution(ref_params, 7; retries=10)
+            check_distribution(ref_params, 64; retries=10)
+            check_distribution(ref_params, 59; retries=10)
+        end
+    end
+end
+
 end
