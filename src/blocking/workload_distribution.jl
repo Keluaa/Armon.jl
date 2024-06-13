@@ -541,7 +541,7 @@ end
 """
     scotch_grid_partition(
         threads, grid_size;
-        strategy=:default, workload_tolerance=0.03, repart=false, retries=0, weighted=false,
+        strategy=:default, workload_tolerance=0, repart=false, retries=10, weighted=false,
         static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0
     )
 
@@ -561,7 +561,7 @@ repeat the partitioning `retries` times and keep the best one.
 """
 function scotch_grid_partition(
     threads, grid_size;
-    strategy=:default, workload_tolerance=0.03, repart=false, retries=0, weighted=false,
+    strategy=:default, workload_tolerance=0, repart=false, retries=10, weighted=false,
     static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0
 )
     graph = grid_to_scotch_graph(grid_size;
@@ -578,7 +578,7 @@ function scotch_grid_partition(
     # TODO: for larger grids, using graph coarsening might be necessary (+ it may help the solver to reach better solutions)
 
     # TODO: results are random, impose the RNG seed or do something else (repeatedly call the solver N times and keep the best?)
-    strat = Scotch.strat_build(:graph_map; strategy, parts=threads, imbalance_ratio=workload_tolerance)
+    strat = Scotch.strat_build(:graph_map; strategy, parts=threads, imbalance_ratio=Float64(workload_tolerance))
     partition = Scotch.graph_part(graph, threads, strat)
 
     if repart
@@ -601,7 +601,7 @@ function scotch_grid_partition(
         best_eveness   = weighted ? workload_eveness(best_workload, block_weights, grid_size) : workload_eveness(best_workload)
         best_perimeter = total_workload_perimeter(best_workload)
         for _ in 1:retries
-            new_threads_workload = scotch_grid_partition(threads, grid_size; strategy, workload_tolerance, repart)
+            new_threads_workload = scotch_grid_partition(threads, grid_size; strategy, workload_tolerance, repart, retries=0)
             new_threads_workload == best_workload && continue
 
             new_eveness = weighted ? workload_eveness(new_threads_workload, block_weights, grid_size) : workload_eveness(new_threads_workload)
@@ -628,14 +628,15 @@ function thread_workload_distribution(params::ArmonParameters; threads=nothing, 
     simple = params.workload_distribution === :simple
     scotch = params.workload_distribution in (:scotch, :sorted_scotch, :weighted_sorted_scotch)
     perimeter_first = params.workload_distribution in (:sorted_square, :sorted_scotch, :weighted_sorted_scotch)
+    merged_kw = merge(params.distrib_params, Dict(kwargs...))
     if params.workload_distribution === :weighted_sorted_scotch
         return thread_workload_distribution(thread_count, grid_size;
             simple, scotch, perimeter_first,
             weighted=true, static_sized_grid, block_size=params.block_size, remainder_block_size, ghosts=params.nghost,
-            kwargs...
+            merged_kw...
         )
     else
-        return thread_workload_distribution(thread_count, grid_size; simple, scotch, perimeter_first, kwargs...)
+        return thread_workload_distribution(thread_count, grid_size; simple, scotch, perimeter_first, merged_kw...)
     end
 end
 

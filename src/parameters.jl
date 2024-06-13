@@ -314,6 +314,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     backend_options::DeviceParams
     block_size::NTuple{2, Int}
     workload_distribution::Symbol
+    distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
     lock_memory::Bool
 
@@ -511,6 +512,7 @@ function init_device(params::ArmonParameters;
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
     end
     params.workload_distribution = workload_distribution
+    params.distrib_params = distrib_params
 
     numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
