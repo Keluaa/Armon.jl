@@ -99,7 +99,7 @@ function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::B
     threads_res = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
     threads_res .= typemax(T)
 
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         blk_res = local_time_step(params, state, blk)
 
         tid = mt_reduction ? Threads.threadid() : 1
@@ -305,7 +305,7 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     threads_mass   .= 0
     threads_energy .= 0
 
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         tid = mt_reduction ? Threads.threadid() : 1
         (threads_mass[tid], threads_energy[tid]) =
             (threads_mass[tid], threads_energy[tid]) .+ conservation_vars(params, blk)

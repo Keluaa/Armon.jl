@@ -357,9 +357,9 @@ end
 function block_ghost_exchange(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     # We must repeatedly update all blocks' states until the exchanges are done, as they are designed
     # to work independantly and asynchronously in a state machine, which isn't the case here.
-    waiting_for = ones(Bool, grid.grid_size)
+    waiting_for = ones(Bool, grid.grid_size)  # Cannot use `BitArray` because of multithreading
     while any(waiting_for)
-        @iter_blocks for blk in all_blocks(grid)
+        @iter_blocks for blk in grid
             if waiting_for[blk.pos] && !block_ghost_exchange(params, state, blk)
                 waiting_for[blk.pos] = false
             end

@@ -117,7 +117,7 @@ numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlo
     numerical_fluxes!(params, state, blk, state.riemann_scheme)
 
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         numerical_fluxes!(params, state, blk)
     end
 end

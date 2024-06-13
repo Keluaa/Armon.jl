@@ -83,8 +83,6 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     ```
     =#
 
-    # TODO: put `init_test` here too in order to maximize first-touch accuracy and ease of use
-
     if blk_state == SolverStep.NewCycle
         if start_cycle(state)
             if state.global_dt.cycle == 0

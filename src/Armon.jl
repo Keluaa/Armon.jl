@@ -6,6 +6,7 @@ using ThreadPinning
 using KernelAbstractions
 using MPI
 using MacroTools
+using NUMA
 using TimerOutputs
 using Preferences
 using EnumX
@@ -21,13 +22,14 @@ abstract type ProjectionScheme end
 abstract type SplittingMethod end
 
 include("utils.jl")
+include("numa_utils.jl")
 include("domain_ranges.jl")
 include("tests.jl")
 include("parameters.jl")
 include("solver_state.jl")
-include("blocking/blocking.jl")
 include("profiling.jl")
 include("generic_kernel.jl")
+include("blocking/blocking.jl")
 include("kernels.jl")
 include("reductions.jl")
 include("limiters.jl")

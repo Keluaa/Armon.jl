@@ -167,7 +167,7 @@ end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         update_EOS!(params, state, blk)
     end
 end
@@ -183,16 +183,32 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
     # Cell dimensions
     ΔX = params.domain_size ./ params.global_grid
 
-    # Make sure all variables to save are initialized
-    vars_names_to_zero = setdiff(saved_vars(), (:x, :y, :ρ, :E, :u, :v, :p, :c, :g, :mask))
+    # Make sure all variables are initialized. This is also to make sure to touch every memory page
+    # of the block's variables, ensuring that they are stored in the right NUMA group.
+    vars_names_to_zero = setdiff(block_vars(), (:x, :y, :ρ, :E, :u, :v, :p, :c, :g, :mask))
     vars_to_zero = Tuple(get_vars(blk, vars_names_to_zero))
 
     init_test(params, block_device_data(blk), blk_domain, blk_global_pos, blk.size, ΔX, vars_to_zero, params.test)
+
+    if params.numa_aware
+        # Now is the best time to move the pages, as we know they exist physically and that they are
+        # currently cannot be used by other threads.
+        target_numa_node = NUMA.current_numa_node()
+        move_pages(blk, target_numa_node)
+        params.lock_memory && lock_pages(blk)
+
+        # Do the exact same with the MPI buffers associated with the block
+        for neighbour in blk.neighbours
+            !(neighbour isa RemoteTaskBlock) && continue
+            move_pages(neighbour, target_numa_node)
+            params.lock_memory && lock_pages(neighbour)
+        end
+    end
 end
 
 
 function init_test(params::ArmonParameters, grid::BlockGrid)
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         init_test(params, blk)
     end
 end
@@ -208,7 +224,7 @@ end
 
 
 function cell_update!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         cell_update!(params, state, blk)
     end
 end

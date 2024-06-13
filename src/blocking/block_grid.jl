@@ -85,55 +85,62 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         blocks, edge_blocks, remote_blocks, threads_workload
     )
 
-    # Allocate all local blocks
-    # Non-static blocks are placed on the right and top sides.
+    # Allocate all local and remote blocks
+    # Non-static (edge) blocks are placed on the right and top sides.
+    # Remote blocks are placed on the edge of the grid.
+    # Multithreading is necessary here in order to guarentee that no array is shared between two
+    # NUMA node (when we move the pages afterward), which can happen when allocations are done
+    # sequentially.
     inner_grid = CartesianIndices(static_sized_grid)
     device_kwargs = alloc_device_kwargs(params)
     host_kwargs = alloc_host_kwargs(params)
-    for pos in CartesianIndices(grid_size)
-        if pos in inner_grid
-            blks = blocks
-            idx = block_idx(grid, pos)
-            blk_size = static_size
-        else
-            blks = edge_blocks
-            idx = edge_block_idx(grid, pos)
-            blk_size = DynamicBSize(
-                ifelse.(Tuple(pos) .== grid_size .&& remainder_block_size .!= 0,
-                    remainder_block_size,
-                    params.block_size
-                ),
-                ghost
-            )
+    @threaded :outside_kernel for _ in 1:length(threads_workload)
+        tid = Threads.threadid()
+        for pos in threads_workload[tid]
+            # Static block for the inner grid, edge block otherwise
+            local_block = if pos in inner_grid
+                idx = block_idx(grid, pos)
+                blk_size = static_size
+                blk_state = SolverState(params, global_dt)
+                blocks[idx] = eltype(blocks)(blk_size, pos, blk_state, device_kwargs, host_kwargs)
+            else
+                idx = edge_block_idx(grid, pos)
+                blk_size = DynamicBSize(
+                    ifelse.(Tuple(pos) .== grid_size .&& remainder_block_size .!= 0,
+                        remainder_block_size,
+                        params.block_size
+                    ),
+                    ghost
+                )
+                blk_state = SolverState(params, global_dt)
+                edge_blocks[idx] = eltype(edge_blocks)(blk_size, pos, blk_state, device_kwargs, host_kwargs)
+            end
+
+            # Create the neighbouring remote blocks if we are at the border of the grid
+            is_border_block = !in_grid(2, pos, grid_size .- 1)
+            is_border_block && for side in instances(Side.T)
+                # Position of the neighbouring block in the grid
+                remote_blk_pos = pos + CartesianIndex(offset_to(side))
+                in_grid(remote_blk_pos, grid_size) && continue
+
+                remote_block = if has_neighbour(params, side)
+                    # The buffer must be the same size as the side of our block which is a neighbour to...
+                    buffer_size = real_face_size(local_block.size, side)
+                    # ...for each variable to communicate of each ghost cell
+                    buffer_size *= length(comm_vars()) * params.nghost
+
+                    neighbour = neighbour_at(params, side)  # MPI rank
+                    global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
+
+                    RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm)
+                else
+                    # "Fake" remote block for non-existant neighbour at the edge of the global domain
+                    RemoteTaskBlock{buffer_array}(remote_blk_pos)
+                end
+
+                remote_blocks[remote_block_idx(grid, remote_blk_pos)] = remote_block
+            end
         end
-
-        blk_state = SolverState(params, global_dt)
-        blks[idx] = eltype(blks)(blk_size, pos, blk_state, device_kwargs, host_kwargs)
-    end
-
-    # Allocate all remote blocks
-    remote_i = 1
-    for (side, edge_positions) in RemoteBlockRegions(grid_size), pos in edge_positions
-        # Position of the neighbouring block in the grid
-        local_pos = pos + CartesianIndex(offset_to(opposite_of(side)))
-
-        if has_neighbour(params, side)
-            # The buffer must be the same size as the side of our block which is a neighbour to...
-            buffer_size = real_face_size(block_at(grid, local_pos).size, side)
-            # ...for each variable to communicate of each ghost cell
-            buffer_size *= length(comm_vars()) * params.nghost
-
-            neighbour = neighbour_at(params, side)  # rank
-            global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
-
-            block = RemoteTaskBlock{buffer_array}(buffer_size, pos, neighbour, global_pos, params.cart_comm)
-        else
-            # "Fake" remote block for non-existant neighbour at the edge of the global domain
-            block = RemoteTaskBlock{buffer_array}(pos)
-        end
-
-        remote_blocks[remote_i] = block
-        remote_i += 1
     end
 
     # Initialize all block neighbours references and exchanges
@@ -704,6 +711,40 @@ function host_to_device!(grid::BlockGrid{<:Any, D, H}) where {D, H}
 end
 
 host_to_device!(::BlockGrid{<:Any, D, D}) where {D} = nothing
+
+
+"""
+    move_pages(grid::BlockGrid)
+
+Move the pages of all blocks of the `grid`, including remote blocks, to the NUMA node of the thread
+which is in charge of working on that block.
+"""
+function move_pages(grid::BlockGrid)
+    numa_map = tid_to_numa_node_map()
+    for (tid, blks_pos) in enumerate(grid.threads_workload), blk_pos in blks_pos
+        target_numa = numa_map[tid]
+        blk = block_at(grid, blk_pos)
+        move_pages(blk, target_numa)
+
+        # Make sure the MPI buffers are as close as the data they will be interacting with
+        for neighbour in blk.neighbours
+            !(neighbour isa RemoteTaskBlock) && continue
+            move_pages(neighbour, target_numa)
+        end
+    end
+end
+
+
+"""
+    lock_pages(grid::BlockGrid)
+
+Locks the pages of all blocks of the `grid`, including remote blocks.
+"""
+function lock_pages(grid::BlockGrid)
+    foreach(lock_pages, grid.blocks)
+    foreach(lock_pages, grid.edge_blocks)
+    foreach(lock_pages, grid.remote_blocks)
+end
 
 
 """

@@ -145,6 +145,16 @@ end
 host_to_device!(::LocalTaskBlock{H, H}) where {H} = nothing
 
 
+function move_pages(blk::LocalTaskBlock, target_node)
+    for var in block_vars(blk)
+        move_pages(var, target_node)
+    end
+end
+
+
+lock_pages(blk::LocalTaskBlock) = foreach(lock_pages, block_vars(blk))
+
+
 function Base.show(io::IO, blk::LocalTaskBlock)
     pos_str = join(Tuple(blk.pos), ',')
     size_str = join(block_size(blk), '×')
@@ -194,6 +204,24 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block.requests = MPI.UnsafeMultiRequest(0)
         return block
     end
+end
+
+
+function move_pages(blk::RemoteTaskBlock, target_node)
+    blk.rank == -1 && return
+    # MPI communications might not have happened, therefore pages might not be placed on a NUMA node
+    # yet, so it is safer to touch them first.
+    touch_pages(array_pages(blk.send_buf.data))
+    touch_pages(array_pages(blk.recv_buf.data))
+    move_pages(blk.send_buf.data, target_node)
+    move_pages(blk.recv_buf.data, target_node)
+end
+
+
+function lock_pages(blk::RemoteTaskBlock)
+    blk.rank == -1 && return
+    lock_pages(blk.send_buf.data)
+    lock_pages(blk.recv_buf.data)
 end
 
 

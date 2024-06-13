@@ -53,7 +53,7 @@ end
 
 
 function euler_projection!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @section "Projection" @iter_blocks for blk in all_blocks(grid)
+    @section "Projection" @iter_blocks for blk in grid
         euler_projection!(params, state, blk)
     end
 end
@@ -139,7 +139,7 @@ advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlo
     advection_fluxes!(params::ArmonParameters, state, blk::LocalTaskBlock, state.projection_scheme)
 
 function advection_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    @section "Advection" @iter_blocks for blk in all_blocks(grid)
+    @section "Advection" @iter_blocks for blk in grid
         advection_fluxes!(params, state, blk)
     end
 end

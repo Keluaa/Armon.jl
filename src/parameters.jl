@@ -40,6 +40,18 @@ Store MPI buffers on the device. This requires to use a GPU-aware MPI implementa
 when using the CPU only.
 
 
+    numa_aware = true
+
+Allocate memory according to which NUMA node is associated with the thread supposed to work on a
+chunk of memory.
+This effectively enforces the *first-touch* policy, instead of blindly relying on it.
+
+
+    lock_memory = false
+
+Lock all memory pages using `mlock` to RAM.
+
+
 ## Kernels
 
     use_threading = true, use_simd = true
@@ -302,6 +314,8 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     backend_options::DeviceParams
     block_size::NTuple{2, Int}
     workload_distribution::Symbol
+    numa_aware::Bool
+    lock_memory::Bool
 
     # MPI
     use_MPI::Bool
@@ -451,7 +465,8 @@ function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
-    use_two_step_reduction = false, workload_distribution = :simple,
+    use_two_step_reduction = false,
+    workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
     options...
 )
     params.use_threading = use_threading
@@ -496,6 +511,10 @@ function init_device(params::ArmonParameters;
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
     end
     params.workload_distribution = workload_distribution
+
+    numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
+    params.numa_aware = numa_aware
+    params.lock_memory = lock_memory
 
     return options
 end
@@ -778,9 +797,15 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
     print_device_info(io, pad, p)
-    print_parameter(io, pad, "async_cycle", p.async_cycle, nl=false)
-    if p.async_cycle
+    print_parameter(io, pad, "blocking", p.use_cache_blocking ? (p.async_cycle ? "async" : "sync") : false, nl=false)
+    if p.use_cache_blocking && p.async_cycle
         print(io, ", distribution: ", p.workload_distribution)
+    end
+    if p.numa_aware
+        print(io, ", numa aware")
+        p.lock_memory && print(io, ", locked to RAM")
+    else
+        print(io, ", relying on first touch policy")
     end
     println(io)
     print_parameter(io, pad, "MPI", p.use_MPI)

@@ -291,50 +291,35 @@ include("interface.jl")
 
 
 """
-    @iter_blocks for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         # body...
     end
 
-Applies the body of the for-loop in to all blocks of the `grid`.
-
-The body is duplicated for inner and edge blocks, ensuring type-inference.
-
-If `params.use_multithreading`, then an attempt will be made at equilibrating workload among threads.
-
-```julia
-# Iterate on all blocks of the grid
-@iter_blocks for blk in all_blocks(grid)
-    some_function(blk)
-end
-```
+Applies the body of the for-loop in to all blocks of the `grid`. Threads iterate over the blocks they
+are assigned to via `grid.threads_workload`.
 """
 macro iter_blocks(expr)
-    !(expr isa Expr && expr.head === :for) && error("expected for-loop")
+    !Base.isexpr(expr, :for) && error("expected for-loop")
     block_var = expr.args[1].args[1]
-    block_range = expr.args[1].args[2]
+    grid_var = expr.args[1].args[2]
     body = expr.args[2]
 
-    if @capture(block_range, f_(grid_var_))
-        if f === :all_blocks || f === all_blocks
-            inner_blocks_range = :($grid_var.blocks)
-            edge_blocks_range  = :($grid_var.edge_blocks)
-        else
-            error("expected `all_blocks(grid)`, got: $block_range")
-        end
-    else
-        error("wrong style of block iteration: $block_range")
-    end
-
     return esc(quote
-        Armon.@section "Inner blocks" begin
-            Armon.@threaded for $block_var in $inner_blocks_range
-                $body
-            end
-        end
-
-        Armon.@section "Edge blocks" begin
-            Armon.@threaded for $block_var in $edge_blocks_range
-                $body
+        threads_count = params.use_threading ? Threads.nthreads() : 1
+        $Armon.@threaded :outside_kernel for _ in 1:threads_count
+            tid = Threads.threadid()
+            thread_blocks_idx = $grid_var.threads_workload[tid]
+            for blk_pos in thread_blocks_idx
+                # One path for each type of block to avoid runtime dispatch
+                if $in_grid(blk_pos, $grid_var.static_sized_grid)
+                    let $block_var = $grid_var.blocks[$block_idx($grid_var, blk_pos)]
+                        $body
+                    end
+                else
+                    let $block_var = $grid_var.edge_blocks[$edge_block_idx($grid_var, blk_pos)]
+                        $body
+                    end
+                end
             end
         end
     end)

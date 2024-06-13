@@ -51,6 +51,8 @@ block_pos_containing_cell
 block_origin
 block_at
 block_size_at
+move_pages(::BlockGrid)
+lock_pages(::BlockGrid)
 ```
 
 ### Block size and iteration
@@ -164,4 +166,14 @@ Axis
 Side
 SolverException
 @section
+```
+
+### NUMA utilities
+
+```@docs
+array_pages
+touch_pages
+move_pages(::Vector{Ptr{T}}, ::Any) where T
+lock_pages(::Ptr, ::Any)
+unlock_pages
 ```

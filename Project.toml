@@ -11,6 +11,7 @@ KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 Kokkos = "3296cea9-b0de-4b57-aba0-ce554b517c3b"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 MacroTools = "1914dd2f-81c6-5fcd-8719-6d5c9610ff09"
+NUMA = "292f1341-b53f-425a-80e5-3597ad0961bf"
 NVTX = "5da4648a-3479-48b8-97b9-01cb529c0a1f"
 Polyester = "f517fe37-dbe3-4b94-8317-1923a5111588"
 Preferences = "21216c6a-2e73-6563-6e65-726566657250"
@@ -49,10 +50,11 @@ AMDGPU = "21141c5a-9bdb-4563-92ae-f87d6854732e"
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 MPI = "da04e1cc-30fd-572f-bb4f-1f8673147195"
 NVTX = "5da4648a-3479-48b8-97b9-01cb529c0a1f"
+NUMA = "292f1341-b53f-425a-80e5-3597ad0961bf"
 Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 ThreadPinning = "811555cd-349b-4f26-b7bc-1f208b848042"
 oneAPI = "8f75cd03-7ff8-4ecb-9b8f-daf728133b1b"
 
 [targets]
-test = ["Test", "AMDGPU", "CUDA", "MPI", "Printf", "ThreadPinning", "oneAPI"]
+test = ["Test", "AMDGPU", "CUDA", "MPI", "NUMA", "Printf", "ThreadPinning", "oneAPI"]
