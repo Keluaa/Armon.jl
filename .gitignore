@@ -1,4 +1,5 @@
 /docs/build/
+/docs/src/assets/structure.svg
 .idea
 .vscode
 /lib/armon_cpp/cmake-*
