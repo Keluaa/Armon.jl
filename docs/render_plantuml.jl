@@ -69,8 +69,9 @@ end
 function render_plantuml_files(files::Vector{String})
     @info "Rendering PlantUML files to SVG"
     svg_files = map(files) do file
-        encoded_file = encode_to_plant_uml_base64(file)
-        svg_file = first(splitext(file)) * ".svg"
+        file_path = joinpath(@__DIR__, file)
+        encoded_file = encode_to_plant_uml_base64(file_path)
+        svg_file = first(splitext(file_path)) * ".svg"
         send_to_render_server(encoded_file, svg_file)
     end
     return svg_files
