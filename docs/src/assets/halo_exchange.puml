@@ -1,0 +1,85 @@
+@startuml Armon.jl#halo_exchange
+
+<style>
+.mpi {
+  BackGroundColor #22ccaa
+  LineThickness 1
+  LineColor black
+}
+
+.pause {
+  BackGroundColor #ee1100
+  LineThickness 1
+  LineColor black
+}
+</style>
+
+package "Halo Exchange" as pkg_halo_exchange {
+
+    rectangle """block_ghost_exchange(params, state, blk)""" as block_ghost_exchange
+    usecase xchg_side_loop [
+        For each side of the sweep
+        Looking at the neighbouring ""other_blk""
+    ]
+    rectangle """block_ghost_exchange(params, state, blk, other_blk)""" as block_ghost_exchange_blk_other
+
+    [block_ghost_exchange] --> [xchg_side_loop]
+    [xchg_side_loop] --> [block_ghost_exchange_blk_other]
+
+    package "Local exchange" {
+        rectangle """mark_ready_for_exchange!""" as local_xchg_mark_ready
+        hexagon cond_do_local_xchg [
+            exchange is not done
+        ]
+        rectangle "acknowledge the exchange" as ack_local_xchg
+        hexagon cond_local_xchg [
+            ""other_blk"" is ready
+            we won the atomic cas
+        ]
+        rectangle """block_ghost_exchange(vars₁, vars₂, ...)""" as block_ghost_exchange_blk_blk
+        rectangle """exchange_done!""" as local_xchg_done
+
+        process "wait until ""other_blk"" does the xchg" << pause >> as local_xchg_pause
+
+        [local_xchg_mark_ready] --> [cond_do_local_xchg]
+        [cond_do_local_xchg] -right-> [ack_local_xchg] : no
+        [cond_do_local_xchg] --> [cond_local_xchg] : yes
+        [cond_local_xchg] -right-> [local_xchg_pause] : no
+        [cond_local_xchg] --> [block_ghost_exchange_blk_blk] : yes
+        [block_ghost_exchange_blk_blk] --> [local_xchg_done]
+    }
+
+    package "Remote exchange" {
+        hexagon "Is exchange started?" as cond_xchg_start
+
+        rectangle """pack_to_array!""" as pack_to_array
+        rectangle """unpack_from_array!""" as unpack_from_array
+        cloud """start_exchange""" << mpi >> as start_exchange
+        cloud """finish_exchange""" << mpi >> as finish_exchange
+
+        hexagon "Is exchange finished?" as cond_xchg_end
+        process "wait until xchg end" << pause >> as xchg_pause
+
+        [cond_xchg_start] --> [start_exchange] : no
+        [cond_xchg_start] --> [finish_exchange] : yes
+
+        [start_exchange] --> [pack_to_array]
+        [pack_to_array] --> [finish_exchange]
+        [finish_exchange] --> [cond_xchg_end]
+
+        [cond_xchg_end] --> [xchg_pause] : no
+        [cond_xchg_end] --> [unpack_from_array] : yes
+    }
+
+    hexagon "If ""RemoteTaskBlock""" as cond_remote
+    hexagon "If ""rank != -1""" as cond_global_bc
+    rectangle """boundary_conditions!""" as global_bc
+
+    block_ghost_exchange_blk_other --> cond_remote
+    cond_remote --> cond_global_bc : yes
+    cond_remote -right-> local_xchg_mark_ready : no
+    cond_global_bc --> cond_xchg_start : yes
+    cond_global_bc -right-> global_bc : no
+}
+
+@enduml

@@ -4,7 +4,10 @@ using Documenter
 include("render_plantuml.jl")
 
 render_plantuml_files([
-    "src/assets/structure.puml"
+    "src/assets/structure.puml",
+    "src/assets/global_time_step.puml",
+    "src/assets/halo_exchange.puml",
+    "src/assets/block_grid.puml"
 ])
 
 CI = get(ENV, "CI", "false") == "true"

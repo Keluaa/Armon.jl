@@ -1,0 +1,79 @@
+@startuml Armon.jl#global_time_step
+
+<style>
+.mpi {
+  BackGroundColor #22ccaa
+  LineThickness 1
+  LineColor black
+}
+
+.pause {
+  BackGroundColor #ee1100
+  LineThickness 1
+  LineColor black
+}
+</style>
+
+package "Global Time Step" {
+    frame """GlobalTimeStep""" as global_time_step {
+        rectangle """state""" as global_time_step_state
+        rectangle """next_cycle_dt""" as global_time_step_next_cycle_dt
+        rectangle """next_dt""" as global_time_step_next_dt
+        rectangle """contributions""" as global_time_step_contributions
+
+        card time_step_state [
+            ""TimeStepState""
+            ====
+            ""Ready""
+            ----
+            ""AllContributed""
+            ----
+            ""DoingMPI""
+            ----
+            ""WaitingForMPI""
+            ----
+            ""Done""
+        ]
+
+        global_time_step_state --> time_step_state
+    }
+
+    usecase """GlobalTimeStep"" instance" as global_time_step_instance
+
+    package "Time step reduction" as pkg_blk_time_step {
+        rectangle """next_time_step""" as time_step_next_time_step
+        hexagon cond_time_step_wait [
+            MPI reduce in progress?
+            This means that the previous
+            reduction is not done
+        ]
+        hexagon "Already contributed?" as cond_contribute_time_step
+        rectangle """local_time_step""" as time_step_local
+        rectangle """contribute_to_dt!""" as time_step_contribute
+        hexagon "All blocks contributed?" as cond_time_step
+        cloud """wait_for_dt!""" << mpi >> as time_step_wait
+        rectangle """update_dt!""" as time_step_update
+
+        cloud global_time_reduction << mpi >> [
+            If ""contributions == 0"" then
+            a ""MPI_IAllreduce"" is launched
+            by the last contributor. The result
+            is stored in ""next_cycle_dt"".
+        ]
+
+        time_step_next_time_step --> cond_time_step_wait
+        cond_time_step_wait --> time_step_wait : yes
+        cond_time_step_wait --> cond_contribute_time_step : no
+        time_step_wait --> cond_contribute_time_step
+        cond_contribute_time_step --> time_step_local : no
+        time_step_local --> time_step_contribute
+        time_step_contribute --> cond_time_step
+        cond_time_step --> time_step_update : yes
+        time_step_update --> global_time_reduction
+    }
+
+    pkg_blk_time_step --> global_time_step
+    global_time_step_instance --> global_time_step
+}
+
+@enduml
