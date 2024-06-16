@@ -26,6 +26,12 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Parameters & Device" => "parameters_and_device.md",
+        "Grid" => "grid.md",
+        "Blocks" => "blocks.md",
+        "Block state" => "block_states.md",
+        "Kernels" => "kernels.md",
+        "Utils" => "utils.md",
         "UML Structure" => "structure.md"
     ],
 )
