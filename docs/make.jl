@@ -1,6 +1,12 @@
 using Armon
 using Documenter
 
+include("render_plantuml.jl")
+
+render_plantuml_files([
+    "src/assets/structure.puml"
+])
+
 CI = get(ENV, "CI", "false") == "true"
 
 DocMeta.setdocmeta!(Armon, :DocTestSetup, :(using Armon); recursive=true)
@@ -17,6 +23,7 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "UML Structure" => "structure.md"
     ],
 )
 

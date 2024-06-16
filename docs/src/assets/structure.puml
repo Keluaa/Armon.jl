@@ -1,0 +1,530 @@
+@startuml Armon.jl
+
+<style>
+.mpi {
+  BackGroundColor #22ccaa
+  LineThickness 1
+  LineColor black
+}
+
+.pause {
+  BackGroundColor #ee1100
+  LineThickness 1
+  LineColor black
+}
+</style>
+
+package "Block Grid" as pkg_block_grid {
+    frame """BlockGrid""" as block_grid {
+        rectangle block_grid_blocks [
+            ""blocks""
+            The blocks of size ""block_size""
+        ]
+        rectangle block_grid_edge_blocks [
+            ""edge_blocks""
+            The blocks at the edge of the grid
+            Usually smaller than ""block_size"".
+            Since they mustn't be smaller than
+            ""nghosts"", in some cases they can
+            be larger than ""block_size"".
+        ]
+        rectangle block_grid_remote_blocks [
+            ""remote_blocks""
+            Represent the distant blocks
+            connected to our local blocks
+            ""rank == -1"" if they don't exist
+        ]
+        rectangle block_grid_dims [
+            ""grid_size""
+            ""static_sized_grid""
+            ""cell_size""
+            ""edge_size""
+            Dimensions of the grid
+        ]
+
+        block_grid_blocks --> block_grid_remote_blocks : connected to
+        block_grid_edge_blocks --> block_grid_remote_blocks : connected to
+        block_grid_blocks <-> block_grid_edge_blocks : connected to
+    }
+
+    rectangle block_grid_dimensions [
+        ""grid_dimensions""
+        Computes the dimensions of
+        the grid
+    ]
+
+    rectangle block_grid_mem_required [
+        ""memory_required""
+        Estimates the total memory
+        required for a ""BlockGrid""
+    ]
+
+    rectangle """RemoteBlockRegions""" as block_grid_RemoteBlockRegions
+    rectangle """EdgeBlockRegions""" as block_grid_EdgeBlockRegions
+
+    block_grid_dimensions --> block_grid_dims
+    block_grid_dimensions <- block_grid_mem_required
+
+    frame """LocalTaskBlock""" as local_task_block {
+        usecase """device_data""" as local_task_block_device_data
+        usecase """host_data""" as local_task_block_host_data
+
+        rectangle local_task_block_data [
+            ""BlockData""
+            Holds all arrays of a block
+        ]
+
+        rectangle local_task_block_state [
+            ""state""
+            Individual state of the block
+        ]
+
+        rectangle local_task_block_neighbours [
+            ""neighbours""
+            References to neighbouring blocks
+        ]
+
+        rectangle local_task_block_exchanges [
+            ""exchanges""
+            The ""BlockInterface""s
+            managing local halo exchanges
+        ]
+
+        local_task_block_neighbours <--> local_task_block_exchanges
+
+        local_task_block_device_data --> local_task_block_data
+        local_task_block_host_data --> local_task_block_data
+    }
+
+    rectangle block_grid_row_iterator [
+        ""BlockRowIterator""
+        Iterates a grid row by row
+    ]
+
+    rectangle block_grid_iter_blocks [
+        ""@iter_blocks""
+        Iterates a grid block by block.
+        Is multithreaded.
+        Respects the distribution of
+        blocks to threads.
+    ]
+
+    block_grid_RemoteBlockRegions -up-> block_grid_remote_blocks : Iterates
+    block_grid_EdgeBlockRegions -down-> block_grid_edge_blocks : Iterates
+    block_grid_row_iterator -up-> block_grid
+    block_grid_iter_blocks --> block_grid
+
+    block_grid_blocks -> local_task_block
+    block_grid_edge_blocks -> local_task_block
+}
+
+
+package "Solver State" {
+    frame """SolverState""" as solver_state {
+        rectangle """step""" as solver_state_step
+        rectangle """global_dt""" as solver_state_global_dt
+
+        card solver_state_solver_params [
+            ""splitting"": axis splitting method
+            ""riemann_scheme""
+            ""riemann_limiter""
+            ""projection_scheme""
+            ""test_case""
+            ""steps_ranges"": index ranges to apply each solver step on
+        ]
+    }
+
+    card solver_step [
+        ""SolverStep""
+        ====
+        ""NewCycle""
+        ----
+        ""TimeStep""
+        ----
+        ""InitTimeStep""
+        ----
+        ""NewSweep""
+        ----
+        ""EOS""
+        ----
+        ""Exchange""
+        ----
+        ""Fluxes""
+        ----
+        ""CellUpdate""
+        ----
+        ""Remap""
+        ----
+        ""EndCycle""
+        ----
+        ""ErrorState""
+    ]
+
+    solver_state_step --> solver_step
+}
+
+
+package "Global Time Step" {
+    frame """GlobalTimeStep""" as global_time_step {
+        rectangle """state""" as global_time_step_state
+        rectangle """next_cycle_dt""" as global_time_step_next_cycle_dt
+        rectangle """next_dt""" as global_time_step_next_dt
+        rectangle """contributions""" as global_time_step_contributions
+
+        card time_step_state [
+            ""TimeStepState""
+            ====
+            ""Ready""
+            ----
+            ""AllContributed""
+            ----
+            ""DoingMPI""
+            ----
+            ""WaitingForMPI""
+            ----
+            ""Done""
+        ]
+
+        global_time_step_state --> time_step_state
+    }
+
+    usecase """GlobalTimeStep"" instance" as global_time_step_instance
+
+    package "Time step reduction" as pkg_blk_time_step {
+        rectangle """next_time_step""" as time_step_next_time_step
+        hexagon cond_time_step_wait [
+            MPI reduce in progress?
+            This means that the previous
+            reduction is not done
+        ]
+        hexagon "Already contributed?" as cond_contribute_time_step
+        rectangle """local_time_step""" as time_step_local
+        rectangle """contribute_to_dt!""" as time_step_contribute
+        hexagon "All blocks contributed?" as cond_time_step
+        cloud """wait_for_dt!""" << mpi >> as time_step_wait
+        rectangle """update_dt!""" as time_step_update
+
+        cloud global_time_reduction << mpi >> [
+            If ""contributions == 0"" then
+            a ""MPI_IAllreduce"" is launched
+            by the last contributor. The result
+            is stored in ""next_cycle_dt"".
+        ]
+
+        time_step_next_time_step --> cond_time_step_wait
+        cond_time_step_wait --> time_step_wait : yes
+        cond_time_step_wait --> cond_contribute_time_step : no
+        time_step_wait --> cond_contribute_time_step
+        cond_contribute_time_step --> time_step_local : no
+        time_step_local --> time_step_contribute
+        time_step_contribute --> cond_time_step
+        cond_time_step --> time_step_update : yes
+        time_step_update --> global_time_reduction
+    }
+
+    pkg_blk_time_step --> global_time_step
+    solver_state_global_dt --> global_time_step_instance
+    global_time_step_instance --> global_time_step
+}
+
+
+package "Halo Exchange" as pkg_halo_exchange {
+
+    rectangle """block_ghost_exchange(params, state, blk)""" as block_ghost_exchange
+    hexagon xchg_side_loop [
+        For each side of the sweep
+        Looking at the neighbouring ""other_blk""
+    ]
+    rectangle """block_ghost_exchange(params, state, blk, other_blk)""" as block_ghost_exchange_blk_other
+
+    [block_ghost_exchange] --> [xchg_side_loop]
+    [xchg_side_loop] --> [block_ghost_exchange_blk_other]
+
+    package "Local exchange" {
+        rectangle """mark_ready_for_exchange!""" as local_xchg_mark_ready
+        hexagon cond_do_local_xchg [
+            exchange is not done
+        ]
+        rectangle "acknowledge the exchange" as ack_local_xchg
+        hexagon cond_local_xchg [
+            ""other_blk"" is ready
+            we won the atomic cas
+        ]
+        rectangle """block_ghost_exchange(vars₁, vars₂, ...)""" as block_ghost_exchange_blk_blk
+        rectangle """exchange_done!""" as local_xchg_done
+
+        process "wait until ""other_blk"" does the xchg" << pause >> as local_xchg_pause
+
+        [local_xchg_mark_ready] --> [cond_do_local_xchg]
+        [cond_do_local_xchg] -right-> [ack_local_xchg] : no
+        [cond_do_local_xchg] --> [cond_local_xchg] : yes
+        [cond_local_xchg] -right-> [local_xchg_pause] : no
+        [cond_local_xchg] --> [block_ghost_exchange_blk_blk] : yes
+        [block_ghost_exchange_blk_blk] --> [local_xchg_done]
+    }
+
+    package "Remote exchange" {
+        hexagon "Is exchange started?" as cond_xchg_start
+
+        rectangle """pack_to_array!""" as pack_to_array
+        rectangle """unpack_from_array!""" as unpack_from_array
+        cloud """start_exchange""" << mpi >> as start_exchange
+        cloud """finish_exchange""" << mpi >> as finish_exchange
+
+        hexagon "Is exchange finished?" as cond_xchg_end
+        process "wait until xchg end" << pause >> as xchg_pause
+
+        [cond_xchg_start] --> [start_exchange] : no
+        [cond_xchg_start] --> [finish_exchange] : yes
+
+        [start_exchange] --> [pack_to_array]
+        [pack_to_array] --> [finish_exchange]
+        [finish_exchange] --> [cond_xchg_end]
+
+        [cond_xchg_end] --> [xchg_pause] : no
+        [cond_xchg_end] --> [unpack_from_array] : yes
+    }
+
+    hexagon "If ""RemoteTaskBlock""" as cond_remote
+    hexagon "If ""rank != -1""" as cond_global_bc
+    rectangle """boundary_conditions!""" as global_bc
+
+    block_ghost_exchange_blk_other --> cond_remote
+    cond_remote --> cond_global_bc : yes
+    cond_remote -right-> local_xchg_mark_ready : no
+    cond_global_bc --> cond_xchg_start : yes
+    cond_global_bc -right-> global_bc : no
+}
+
+
+package "CFD Solver" as pkg_solver {
+
+    rectangle solver_init_test [
+        **Init test case**
+        Initializes all variables
+        Including temp arrays.
+        Memory pages are then
+        moved to the right NUMA
+        node is needed
+    ]
+
+    card solver_test_cases [
+        Test Cases
+        ====
+        ""Sod""
+        ----
+        ""Sod_y""
+        ----
+        ""Sod_circ""
+        ----
+        ""Bizarrium""
+        ----
+        ""Sedov""
+        ----
+        ""DebugIndexes""
+    ]
+
+    solver_init_test -down-> solver_test_cases
+
+    package "Cycle steps" as solver_steps {
+
+        rectangle step_first_eos [
+            **Initial EOS**
+            If it is the first cycle,
+            and there is no imposed
+            initial time step, we must
+            apply the equation of state
+        ]
+
+        rectangle step_time_step [
+            **Time Step**
+            read from ""u"", ""v"", ""c""
+            uses 1 tmp array on GPU
+        ]
+
+        card "Axes Sweeps (X, Y...)" as solver_sweeps {
+            rectangle step_EOS [
+                **Equation of state**
+                0 point stencil
+                read from ""ρ"", ""E"", ""u"", ""v""
+                write to ""c"", ""p"", ""g""
+            ]
+            rectangle step_halo_exchange [
+                **Halo exchange**
+                7 variables to
+                exchange per cell
+            ]
+            rectangle step_riemann [
+                **Riemann solver**
+                2 point stencil (1-dim)
+                read from ""ρ"", ""E"", ""uₐ"", ""p"", ""c""
+                write to ""uˢ"", ""pˢ""
+            ]
+            rectangle step_update [
+                **Cell update**
+                1 point stencil (1-dim)
+                read from ""ρ"", ""uₐ"", ""E"", ""uˢ"", ""pˢ""
+                write to ""ρ"", ""uₐ"", ""E""
+            ]
+            rectangle step_projection [
+                **Projection**
+                2 point stencil (1-dim)
+                read from ""uˢ"", ""ρ"", ""u"", ""v"", ""E""
+                write to ""ρ"", ""u"", ""v"", ""E""
+                uses 4 tmp arrays
+                applied in two kernels
+            ]
+        }
+
+        process "End of cycle" << pause >> as step_end_of_cycle
+
+        step_first_eos --> step_time_step
+        step_time_step --> solver_sweeps
+        solver_sweeps --> step_EOS
+        step_EOS --> step_halo_exchange
+        step_halo_exchange --> step_riemann
+        step_riemann --> step_update
+        step_update --> step_projection
+        step_projection --> step_end_of_cycle
+
+        card axis_splitting [
+            Axis splitting methods
+            ====
+            ""SequentialSplitting""
+            ----
+            ""GodunovSplitting""
+            ----
+            ""StrangSplitting""
+            ----
+            ""SinglePassSplitting""
+        ]
+
+        card limiters [
+            Limiters
+            ====
+            ""NoLimiter""
+            ----
+            ""MinmodLimiter""
+            ----
+            ""SuperbeeLimiter""
+        ]
+
+        card projection_schemes [
+            Projection Schemes
+            ====
+            ""EulerProjection""
+            ----
+            ""Euler2ndProjection""
+        ]
+
+        solver_sweeps -> axis_splitting
+        step_riemann -> limiters
+        step_projection -> projection_schemes
+    }
+
+    rectangle "Solver Advancement" as block_iter {
+
+        rectangle time_loop [
+            ""time_loop""
+            Runs the all solver iterations:
+            * ""reset!(grid)"": reset all states
+              this allows to reuse the same ""BlockGrid""
+              across multiple solver executions
+            * run the solver cycles
+            * print the final state (if verbose)
+        ]
+
+        rectangle "Solver Cycle" as block_iter_cycle {
+            hexagon "Use async cycle?" as cond_async_cycle
+    
+            rectangle solver_cycle [
+                ""solver_cycle""
+                Applies all cycle steps
+                on the grid, step by step.
+                Kernels are multi-threaded.
+            ]
+
+            rectangle solver_async_cycle [
+                ""solver_async_cycle""
+                Applies all cycle steps
+                on all blocks, block by block.
+                Blocks are evenly dispatched
+                to each thread.
+            ]
+
+            rectangle "Thread loop" as solver_async_cycle_thread {
+                usecase thread_cycle_loop_start [
+                    Apply once on each of
+                    the thread's block.
+                    Same order everytime.
+                    **Implicit busy wait**
+                ]
+
+                rectangle block_state_machine [
+                    ""block_state_machine""
+                    Advances the state of a
+                    block by applying solver steps.
+                    Stop when we must wait.
+                    Kernels are single-threaded.
+                ]
+
+                hexagon cond_thread_cycle_end [
+                    All of the thread's
+                    blocks have finished?
+                ]
+
+                thread_cycle_loop_start --> block_state_machine
+                block_state_machine --> cond_thread_cycle_end
+                cond_thread_cycle_end --> thread_cycle_loop_start : no
+            }
+
+            rectangle solver_cycle_end [
+                End of cycle
+                * ""next_cycle!""
+                * Display progress (if verbose)
+                * Write to file for animations (if wanted)
+                * Last cycle must ""wait"" for GPU kernels
+            ]
+
+            cloud next_cycle << mpi >> [
+                ""next_cycle!""
+                Increment time and cycle count
+                Wait for MPI reduction to be done
+                Update ""dt"" for next cycle
+            ]
+
+            cond_async_cycle --> solver_cycle : no
+            cond_async_cycle --> solver_async_cycle : yes
+            solver_async_cycle --> thread_cycle_loop_start
+
+            solver_cycle --> solver_cycle_end
+            cond_thread_cycle_end --> solver_cycle_end : yes
+            solver_cycle_end -> next_cycle
+        }
+
+        time_loop --> cond_async_cycle
+    }
+
+    solver_init_test -> step_first_eos
+}
+
+rectangle armon [
+    ""armon""
+    Main entry point of the solver.
+    Given a ""ArmonParameters"" struct:
+    * Creates a new ""BlockGrid""
+    * Apply ""init_test""
+    * run ""time_loop""
+    * Builds a ""SolverStats"" from the results
+]
+
+solver_state_solver_params --> pkg_solver : "controls"
+
+step_halo_exchange --> block_ghost_exchange
+step_time_step -right-> time_step_next_time_step
+
+local_task_block_state -> solver_state
+
+armon --> time_loop
+
+@enduml
