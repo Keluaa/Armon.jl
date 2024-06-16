@@ -1,0 +1,296 @@
+@startuml Armon.jl
+
+<style>
+.mpi {
+  BackGroundColor #22ccaa
+  LineThickness 1
+  LineColor black
+}
+
+.pause {
+  BackGroundColor #ee1100
+  LineThickness 1
+  LineColor black
+}
+</style>
+
+package "CFD Solver" as pkg_solver {
+
+    rectangle solver_init_test [
+        **Init test case**
+        Initializes all variables
+        Including temp arrays.
+        Memory pages are then
+        moved to the right NUMA
+        node is needed
+    ]
+
+    card solver_test_cases [
+        Test Cases
+        ====
+        ""Sod""
+        ----
+        ""Sod_y""
+        ----
+        ""Sod_circ""
+        ----
+        ""Bizarrium""
+        ----
+        ""Sedov""
+        ----
+        ""DebugIndexes""
+    ]
+
+    solver_init_test --> solver_test_cases
+
+    package "Cycle steps" as solver_steps {
+
+        rectangle step_first_eos [
+            **Initial EOS**
+            If it is the first cycle,
+            and there is no imposed
+            initial time step, we must
+            apply the equation of state
+        ]
+
+        rectangle step_time_step [
+            **Time Step**
+            read from ""u"", ""v"", ""c""
+            uses 1 tmp array on GPU
+        ]
+
+        package "Global Time Step" as pkg_global_time_step {
+            label "See below  "
+        }
+
+        card "Axes Sweeps (X, Y...)" as solver_sweeps {
+            rectangle step_EOS [
+                **Equation of state**
+                0 point stencil
+                read from ""ρ"", ""E"", ""u"", ""v""
+                write to ""c"", ""p"", ""g""
+            ]
+            rectangle step_halo_exchange [
+                **Halo exchange**
+                7 variables to
+                exchange per cell
+            ]
+            rectangle step_riemann [
+                **Riemann solver**
+                2 point stencil (1-dim)
+                read from ""ρ"", ""E"", ""uₐ"", ""p"", ""c""
+                write to ""uˢ"", ""pˢ""
+            ]
+            rectangle step_update [
+                **Cell update**
+                1 point stencil (1-dim)
+                read from ""ρ"", ""uₐ"", ""E"", ""uˢ"", ""pˢ""
+                write to ""ρ"", ""uₐ"", ""E""
+            ]
+            rectangle step_projection [
+                **Projection**
+                2 point stencil (1-dim)
+                read from ""uˢ"", ""ρ"", ""u"", ""v"", ""E""
+                write to ""ρ"", ""u"", ""v"", ""E""
+                uses 4 tmp arrays
+                applied in two kernels
+            ]
+        }
+
+        process "End of cycle" << pause >> as step_end_of_cycle
+
+        step_first_eos --> step_time_step
+        step_time_step --> solver_sweeps
+        solver_sweeps --> step_EOS
+        step_EOS --> step_halo_exchange
+        step_halo_exchange --> step_riemann
+        step_riemann --> step_update
+        step_update --> step_projection
+        step_projection --> step_end_of_cycle
+
+        card axis_splitting [
+            Axis splitting methods
+            ====
+            ""SequentialSplitting""
+            ----
+            ""GodunovSplitting""
+            ----
+            ""StrangSplitting""
+            ----
+            ""SinglePassSplitting""
+        ]
+
+        card limiters [
+            Limiters
+            ====
+            ""NoLimiter""
+            ----
+            ""MinmodLimiter""
+            ----
+            ""SuperbeeLimiter""
+        ]
+
+        card projection_schemes [
+            Projection Schemes
+            ====
+            ""EulerProjection""
+            ----
+            ""Euler2ndProjection""
+        ]
+
+        package "Halo Exchange" as pkg_halo_exchange {
+            label "See below"
+        }
+
+        solver_sweeps -> axis_splitting
+        step_riemann -> limiters
+        step_projection -> projection_schemes
+        step_halo_exchange -> pkg_halo_exchange
+    }
+
+    rectangle "Solver Advancement" as block_iter {
+
+        rectangle time_loop [
+            ""time_loop""
+            Runs the all solver iterations:
+            * ""reset!(grid)"": reset all states
+              this allows to reuse the same ""BlockGrid""
+              across multiple solver executions
+            * run the solver cycles
+            * print the final state (if verbose)
+        ]
+
+        rectangle "Solver Cycle" as block_iter_cycle {
+            hexagon "Use async cycle?" as cond_async_cycle
+    
+            rectangle solver_cycle [
+                ""solver_cycle""
+                Applies all cycle steps
+                on the grid, step by step.
+                Kernels are multi-threaded.
+            ]
+
+            rectangle solver_async_cycle [
+                ""solver_async_cycle""
+                Applies all cycle steps
+                on all blocks, block by block.
+                Blocks are evenly dispatched
+                to each thread.
+            ]
+
+            rectangle "Thread loop" as solver_async_cycle_thread {
+                usecase thread_cycle_loop_start [
+                    Apply once on each of
+                    the thread's block.
+                    Same order everytime.
+                    **Implicit busy wait**
+                ]
+
+                rectangle block_state_machine [
+                    ""block_state_machine""
+                    Advances the state of a
+                    block by applying solver steps.
+                    Stop when we must wait.
+                    Kernels are single-threaded.
+                ]
+
+                hexagon cond_thread_cycle_end [
+                    All of the thread's
+                    blocks have finished?
+                ]
+
+                thread_cycle_loop_start --> block_state_machine
+                block_state_machine --> cond_thread_cycle_end
+                cond_thread_cycle_end --> thread_cycle_loop_start : no
+            }
+
+            rectangle solver_cycle_end [
+                End of cycle
+                * ""next_cycle!""
+                * Display progress (if verbose)
+                * Write to file for animations (if wanted)
+                * Last cycle must ""wait"" for GPU kernels
+            ]
+
+            cloud next_cycle << mpi >> [
+                ""next_cycle!""
+                Increment time and cycle count
+                Wait for MPI reduction to be done
+                Update ""dt"" for next cycle
+            ]
+
+            cond_async_cycle --> solver_cycle : no
+            cond_async_cycle --> solver_async_cycle : yes
+            solver_async_cycle --> thread_cycle_loop_start
+
+            solver_cycle --> solver_cycle_end
+            cond_thread_cycle_end --> solver_cycle_end : yes
+            solver_cycle_end -> next_cycle
+        }
+
+        time_loop --> cond_async_cycle
+    }
+
+    package "Solver State" {
+        frame """SolverState""" as solver_state {
+            rectangle """step""" as solver_state_step
+            rectangle """global_dt""" as solver_state_global_dt
+
+            card solver_state_solver_params [
+                ""splitting"": axis splitting method
+                ""riemann_scheme""
+                ""riemann_limiter""
+                ""projection_scheme""
+                ""test_case""
+                ""steps_ranges"": index ranges to apply each solver step on
+            ]
+        }
+
+        card solver_step [
+            ""SolverStep""
+            ====
+            ""NewCycle""
+            ----
+            ""TimeStep""
+            ----
+            ""InitTimeStep""
+            ----
+            ""NewSweep""
+            ----
+            ""EOS""
+            ----
+            ""Exchange""
+            ----
+            ""Fluxes""
+            ----
+            ""CellUpdate""
+            ----
+            ""Remap""
+            ----
+            ""EndCycle""
+            ----
+            ""ErrorState""
+        ]
+
+        solver_state_step --> solver_step
+    }
+
+    step_time_step -> pkg_global_time_step
+
+    solver_state_solver_params --> solver_steps
+}
+
+rectangle armon [
+    ""armon""
+    Main entry point of the solver.
+    Given a ""ArmonParameters"" struct:
+    * Creates a new ""BlockGrid""
+    * Apply ""init_test""
+    * run ""time_loop""
+    * Builds a ""SolverStats"" from the results
+]
+
+armon --> solver_init_test
+armon --> time_loop
+
+@enduml
