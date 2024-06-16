@@ -3,24 +3,20 @@
 
 ## Solver structure
 
-```@raw html
-<embed src="./assets/structure.svg" />
+```@puml uml/structure.puml
 ```
 
 ## Halo exchange
 
-```@raw html
-<embed src="./assets/halo_exchange.svg" />
+```@puml uml/halo_exchange.puml
 ```
 
 ## Global time step
 
-```@raw html
-<embed src="./assets/global_time_step.svg" />
+```@puml uml/global_time_step.puml
 ```
 
 ## Block Grid
 
-```@raw html
-<embed src="./assets/block_grid.svg" />
+```@puml uml/block_grid.puml
 ```

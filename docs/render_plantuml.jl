@@ -1,6 +1,10 @@
+module DocumenterPlantUML
 
 using CodecZlib
 using HTTP
+using Documenter
+
+export PlantUML
 
 
 # plantUML uses a custom version of base64, for historical reasons
@@ -43,13 +47,6 @@ function encode_to_plant_uml_base64(io::IO)
 end
 
 
-function encode_to_plant_uml_base64(filename::String)
-    open(filename, "r") do file
-        return encode_to_plant_uml_base64(file) 
-    end
-end
-
-
 function send_to_render_server(encoded_file::String, svg_filepath)
     if length(encoded_file) > 4000
         # Avoid unhelpful HTTP request errors when the file is too large
@@ -62,17 +59,82 @@ function send_to_render_server(encoded_file::String, svg_filepath)
             write(svg_file, http)
         end
     end
-    return
+
+    return svg_filepath
 end
 
 
-function render_plantuml_files(files::Vector{String})
-    @info "Rendering PlantUML files to SVG"
-    svg_files = map(files) do file
-        file_path = joinpath(@__DIR__, file)
-        encoded_file = encode_to_plant_uml_base64(file_path)
-        svg_file = first(splitext(file_path)) * ".svg"
-        send_to_render_server(encoded_file, svg_file)
+function render_puml(puml_source::IO, svg_path)
+    encoded_file = encode_to_plant_uml_base64(puml_source)
+    send_to_render_server(encoded_file, svg_path)
+end
+
+render_puml(puml_source::AbstractString, svg_path) = render_puml(IOBuffer(puml_source), svg_path)
+
+
+struct PlantUML <: Documenter.Plugin
+    # source '.puml' path to (modified PUML source, '.svg' result path)
+    diagrams::Dict{String, Tuple{String, String}}
+
+    PlantUML() = new(Dict())
+end
+
+
+abstract type PlantUMLBlocks <: Documenter.Expanders.NestedExpanderPipeline end
+
+Documenter.Selectors.order(::Type{PlantUMLBlocks}) = 11.1  # After @raw blocks
+Documenter.Selectors.matcher(::Type{PlantUMLBlocks}, node, page, doc) = Documenter.iscode(node, r"^@puml")
+
+function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
+    @assert node.element isa Documenter.MarkdownAST.CodeBlock
+    x = node.element
+
+    m = match(r"@puml( .+)?$", x.info)
+    m === nothing && error("invalid '@puml [PlantUML file path]' syntax: $(x.info)")
+
+    plant_uml = Documenter.getplugin(doc, PlantUML)
+
+    if !isnothing(m[1])
+        file_path = joinpath(doc.user.source, strip(m[1]))
+        !isfile(file_path) && @error "file '$file_path' does not exist"
+        puml_source = read(file_path, String)
+    else
+        # idea: inline PlantUML script in a documenter file
+        # simply put the `x.code` in a tmp file and render it
+        @error "missing PlantUML source file path"
     end
-    return svg_files
+
+    svg_file = splitext(splitdir(file_path)[end])[1] * ".svg"
+    svg_path = joinpath(doc.user.build, "assets", svg_file)
+    rel_svg_path = relpath(svg_path, doc.user.build)
+    plant_uml.diagrams[file_path] = (svg_path, puml_source)
+
+    # Placing our SVG result in a `embed` tag allow selectable text and clickable links
+    # without extra effort
+    code = """
+    <embed src="$rel_svg_path" />
+    """
+
+    node.element = Documenter.RawNode(:html, code)
+end
+
+
+abstract type PlantUMLRender <: Documenter.Builder.DocumentPipeline end
+
+Documenter.Selectors.order(::Type{PlantUMLRender}) = 6.1  # After rendering the document
+
+function Documenter.Selectors.runner(::Type{PlantUMLRender}, doc::Documenter.Document)
+    Documenter.is_doctest_only(doc, "PlantUMLRender") && return
+    plant_uml = Documenter.getplugin(doc, PlantUML)
+    @info "PlantUML: Rendering $(length(plant_uml.diagrams)) diagrams"
+    for (puml_file, (target_svg, puml_source)) in plant_uml.diagrams
+        try
+            render_puml(puml_source, target_svg)
+        catch e
+            @warn "Failed to render PlantUML file: '$puml_file'"
+            rethrow(e)
+        end
+    end
+end
+
 end
