@@ -51,6 +51,11 @@ end
 
 
 function send_to_render_server(encoded_file::String, svg_filepath)
+    if length(encoded_file) > 4000
+        # Avoid unhelpful HTTP request errors when the file is too large
+        error("PUML file is too large, encoded length is: $(length(encoded_file)), limit is ~4000")
+    end
+
     # See https://plantuml.com/en/server
     HTTP.open(:GET, "https://plantuml.com/plantuml/svg/" * encoded_file) do http
         open(svg_filepath, "w") do svg_file
