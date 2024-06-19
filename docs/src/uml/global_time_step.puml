@@ -15,7 +15,7 @@
 </style>
 
 package "Global Time Step" {
-    frame """GlobalTimeStep""" as global_time_step {
+    frame """[["[`GlobalTimeStep`](@ref)" GlobalTimeStep]]""" as global_time_step {
         rectangle """state""" as global_time_step_state
         rectangle """next_cycle_dt""" as global_time_step_next_cycle_dt
         rectangle """next_dt""" as global_time_step_next_dt
@@ -24,15 +24,15 @@ package "Global Time Step" {
         card time_step_state [
             ""TimeStepState""
             ====
-            ""Ready""
+            ""[["[`TimeStepState.Ready`](@ref)" Ready]]""
             ----
-            ""AllContributed""
+            ""[["[`TimeStepState.AllContributed`](@ref)" AllContributed]]""
             ----
-            ""DoingMPI""
+            ""[["[`TimeStepState.DoingMPI`](@ref)" DoingMPI]]""
             ----
-            ""WaitingForMPI""
+            ""[["[`TimeStepState.WaitingForMPI`](@ref)" WaitingForMPI]]""
             ----
-            ""Done""
+            ""[["[`TimeStepState.Done`](@ref)" Done]]""
         ]
 
         global_time_step_state --> time_step_state
