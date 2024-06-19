@@ -58,9 +58,9 @@ package "Block Grid" as pkg_block_grid {
     ]
 
     rectangle block_grid_mem_required [
-        ""memory_required""
+        ""[["[`memory_required`](@ref)" memory_required]]""
         Estimates the total memory
-        required for a ""BlockGrid""
+        required for a ""[["[`BlockGrid`](@ref)" BlockGrid]]""
     ]
 
     rectangle """RemoteBlockRegions""" as block_grid_RemoteBlockRegions
@@ -74,14 +74,14 @@ package "Block Grid" as pkg_block_grid {
         usecase """host_data""" as local_task_block_host_data
 
         rectangle local_task_block_data [
-            ""BlockData""
+            ""[["[`BlockData`](@ref)" BlockData]]""
             Holds all arrays of a block
         ]
 
         rectangle local_task_block_state [
             ""state""
             Individual state of the block
-            A ""SolverState""
+            A ""[["[`SolverState`](@ref)" SolverState]]""
         ]
 
         rectangle local_task_block_neighbours [
@@ -91,7 +91,7 @@ package "Block Grid" as pkg_block_grid {
 
         rectangle local_task_block_exchanges [
             ""exchanges""
-            The ""BlockInterface""s
+            The ""[["[`BlockInterface`](@ref)" BlockInterface]]""s
             managing local halo exchanges
         ]
 
@@ -102,12 +102,12 @@ package "Block Grid" as pkg_block_grid {
     }
 
     rectangle block_grid_row_iterator [
-        ""BlockRowIterator""
+        ""[["[`BlockRowIterator`](@ref)" BlockRowIterator]]""
         Iterates a grid row by row
     ]
 
     rectangle block_grid_iter_blocks [
-        ""@iter_blocks""
+        ""[["[`@iter_blocks`](@ref)" @iter_blocks]]""
         Iterates a grid block by block.
         Is multithreaded.
         Respects the distribution of
