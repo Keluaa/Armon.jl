@@ -15,7 +15,7 @@
 </style>
 
 package "Block Grid" as pkg_block_grid {
-    frame """BlockGrid""" as block_grid {
+    frame """[["[`BlockGrid`](@ref)" BlockGrid]]""" as block_grid {
 
         node "Grid blocks" as grid_blocks {
             rectangle block_grid_blocks [
@@ -52,7 +52,7 @@ package "Block Grid" as pkg_block_grid {
     }
 
     rectangle block_grid_dimensions [
-        ""grid_dimensions""
+        ""[["[`grid_dimensions`](@ref)" grid_dimensions]]""
         Computes the dimensions of
         the grid
     ]
@@ -63,13 +63,13 @@ package "Block Grid" as pkg_block_grid {
         required for a ""[["[`BlockGrid`](@ref)" BlockGrid]]""
     ]
 
-    rectangle """RemoteBlockRegions""" as block_grid_RemoteBlockRegions
-    rectangle """EdgeBlockRegions""" as block_grid_EdgeBlockRegions
+    rectangle """[["[`RemoteBlockRegions`](@ref)" RemoteBlockRegions]]""" as block_grid_RemoteBlockRegions
+    rectangle """[["[`EdgeBlockRegions`](@ref)" EdgeBlockRegions]]""" as block_grid_EdgeBlockRegions
 
     block_grid_dimensions --> block_grid_dims
     block_grid_dimensions <- block_grid_mem_required
 
-    frame """LocalTaskBlock""" as local_task_block {
+    frame """[["[`LocalTaskBlock`](@ref)" LocalTaskBlock]]""" as local_task_block {
         usecase """device_data""" as local_task_block_device_data
         usecase """host_data""" as local_task_block_host_data
 
