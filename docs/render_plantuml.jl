@@ -3,6 +3,10 @@ module DocumenterPlantUML
 using CodecZlib
 using HTTP
 using Documenter
+using MarkdownAST
+
+import Documenter: HTMLWriter
+import MarkdownAST: Node
 
 export PlantUML
 
@@ -72,11 +76,79 @@ end
 render_puml(puml_source::AbstractString, svg_path) = render_puml(IOBuffer(puml_source), svg_path)
 
 
-struct PlantUML <: Documenter.Plugin
-    # source '.puml' path to (modified PUML source, '.svg' result path)
-    diagrams::Dict{String, Tuple{String, String}}
+"""
+    PlantUML(; no_render=false, silent=false)
 
-    PlantUML() = new(Dict())
+Documenter plugin to control how PlantUML diagrams are rendered.
+
+Options:
+ - `no_render`: skip rendering of diagrams
+ - `silent`: print no messages when rendering
+"""
+struct PlantUML <: Documenter.Plugin
+    no_render :: Bool
+    silent    :: Bool
+
+    PlantUML(; no_render=false, silent=false) = new(no_render, silent)
+end
+
+
+mutable struct PlantUMLDiagram
+    path        :: String  # source '.puml' path
+    svg_file    :: String  # '.svg' result path
+    src_md_file :: String  # '.md' file including the diagram
+    puml_source :: String  # PUML source
+end
+
+
+struct PlantUMLDiagramBlock <: MarkdownAST.AbstractBlock
+    diagram::PlantUMLDiagram
+end
+
+MarkdownAST.iscontainer(::PlantUMLDiagramBlock) = true
+
+
+function Documenter.MDFlatten.mdflatten(io, node::Node, e::PlantUMLDiagramBlock)
+    print(io, "(PlantUML diagram ", e.diagram.path, " :")
+    Documenter.MDFlatten.mdflatten(io, node.children)
+    print(io, ")")
+end
+
+
+function HTMLWriter.domify(dctx::HTMLWriter.DCtx, node::Node, element::PlantUMLDiagramBlock)
+    raw_html_diagram_embed = first(node.children)
+    link_list = last(node.children)  # This dummy list is only here to delegate the resolving of URLs
+
+    # Get the URLs from the links embedded in the diagram 
+    resolved_urls = map(link_list.children) do link_item
+        resolved_link_node = first(first(link_item.children).children)  # item node -> paragraph node -> child
+        resolved_link = resolved_link_node.element
+        return HTMLWriter.filehref(dctx, node, resolved_link)
+    end
+
+    diagram = element.diagram
+    final_puml_source = replace_all_links(diagram.puml_source, resolved_urls)
+    render_puml(dctx.ctx, diagram.path, diagram.svg_file, diagram.src_md_file, final_puml_source)
+
+    # Only domify the `@raw html <embed ... />` node
+    return HTMLWriter.domify(dctx, raw_html_diagram_embed, raw_html_diagram_embed.element)
+end
+
+
+function render_puml(ctx, puml_file, target_svg, src_md_page, puml_source)
+    page_dir = dirname(HTMLWriter.get_url(ctx, src_md_page))
+    page_dir = joinpath(ctx.doc.user.build, page_dir)
+    !isdir(page_dir) && mkpath(page_dir)  # We are here before `write_html` is called
+    svg_path = joinpath(page_dir, target_svg)
+
+    # TODO: support light and dark themes by changing the PlantUML theme and SVG background color:
+    #  - default theme for light
+    #  - lightgray for dark
+    #  - prefer transparent background if possible
+
+    plant_uml = Documenter.getplugin(ctx.doc, PlantUML)
+    !plant_uml.silent && @info "PlantUML: rendering '$puml_file'"
+    !plant_uml.no_render && render_puml(puml_source, svg_path)
 end
 
 
@@ -86,13 +158,11 @@ Documenter.Selectors.order(::Type{PlantUMLBlocks}) = 11.1  # After @raw blocks
 Documenter.Selectors.matcher(::Type{PlantUMLBlocks}, node, page, doc) = Documenter.iscode(node, r"^@puml")
 
 function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
-    @assert node.element isa Documenter.MarkdownAST.CodeBlock
+    @assert node.element isa MarkdownAST.CodeBlock
     x = node.element
 
     m = match(r"@puml( .+)?$", x.info)
     m === nothing && error("invalid '@puml [PlantUML file path]' syntax: $(x.info)")
-
-    plant_uml = Documenter.getplugin(doc, PlantUML)
 
     if !isnothing(m[1])
         file_path = joinpath(doc.user.source, strip(m[1]))
@@ -105,36 +175,63 @@ function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
     end
 
     svg_file = splitext(splitdir(file_path)[end])[1] * ".svg"
-    svg_path = joinpath(doc.user.build, "assets", svg_file)
-    rel_svg_path = relpath(svg_path, doc.user.build)
-    plant_uml.diagrams[file_path] = (svg_path, puml_source)
+    src_md_file = relpath(page.source, doc.user.source)
+
+    diagram = PlantUMLDiagram(file_path, svg_file, src_md_file, puml_source)
 
     # Placing our SVG result in a `embed` tag allow selectable text and clickable links
     # without extra effort
     code = """
-    <embed src="$rel_svg_path" />
+    <embed src="$svg_file" />
     """
 
-    node.element = Documenter.RawNode(:html, code)
+    # Since the links are embedded in PlantUML, Documenter cannot find and resolve them alone.
+    # To do this, we place the diagram in a temporary Markdown AST node, containing the
+    # real raw HTML code AND a Markdown list of all links in the PlantUML source. The links
+    # can then be resolved by Documenter automatically.
+    node.element = PlantUMLDiagramBlock(diagram)
+    push!(node.children, Node(Documenter.RawNode(:html, code)))
+    push!(node.children, extract_all_links(puml_source))
 end
 
 
-abstract type PlantUMLRender <: Documenter.Builder.DocumentPipeline end
+# To avoid any ambiguities, we only match links enclosed in quotes. This way the user
+# can place links with any syntax (including Documenter's) while staying compatible with
+# PlantUML's syntax and live renderers of diagrams
+# Should match any link of the form `[["[julia](@ref link)"blabla]]`
+# First capture group is `julia`, second is `@ref link`, third is the rest of the PlantUML
+# link syntax, which shouldn't be touched.
+const PLANT_UML_DOCUMENTER_LINK_REGEX = r"""\[\["\[([^"]+)\]\(([^"]+)\)"(.*)\]\]"""
 
-Documenter.Selectors.order(::Type{PlantUMLRender}) = 6.1  # After rendering the document
+function extract_all_links(puml_source)
+    link_list = Node(MarkdownAST.List(:bullet, true))
 
-function Documenter.Selectors.runner(::Type{PlantUMLRender}, doc::Documenter.Document)
-    Documenter.is_doctest_only(doc, "PlantUMLRender") && return
-    plant_uml = Documenter.getplugin(doc, PlantUML)
-    @info "PlantUML: Rendering $(length(plant_uml.diagrams)) diagrams"
-    for (puml_file, (target_svg, puml_source)) in plant_uml.diagrams
-        try
-            render_puml(puml_source, target_svg)
-        catch e
-            @warn "Failed to render PlantUML file: '$puml_file'"
-            rethrow(e)
+    for link_match in eachmatch(PLANT_UML_DOCUMENTER_LINK_REGEX, puml_source)
+        # Build a ` - [link](@ref)` node
+        item_node = MarkdownAST.@ast MarkdownAST.Item() do
+            MarkdownAST.Paragraph() do
+                MarkdownAST.Link(link_match[2], "") do
+                    MarkdownAST.Text(link_match[1])
+                end
+            end
         end
+        push!(link_list.children, item_node)
     end
+
+    return link_list
+end
+
+
+function replace_all_links(puml_source, resolved_urls)
+    i = 1
+    function substitute_link(matched_link)
+        resolved_url = resolved_urls[i]
+        i += 1
+        return replace(matched_link,
+            PLANT_UML_DOCUMENTER_LINK_REGEX => SubstitutionString("""[["$resolved_url"\\3]]""")
+        )
+    end
+    return replace(puml_source, PLANT_UML_DOCUMENTER_LINK_REGEX => substitute_link)
 end
 
 end
