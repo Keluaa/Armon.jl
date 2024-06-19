@@ -38,10 +38,10 @@ package "Global Time Step" {
         global_time_step_state --> time_step_state
     }
 
-    usecase """GlobalTimeStep"" instance" as global_time_step_instance
+    usecase """[["[`GlobalTimeStep`](@ref)" GlobalTimeStep]]"" instance" as global_time_step_instance
 
     package "Time step reduction" as pkg_blk_time_step {
-        rectangle """next_time_step""" as time_step_next_time_step
+        rectangle """[["[`next_time_step`](@ref)" next_time_step]]""" as time_step_next_time_step
         hexagon cond_time_step_wait [
             MPI reduce in progress?
             This means that the previous
