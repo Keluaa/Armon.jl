@@ -71,7 +71,7 @@ package "Halo Exchange" as pkg_halo_exchange {
         cond_xchg_end --> unpack_from_array : yes
     }
 
-    hexagon "If ""RemoteTaskBlock""" as cond_remote
+    hexagon "If ""[["[`RemoteTaskBlock`](@ref)" RemoteTaskBlock]]""" as cond_remote
     hexagon "If ""rank != -1""" as cond_global_bc
     rectangle """boundary_conditions!""" as global_bc
 
