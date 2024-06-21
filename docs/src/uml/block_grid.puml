@@ -15,7 +15,7 @@
 </style>
 
 package "Block Grid" as pkg_block_grid {
-    frame """[["[`BlockGrid`](@ref)" BlockGrid]]""" as block_grid {
+    frame """[[`BlockGrid`]]""" as block_grid {
 
         node "Grid blocks" as grid_blocks {
             rectangle block_grid_blocks [
@@ -52,36 +52,36 @@ package "Block Grid" as pkg_block_grid {
     }
 
     rectangle block_grid_dimensions [
-        ""[["[`grid_dimensions`](@ref)" grid_dimensions]]""
+        ""[[`grid_dimensions`]]""
         Computes the dimensions of
         the grid
     ]
 
     rectangle block_grid_mem_required [
-        ""[["[`memory_required`](@ref)" memory_required]]""
+        ""[[`memory_required`]]""
         Estimates the total memory
-        required for a ""[["[`BlockGrid`](@ref)" BlockGrid]]""
+        required for a ""[[`BlockGrid`]]""
     ]
 
-    rectangle """[["[`RemoteBlockRegions`](@ref)" RemoteBlockRegions]]""" as block_grid_RemoteBlockRegions
-    rectangle """[["[`EdgeBlockRegions`](@ref)" EdgeBlockRegions]]""" as block_grid_EdgeBlockRegions
+    rectangle """[[`RemoteBlockRegions`]]""" as block_grid_RemoteBlockRegions
+    rectangle """[[`EdgeBlockRegions`]]""" as block_grid_EdgeBlockRegions
 
     block_grid_dimensions --> block_grid_dims
     block_grid_dimensions <- block_grid_mem_required
 
-    frame """[["[`LocalTaskBlock`](@ref)" LocalTaskBlock]]""" as local_task_block {
+    frame """[[`LocalTaskBlock`]]""" as local_task_block {
         usecase """device_data""" as local_task_block_device_data
         usecase """host_data""" as local_task_block_host_data
 
         rectangle local_task_block_data [
-            ""[["[`BlockData`](@ref)" BlockData]]""
+            ""[[`BlockData`]]""
             Holds all arrays of a block
         ]
 
         rectangle local_task_block_state [
             ""state""
             Individual state of the block
-            A ""[["[`SolverState`](@ref)" SolverState]]""
+            A ""[[`SolverState`]]""
         ]
 
         rectangle local_task_block_neighbours [
@@ -91,7 +91,7 @@ package "Block Grid" as pkg_block_grid {
 
         rectangle local_task_block_exchanges [
             ""exchanges""
-            The ""[["[`BlockInterface`](@ref)" BlockInterface]]""s
+            The ""[[`BlockInterface`]]s""
             managing local halo exchanges
         ]
 
@@ -102,12 +102,12 @@ package "Block Grid" as pkg_block_grid {
     }
 
     rectangle block_grid_row_iterator [
-        ""[["[`BlockRowIterator`](@ref)" BlockRowIterator]]""
+        ""[[`BlockRowIterator`]]""
         Iterates a grid row by row
     ]
 
     rectangle block_grid_iter_blocks [
-        ""[["[`@iter_blocks`](@ref)" @iter_blocks]]""
+        ""[[`@iter_blocks`]]""
         Iterates a grid block by block.
         Is multithreaded.
         Respects the distribution of

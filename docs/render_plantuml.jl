@@ -77,19 +77,21 @@ render_puml(puml_source::AbstractString, svg_path) = render_puml(IOBuffer(puml_s
 
 
 """
-    PlantUML(; no_render=false, silent=false)
+    PlantUML(; no_render=false, silent=false, no_links=false, short_links=true)
 
 Documenter plugin to control how PlantUML diagrams are rendered.
 
 Options:
  - `no_render`: skip rendering of diagrams
  - `silent`: print no messages when rendering
+ - `no_links`: don't replace links in the PlantUML source
+ - `short_links`: allow replacing links of the form `[[\`SomeJuliaObj\`]]`
 """
-struct PlantUML <: Documenter.Plugin
-    no_render :: Bool
-    silent    :: Bool
-
-    PlantUML(; no_render=false, silent=false) = new(no_render, silent)
+Base.@kwdef struct PlantUML <: Documenter.Plugin
+    no_render   :: Bool = false
+    silent      :: Bool = false
+    no_links    :: Bool = false
+    short_links :: Bool = true
 end
 
 
@@ -119,15 +121,20 @@ function HTMLWriter.domify(dctx::HTMLWriter.DCtx, node::Node, element::PlantUMLD
     raw_html_diagram_embed = first(node.children)
     link_list = last(node.children)  # This dummy list is only here to delegate the resolving of URLs
 
-    # Get the URLs from the links embedded in the diagram 
-    resolved_urls = map(link_list.children) do link_item
-        resolved_link_node = first(first(link_item.children).children)  # item node -> paragraph node -> child
-        resolved_link = resolved_link_node.element
-        return HTMLWriter.filehref(dctx, node, resolved_link)
+    puml = Documenter.getplugin(dctx.ctx.doc, PlantUML)
+    diagram = element.diagram
+    if !puml.no_links
+        # Get the URLs from the links embedded in the diagram 
+        resolved_urls = map(link_list.children) do link_item
+            resolved_link_node = first(first(link_item.children).children)  # item node -> paragraph node -> child
+            resolved_link = resolved_link_node.element
+            return HTMLWriter.filehref(dctx, node, resolved_link)
+        end
+        final_puml_source = replace_all_links(diagram.puml_source, resolved_urls, puml)
+    else
+        final_puml_source = diagram.puml_source
     end
 
-    diagram = element.diagram
-    final_puml_source = replace_all_links(diagram.puml_source, resolved_urls)
     render_puml(dctx.ctx, diagram.path, diagram.svg_file, diagram.src_md_file, final_puml_source)
 
     # Only domify the `@raw html <embed ... />` node
@@ -161,6 +168,8 @@ function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
     @assert node.element isa MarkdownAST.CodeBlock
     x = node.element
 
+    puml_plugin = Documenter.getplugin(doc, PlantUML)
+
     m = match(r"@puml( .+)?$", x.info)
     m === nothing && error("invalid '@puml [PlantUML file path]' syntax: $(x.info)")
 
@@ -191,7 +200,7 @@ function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
     # can then be resolved by Documenter automatically.
     node.element = PlantUMLDiagramBlock(diagram)
     push!(node.children, Node(Documenter.RawNode(:html, code)))
-    push!(node.children, extract_all_links(puml_source))
+    !puml_plugin.no_links && push!(node.children, extract_all_links(puml_source, puml_plugin))
 end
 
 
@@ -201,17 +210,37 @@ end
 # Should match any link of the form `[["[julia](@ref link)"blabla]]`
 # First capture group is `julia`, second is `@ref link`, third is the rest of the PlantUML
 # link syntax, which shouldn't be touched.
-const PLANT_UML_DOCUMENTER_LINK_REGEX = r"""\[\["\[([^"]+)\]\(([^"]+)\)"(.*)\]\]"""
+# The fourth capture group is only used for other regex.
+const PLANT_UML_DOCUMENTER_LINK_REGEX = r"""\[\["\[([^"]+)\]\(([^"]+)\)"([^\]]*)()\]\]"""
+# Same as above but also matches `[[`julia`]]`, as shorthand for `[["[`julia`](@ref)" julia]]`
+const PLANT_UML_SHORT_DOCUMENTER_LINK_REGEX = r"""\[\[(?>"\[([^"]+)\]\(([^"]+)\)"|`([^`]+)`)([^\]]*)\]\]"""
 
-function extract_all_links(puml_source)
+function link_regex(p::PlantUML)
+    if p.short_links
+        return PLANT_UML_SHORT_DOCUMENTER_LINK_REGEX
+    else
+        return PLANT_UML_DOCUMENTER_LINK_REGEX
+    end
+end
+
+
+function extract_all_links(puml_source, puml::PlantUML)
     link_list = Node(MarkdownAST.List(:bullet, true))
 
-    for link_match in eachmatch(PLANT_UML_DOCUMENTER_LINK_REGEX, puml_source)
+    for link_match in eachmatch(link_regex(puml), puml_source)
+        if puml.short_links && !isnothing(link_match[3])
+            obj = link_match[3]
+            ref = "@ref"
+        else
+            obj = link_match[1]
+            ref = link_match[2]
+        end
+
         # Build a ` - [link](@ref)` node
         item_node = MarkdownAST.@ast MarkdownAST.Item() do
             MarkdownAST.Paragraph() do
-                MarkdownAST.Link(link_match[2], "") do
-                    MarkdownAST.Text(link_match[1])
+                MarkdownAST.Link(ref, "") do
+                    MarkdownAST.Text(obj)
                 end
             end
         end
@@ -222,16 +251,29 @@ function extract_all_links(puml_source)
 end
 
 
-function replace_all_links(puml_source, resolved_urls)
+function replace_all_links(puml_source, resolved_urls, puml::PlantUML)
     i = 1
     function substitute_link(matched_link)
         resolved_url = resolved_urls[i]
         i += 1
-        return replace(matched_link,
-            PLANT_UML_DOCUMENTER_LINK_REGEX => SubstitutionString("""[["$resolved_url"\\3]]""")
-        )
+        m = match(link_regex(puml), matched_link)
+        if puml.short_links
+            if !isnothing(m[3]) && isempty(m[4])
+                # [[`Obj`]] => [["link" Obj]]
+                return """[["$resolved_url" $(m[3])]]"""  # the space is needed (see PlantUML link syntax)
+            else
+                # [[`Obj` blabla]] => [["link" blabla]]
+                # OR
+                # [["[Obj](@ref)" blabla]] => [["link" blabla]]
+                return """[["$resolved_url"$(m[4])]]"""
+            end
+        else
+            # [["[Obj](@ref)" blabla]] => [["link" blabla]]
+            return """[["$resolved_url"$(m[3])]]"""
+        end
     end
-    return replace(puml_source, PLANT_UML_DOCUMENTER_LINK_REGEX => substitute_link)
+
+    return replace(puml_source, link_regex(puml) => substitute_link)
 end
 
 end

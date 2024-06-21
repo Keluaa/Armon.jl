@@ -16,7 +16,7 @@
 
 package "Halo Exchange" as pkg_halo_exchange {
 
-    rectangle """[["[`block_ghost_exchange`](@ref)" block_ghost_exchange(params, state, blk)]]""" as block_ghost_exchange
+    rectangle """[[`block_ghost_exchange` block_ghost_exchange(params, state, blk)]]""" as block_ghost_exchange
     usecase xchg_side_loop [
         For each side of the sweep
         Looking at the neighbouring ""other_blk""
@@ -54,24 +54,24 @@ package "Halo Exchange" as pkg_halo_exchange {
 
         rectangle """pack_to_array!""" as pack_to_array
         rectangle """unpack_from_array!""" as unpack_from_array
-        cloud """[["[`start_exchange`](@ref)" start_exchange]]""" << mpi >> as start_exchange
-        cloud """[["[`finish_exchange`](@ref)" finish_exchange]]""" << mpi >> as finish_exchange
+        cloud """[[`start_exchange`]]""" << mpi >> as start_exchange
+        cloud """[[`finish_exchange`]]""" << mpi >> as finish_exchange
 
         hexagon "Is exchange finished?" as cond_xchg_end
         process "wait until xchg end" << pause >> as xchg_pause
 
-        cond_xchg_start --> start_exchange : no
+        cond_xchg_start --> pack_to_array : no
         cond_xchg_start --> finish_exchange : yes
 
-        start_exchange --> pack_to_array
-        pack_to_array --> finish_exchange
+        pack_to_array --> start_exchange
+        start_exchange --> finish_exchange
         finish_exchange --> cond_xchg_end
 
         cond_xchg_end --> xchg_pause : no
         cond_xchg_end --> unpack_from_array : yes
     }
 
-    hexagon "If ""[["[`RemoteTaskBlock`](@ref)" RemoteTaskBlock]]""" as cond_remote
+    hexagon "If ""[[`RemoteTaskBlock`]]""" as cond_remote
     hexagon "If ""rank != -1""" as cond_global_bc
     rectangle """boundary_conditions!""" as global_bc
 

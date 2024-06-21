@@ -154,7 +154,7 @@ package "CFD Solver" as pkg_solver {
             ""time_loop""
             Runs the all solver iterations:
             * ""reset!(grid)"": reset all states
-              this allows to reuse the same ""[["[`BlockGrid`](@ref)" BlockGrid]]""
+              this allows to reuse the same ""[[`BlockGrid`]]""
               across multiple solver executions
             * run the solver cycles
             * print the final state (if verbose)
@@ -187,7 +187,7 @@ package "CFD Solver" as pkg_solver {
                 ]
 
                 rectangle block_state_machine [
-                    ""[["[`block_state_machine`](@ref)" block_state_machine]]""
+                    ""[[`block_state_machine`]]""
                     Advances the state of a
                     block by applying solver steps.
                     Stop when we must wait.
@@ -232,7 +232,7 @@ package "CFD Solver" as pkg_solver {
     }
 
     package "Solver State" {
-        frame """[["[`SolverState`](@ref)" SolverState]]""" as solver_state {
+        frame """[[`SolverState`]]""" as solver_state {
             rectangle """step""" as solver_state_step
             rectangle """global_dt""" as solver_state_global_dt
 
@@ -247,7 +247,7 @@ package "CFD Solver" as pkg_solver {
         }
 
         card solver_step [
-            ""[["[`SolverStep`](@ref)" SolverStep]]""
+            ""[[`SolverStep`]]""
             ====
             ""NewCycle""
             ----
@@ -281,13 +281,13 @@ package "CFD Solver" as pkg_solver {
 }
 
 rectangle armon [
-    ""[["[`armon`](@ref)" armon]]""
+    ""[[`armon`]]""
     Main entry point of the solver.
-    Given a ""[["[`ArmonParameters`](@ref)" ArmonParameters]]"" struct:
-    * Creates a new ""[["[`BlockGrid`](@ref)" BlockGrid]]""
+    Given a ""[[`ArmonParameters`]]"" struct:
+    * Creates a new ""[[`BlockGrid`]]""
     * Apply ""init_test""
     * run ""time_loop""
-    * Builds a ""[["[`SolverStats`](@ref)" SolverStats]]"" from the results
+    * Builds a ""[[`SolverStats`]]"" from the results
 ]
 
 armon --> solver_init_test
