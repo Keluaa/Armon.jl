@@ -51,14 +51,15 @@ function encode_to_plant_uml_base64(io::IO)
 end
 
 
-function send_to_render_server(encoded_file::String, svg_filepath)
+function send_to_render_server(encoded_file::String, svg_filepath, dark_mode=false)
     if length(encoded_file) > 4000
         # Avoid unhelpful HTTP request errors when the file is too large
         error("PUML file is too large, encoded length is: $(length(encoded_file)), limit is ~4000")
     end
 
     # See https://plantuml.com/en/server
-    HTTP.open(:GET, "https://plantuml.com/plantuml/svg/" * encoded_file) do http
+    d = dark_mode ? "d" : ""
+    HTTP.open(:GET, "https://plantuml.com/plantuml/$(d)svg/" * encoded_file) do http
         open(svg_filepath, "w") do svg_file
             write(svg_file, http)
         end
@@ -68,16 +69,17 @@ function send_to_render_server(encoded_file::String, svg_filepath)
 end
 
 
-function render_puml(puml_source::IO, svg_path)
+function render_puml(puml_source::IO, svg_path, dark_mode=false)
     encoded_file = encode_to_plant_uml_base64(puml_source)
-    send_to_render_server(encoded_file, svg_path)
+    send_to_render_server(encoded_file, svg_path, dark_mode)
 end
 
-render_puml(puml_source::AbstractString, svg_path) = render_puml(IOBuffer(puml_source), svg_path)
+render_puml(puml_source::AbstractString, svg_path, dark_mode=false) =
+    render_puml(IOBuffer(puml_source), svg_path, dark_mode)
 
 
 """
-    PlantUML(; no_render=false, silent=false, no_links=false, short_links=true)
+    PlantUML(; no_render=false, silent=false, no_links=false, short_links=true, dark_mode=true)
 
 Documenter plugin to control how PlantUML diagrams are rendered.
 
@@ -86,12 +88,14 @@ Options:
  - `silent`: print no messages when rendering
  - `no_links`: don't replace links in the PlantUML source
  - `short_links`: allow replacing links of the form `[[\`SomeJuliaObj\`]]`
+ - `dark_mode`: render diagrams with a dark background
 """
 Base.@kwdef struct PlantUML <: Documenter.Plugin
     no_render   :: Bool = false
     silent      :: Bool = false
     no_links    :: Bool = false
     short_links :: Bool = true
+    dark_mode   :: Bool = true
 end
 
 
@@ -135,27 +139,22 @@ function HTMLWriter.domify(dctx::HTMLWriter.DCtx, node::Node, element::PlantUMLD
         final_puml_source = diagram.puml_source
     end
 
-    render_puml(dctx.ctx, diagram.path, diagram.svg_file, diagram.src_md_file, final_puml_source)
+    render_puml(dctx.ctx, diagram.path, diagram.svg_file, diagram.src_md_file, final_puml_source, puml.dark_mode)
 
     # Only domify the `@raw html <embed ... />` node
     return HTMLWriter.domify(dctx, raw_html_diagram_embed, raw_html_diagram_embed.element)
 end
 
 
-function render_puml(ctx, puml_file, target_svg, src_md_page, puml_source)
+function render_puml(ctx, puml_file, target_svg, src_md_page, puml_source, dark_mode)
     page_dir = dirname(HTMLWriter.get_url(ctx, src_md_page))
     page_dir = joinpath(ctx.doc.user.build, page_dir)
     !isdir(page_dir) && mkpath(page_dir)  # We are here before `write_html` is called
     svg_path = joinpath(page_dir, target_svg)
 
-    # TODO: support light and dark themes by changing the PlantUML theme and SVG background color:
-    #  - default theme for light
-    #  - lightgray for dark
-    #  - prefer transparent background if possible
-
     plant_uml = Documenter.getplugin(ctx.doc, PlantUML)
     !plant_uml.silent && @info "PlantUML: rendering '$puml_file'"
-    !plant_uml.no_render && render_puml(puml_source, svg_path)
+    !plant_uml.no_render && render_puml(puml_source, svg_path, dark_mode)
 end
 
 
