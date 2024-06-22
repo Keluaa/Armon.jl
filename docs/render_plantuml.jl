@@ -104,6 +104,8 @@ mutable struct PlantUMLDiagram
     svg_file    :: String  # '.svg' result path
     src_md_file :: String  # '.md' file including the diagram
     puml_source :: String  # PUML source
+    height      :: String  # HTML height attribute. Special value of "exact" will match the SVG height.
+    width       :: String  # HTML width attribute. Special value of "exact" will match the SVG width.
 end
 
 
@@ -139,10 +141,45 @@ function HTMLWriter.domify(dctx::HTMLWriter.DCtx, node::Node, element::PlantUMLD
         final_puml_source = diagram.puml_source
     end
 
-    render_puml(dctx.ctx, diagram.path, diagram.svg_file, diagram.src_md_file, final_puml_source, puml.dark_mode)
+    svg_path = render_puml(dctx.ctx, diagram.path, diagram.svg_file, diagram.src_md_file, final_puml_source, puml.dark_mode)
 
-    # Only domify the `@raw html <embed ... />` node
+    if diagram.height == diagram.width == "exact"
+        scrollbar_size = "0px"  # both use the exact dimension, no scrollbar is needed
+    else
+        scrollbar_size = "17px"
+    end
+
+    height_attr = diagram.height == "exact" ? find_svg_attribute(svg_path, "height") : diagram.height
+    width_attr  = diagram.width  == "exact" ? find_svg_attribute(svg_path, "width")  : diagram.width
+
+    # Placing our SVG result in an `iframe` allow selectable text and clickable links
+    # without extra effort. `embed` would also work but also prevent scrollbars.
+    # The `iframe` is why we must parse the SVG source in order to find its dimensions
+    # when using "exact" size, as it is not possible for attributes to use the size of the
+    # embedded content. Parsing the SVG seems like the easiest way to solve this.
+    iframe_html = """
+    <iframe src="$(diagram.svg_file)"
+        overflow-x="auto" overflow-y="auto"
+        style="width: calc($width_attr + $scrollbar_size); height: calc($height_attr + $scrollbar_size);"
+        type="text/svg">
+    </iframe>
+    """
+
+    raw_html_diagram_embed.element = Documenter.RawNode(:html, iframe_html)
+
+    # Only domify the `@raw html <iframe ... />` node
     return HTMLWriter.domify(dctx, raw_html_diagram_embed, raw_html_diagram_embed.element)
+end
+
+
+function find_svg_attribute(svg_path, attribute)
+    attr_re = Regex("\\Q$attribute\\E=\"([^\"]+)\"")
+    svg_source = read(svg_path, String)
+    m = match(attr_re, svg_source)
+    if isnothing(m)
+        error("could not find '$attribute' attribute in svg source at $svg_path")
+    end
+    return m[1]
 end
 
 
@@ -155,6 +192,8 @@ function render_puml(ctx, puml_file, target_svg, src_md_page, puml_source, dark_
     plant_uml = Documenter.getplugin(ctx.doc, PlantUML)
     !plant_uml.silent && @info "PlantUML: rendering '$puml_file'"
     !plant_uml.no_render && render_puml(puml_source, svg_path, dark_mode)
+
+    return svg_path
 end
 
 
@@ -169,8 +208,8 @@ function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
 
     puml_plugin = Documenter.getplugin(doc, PlantUML)
 
-    m = match(r"@puml( .+)?$", x.info)
-    m === nothing && error("invalid '@puml [PlantUML file path]' syntax: $(x.info)")
+    m = match(r"""@puml ("[^"]+"|\S+)((?> +[\w=]+)*)$""", x.info)
+    m === nothing && error("invalid '@puml <PlantUML file path> [option=value]' syntax: $(x.info)")
 
     if !isnothing(m[1])
         file_path = joinpath(doc.user.source, strip(m[1]))
@@ -182,23 +221,31 @@ function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
         @error "missing PlantUML source file path"
     end
 
+    # The default dimensions of "100%"x"exact" will display the SVG in its whole height
+    # with no scrollbar, while keeping the width of the rest of the documentation.
+    height = "exact"
+    width = "100%"
+    options = split(m[2]; keepempty=false)
+    for raw_option in options
+        option, value = split(raw_option, "="; limit=2)
+        if     option == "height"  height = value
+        elseif option == "width"   width  = value
+        else
+            error("unknown `@puml` option: $raw_option")
+        end
+    end
+
     svg_file = splitext(splitdir(file_path)[end])[1] * ".svg"
     src_md_file = relpath(page.source, doc.user.source)
 
-    diagram = PlantUMLDiagram(file_path, svg_file, src_md_file, puml_source)
-
-    # Placing our SVG result in a `embed` tag allow selectable text and clickable links
-    # without extra effort
-    code = """
-    <embed src="$svg_file" />
-    """
+    diagram = PlantUMLDiagram(file_path, svg_file, src_md_file, puml_source, height, width)
 
     # Since the links are embedded in PlantUML, Documenter cannot find and resolve them alone.
     # To do this, we place the diagram in a temporary Markdown AST node, containing the
     # real raw HTML code AND a Markdown list of all links in the PlantUML source. The links
     # can then be resolved by Documenter automatically.
     node.element = PlantUMLDiagramBlock(diagram)
-    push!(node.children, Node(Documenter.RawNode(:html, code)))
+    push!(node.children, Node(Documenter.RawNode(:html, "")))  # code is set later
     !puml_plugin.no_links && push!(node.children, extract_all_links(puml_source, puml_plugin))
 end
 
