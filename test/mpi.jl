@@ -463,6 +463,12 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
                 end
             end
 
+            @testset "Async cycle" begin
+                @MPI_test comm begin
+                    test_reference("CPU", comm, :Sod_circ, Float64, P; async_cycle=true)
+                end skip=!enough_processes || !proc_in_grid
+            end
+
             @testset "No Blocking" begin
                 @MPI_test comm begin
                     test_reference("CPU", comm, :Sod_circ, Float64, P; use_cache_blocking=false)

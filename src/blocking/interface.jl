@@ -89,7 +89,7 @@ end
 
 Mark `blk` in the interface along its `side` as ready for an exchange.
 
-Return `true` if the `blk` should do the exchange, and the new [`BlockExchangeState`] of the interface.
+Return `true` if the `blk` should do the exchange, and the new [`BlockExchangeState`](@ref) of the interface.
 """
 function mark_ready_for_exchange!(blk::LocalTaskBlock, side::Side.T)
     bint = blk.exchanges[Int(side)]

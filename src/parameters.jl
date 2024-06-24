@@ -846,7 +846,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     print_parameter(io, pad, "verbosity", p.silent)
     print_parameter(io, pad, "check result", p.check_result)
 
-    if p.write_output
+    if p.write_output || p.compare
         print_parameter(io, pad, "write output", p.write_output, nl=false)
         print(io, " (precision: $(p.output_precision) digits)")
         println(io, p.write_ghosts ? "with ghosts" : "")
@@ -854,7 +854,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
         p.write_slices && print_parameter(io, pad, "write slices", p.write_slices)
         if p.compare
             print_parameter(io, pad, "compare", p.compare, nl=false)
-            println(io, p.is_ref ? ", as reference" : "with $(p.comparison_tolerance) of tolerance")
+            println(io, ", ", p.is_ref ? "as reference" : "with $(p.comparison_tolerance) of tolerance")
         end
     end
 

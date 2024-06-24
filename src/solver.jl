@@ -369,11 +369,13 @@ function armon(params::ArmonParameters{T}) where T
         local_rank = MPI.Comm_rank(node_local_comm)
         local_size = MPI.Comm_size(node_local_comm)
 
+        rank_info = @sprintf(" - %2d/%-2d, local: %2d/%-2d, coords: (%2d,%-2d), cores: %3d to %3d",
+                             rank, proc_size-1, local_rank, local_size-1, cart_coords[1], cart_coords[2],
+                             minimum(getcpuids()), maximum(getcpuids()))
+
         is_root && println("\nProcesses info:")
         rank > 0 && MPI.Recv(Bool, rank-1, 1, params.global_comm)
-        @printf(" - %2d/%-2d, local: %2d/%-2d, coords: (%2d,%-2d), cores: %3d to %3d\n", 
-            rank, proc_size, local_rank, local_size, cart_coords[1], cart_coords[2], 
-            minimum(getcpuids()), maximum(getcpuids()))
+        println(rank_info)
         rank < proc_size-1 && MPI.Send(true, rank+1, 1, params.global_comm)
     end
 
@@ -451,7 +453,7 @@ function armon(params::ArmonParameters{T}) where T
     params.write_output && write_sub_domain_file(params, data, params.output_file)
     params.write_slices && write_slices_files(params, data, params.output_file)
 
-    if params.measure_time && params.silent < 3 && !isinteractive()
+    if is_root && params.measure_time && params.silent < 3 && !isinteractive()
         show(params.timer)
         println()
     end

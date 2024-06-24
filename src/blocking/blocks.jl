@@ -180,7 +180,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
     recv_buf   :: MPI.Buffer{B}
     requests   :: MPI.UnsafeMultiRequest
 
-    function RemoteTaskBlock{B}(size, pos, rank, global_pos, comm) where {B}
+    function RemoteTaskBlock{B}(size, pos, rank, global_pos, comm, side) where {B}
         # `neighbour` is set afterwards, when all blocks are created.
         block = new{B}(pos)
         block.rank = rank
@@ -188,8 +188,18 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block.send_buf = MPI.Buffer(B(undef, size))
         block.recv_buf = MPI.Buffer(B(undef, size))
         block.requests = MPI.UnsafeMultiRequest(2)  # We always keep a reference to the buffers, therefore it is safe
-        MPI.Send_init(block.send_buf, comm, block.requests[1]; dest=rank)
-        MPI.Recv_init(block.recv_buf, comm, block.requests[2]; source=rank)
+
+        # Because two ranks may have several comms at once, we must use tags. They must match at both sides.
+        # Since both ranks share the same (flat) side and block size, a unique index could be the block
+        # position along the communication side.
+        # TODO: dimension agnostic: `CartesianIndices` of all blocks of the side, then `LinearIndices`?
+        # TODO: this is not enough to support arbitrary block distributions (non-flat sides), there
+        #   could be tag collisions in this case
+        #   hashes are not a viable alternative, as `MPI.tab_ub()` is only 2^15 at min (2^23 for OpenMPI)
+        tag = pos[Integer(next_axis(axis_of(side)))]
+        MPI.Send_init(block.send_buf, comm, block.requests[1]; dest=rank, tag)
+        MPI.Recv_init(block.recv_buf, comm, block.requests[2]; source=rank, tag)
+
         return block
     end
 

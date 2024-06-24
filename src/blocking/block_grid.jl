@@ -132,7 +132,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                     neighbour = neighbour_at(params, side)  # MPI rank
                     global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
 
-                    RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm)
+                    RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm, side)
                 else
                     # "Fake" remote block for non-existant neighbour at the edge of the global domain
                     RemoteTaskBlock{buffer_array}(remote_blk_pos)
