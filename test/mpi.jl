@@ -417,7 +417,40 @@ function test_conservation(test, P, N; maxcycle=10000, maxtime=10000, kwargs...)
 end
 
 
+mpi_precomp_done = false
+function local_precompilation()
+    mpi_precomp_done && return
+    for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
+        ref_params = get_reference_params(test, type; use_MPI=false, maxcycle=2)
+        run_armon_reference(ref_params)
+
+        ref_params = get_reference_params(test, type; use_MPI=false, maxcycle=2, async_cycle=true)
+        run_armon_reference(ref_params)
+
+        ref_params = get_reference_params(test, type; use_MPI=false, maxcycle=2, use_cache_blocking=false)
+        run_armon_reference(ref_params)
+
+        if TEST_CUDA_MPI
+            ref_params = get_reference_params(test, type; use_MPI=false, maxcycle=2, use_gpu=true, device=:CUDA)
+            run_armon_reference(ref_params)
+        end
+
+        if TEST_ROCM_MPI
+            ref_params = get_reference_params(test, type; use_MPI=false, maxcycle=2, use_gpu=true, device=:ROCM)
+            run_armon_reference(ref_params)
+        end
+
+        if TEST_KOKKOS_MPI
+            ref_params = get_reference_params(test, type; use_MPI=false, maxcycle=2, use_kokkos=true)
+            run_armon_reference(ref_params)
+        end
+    end
+    global mpi_precomp_done = true
+end
+
+
 total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
+
 
 @testset "MPI" begin
     @testset "$(join(P, '×'))" for P in (
@@ -438,6 +471,12 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
         else
             is_root && @info "Not enough processes to test a $P domain"
             comm, proc_in_grid = MPI.COMM_NULL, false
+        end
+
+        if comm == MPI.COMM_NULL
+            # This rank will test nothing for this test iteration.
+            # Instead of doing nothing but waiting, we trigger compilation on the non-MPI parts of the solver.
+            local_precompilation()
         end
 
         # dump_neighbours(P, proc_in_grid, comm)
