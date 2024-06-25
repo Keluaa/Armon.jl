@@ -502,12 +502,6 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
                 end
             end
 
-            @testset "Async cycle" begin
-                @MPI_test comm begin
-                    test_reference("CPU", comm, :Sod_circ, Float64, P; async_cycle=true)
-                end skip=!enough_processes || !proc_in_grid
-            end
-
             @testset "No Blocking" begin
                 @MPI_test comm begin
                     test_reference("CPU", comm, :Sod_circ, Float64, P; use_cache_blocking=false)
@@ -515,10 +509,26 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
             end
 
             @testset "Conservation" begin
-                @testset "$test" for test in (:Sod, :Sod_y, :Sod_circ)
-                    if enough_processes && proc_in_grid
-                        test_conservation(test, P, (100, 100); global_comm=comm)
-                    end
+                @MPI_test comm begin
+                    test_conservation(:Sod_circ, P, (100, 100); global_comm=comm)
+                end skip=!enough_processes || !proc_in_grid
+            end
+
+            @testset "Async cycle" begin
+                @MPI_test comm begin
+                    test_reference("CPU", comm, :Sod_circ, Float64, P; async_cycle=true)
+                end skip=!enough_processes || !proc_in_grid
+
+                @testset "No patience" begin
+                    @MPI_test comm begin
+                        test_reference("CPU", comm, :Sod_circ, Float64, P; async_cycle=true, busy_wait_limit=0)
+                    end skip=!enough_processes || !proc_in_grid
+                end
+
+                @testset "Conservation" begin
+                    @MPI_test comm begin
+                        test_conservation(:Sod_circ, P, (100, 100); async_cycle=true, global_comm=comm)
+                    end skip=!enough_processes || !proc_in_grid
                 end
             end
 

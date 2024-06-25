@@ -109,6 +109,14 @@ Dictates how blocks are distributed among threads when `async_cycle == true`:
 - `:weighted_sorted_scotch` takes into account the number of cells in each block instead of assuming
   an even workload for all blocks
 
+
+    busy_wait_limit = 100
+
+Number of calls in a cycle to [`block_state_machine`](@ref) which did not advance any of a thread's
+blocks until a call to `MPI_Wait` or a system sleep is done.
+This is only relevant when `async_cycle == true`.
+
+
 ## Profiling
 
     profiling = Symbol[]
@@ -317,6 +325,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
     lock_memory::Bool
+    busy_wait_limit::Int
 
     # MPI
     use_MPI::Bool
@@ -468,6 +477,7 @@ function init_device(params::ArmonParameters;
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
+    busy_wait_limit = 100,
     options...
 )
     params.use_threading = use_threading
@@ -477,6 +487,7 @@ function init_device(params::ArmonParameters;
     params.use_cache_blocking = use_cache_blocking
     params.use_two_step_reduction = use_two_step_reduction
     params.async_cycle = async_cycle
+    params.busy_wait_limit = max(busy_wait_limit, 1)
 
     if use_cache_blocking && use_threading && params.use_MPI
         thread_level = MPI.Query_thread()

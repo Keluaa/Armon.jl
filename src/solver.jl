@@ -51,7 +51,9 @@ This continues until the current cycle is done, or the block needs to wait for a
 the ghost cells exchange ([`block_ghost_exchange`](@ref)) or compute the its time step
 ([`next_time_step`](@ref)).
 
-Returns `true` if we reached the end of the current cycle for `blk`.
+Returns the new step of the block.
+If `SolverStep.NewCycle` is returned, the `blk` reached the end of the current cycle and will not
+progress any further until all other blocks have reached the same point.
 """
 function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     state = blk.state
@@ -173,7 +175,34 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         end
     end
 
-    return new_state == SolverStep.NewCycle
+    return new_state
+end
+
+
+function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiting_block::CartesianIndex, stop_count)
+    # A safepoint might be needed in some cases as threads waiting for other threads
+    # would never allocate and therefore might prevent the GC to run.
+    GC.safepoint()
+
+    # TODO: performance logging about how many times we reach this, how much time is spent waiting, etc...
+
+    if params.use_MPI && !iszero(first_waiting_block)
+        # MPI_Wait on the `first_waiting_block`'s remote neighbour
+        blk = block_at(grid, first_waiting_block)
+        for neighbour in blk.neighbours
+            !(neighbour isa RemoteTaskBlock) && continue
+            MPI.Testall(neighbour.requests) && continue
+            # Only wait for a single side, expecting that once one is done, there is more work to do.
+            MPI.Waitall(neighbour.requests)
+            return
+        end
+    end
+
+    # Yield to the OS scheduler, incase some multithreading schenanigans are preventing us to
+    # continue further (e.g. another process' thread is bound to the same core as this thread).
+    # Wait twice as long as the previous time, starting from 2µs and up to 8ms
+    µs_to_wait = 2^clamp(stop_count, 1, 13)
+    Libc.systemsleep(µs_to_wait * 1e-6)  # this is `usleep` on Linux btw
 end
 
 
@@ -192,34 +221,46 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         thread_blocks_idx = grid.threads_workload[tid]
 
         t_start = time_ns()
-        step_count = 1  # TODO: monitor the maximum `step_count` reached, if it is small, then ok, but with MPI this will not be the case
+        step_count = 0
+        no_progress_count = 0
         while step_count < max_step_count
-            if step_count % 100 == 0
-                # A safepoint might be needed in some cases as threads waiting for other threads
-                # would never allocate and therefore might prevent the GC to run.
-                GC.safepoint()
-
-                if time_ns() - t_start > timeout
-                    solver_error(:timeout, "cycle took too long in thread $tid")
-                end
-
-                # TODO: we are busy waiting for MPI comms/dependencies!! Stop using Polyester in this case and `yield()`!
-            end
-
+            # Repeatedly parse through all blocks assigned to the current thread, each time advancing
+            # them through the solver steps, until all of them are done with the cycle.
             all_finished_cycle = true
+            no_progress = true
+            first_waiting_block = zero(eltype(thread_blocks_idx))
             for blk_pos in thread_blocks_idx
                 # One path for each type of block to avoid runtime dispatch
                 if in_grid(blk_pos, grid.static_sized_grid)
                     blk = grid.blocks[block_idx(grid, blk_pos)]
-                    all_finished_cycle &= block_state_machine(params, blk)
+                    prev_state = blk.state.step
+                    new_state = block_state_machine(params, blk)
                 else
                     blk = grid.edge_blocks[edge_block_idx(grid, blk_pos)]
-                    all_finished_cycle &= block_state_machine(params, blk)
+                    prev_state = blk.state.step
+                    new_state = block_state_machine(params, blk)
+                end
+
+                all_finished_cycle &= new_state == SolverStep.NewCycle
+                no_progress &= prev_state == new_state
+                if prev_state == new_state && iszero(first_waiting_block)
+                    first_waiting_block = blk_pos
                 end
             end
             all_finished_cycle && break
 
+            no_progress_count += no_progress
             step_count += 1
+
+            if no_progress_count % params.busy_wait_limit == 0
+                # No block did any progress for more than `params.busy_wait_limit` calls to
+                # `block_state_machine`, to prevent deadlocks (caused by MPI or multithreading),
+                # we should stop busy waiting.
+                if time_ns() - t_start > timeout
+                    solver_error(:timeout, "cycle took too long in thread $tid")
+                end
+                stop_busy_waiting(params, grid, first_waiting_block, no_progress_count ÷ params.busy_wait_limit)
+            end
         end
     end
 
