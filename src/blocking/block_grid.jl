@@ -39,6 +39,7 @@ struct BlockGrid{
     edge_blocks        :: Vector{LocalTaskBlock{DeviceArray, HostArray, DynamicBSize{Ghost}, SState}}
     remote_blocks      :: Vector{RemoteTaskBlock{BufferArray}}
     threads_workload   :: Vector{Vector{CartesianIndex{2}}}  # `tid => block index` map for all threads, distributing each block to each thread
+    threads_logs       :: Vector{Vector{ThreadLogEvent}}
 end
 
 
@@ -74,6 +75,13 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
     threads_workload = thread_workload_distribution(params)
 
+    log_size = params.log_blocks ? min(params.maxcycle, 1000) : 0
+    threads_logs = map(1:Threads.nthreads()) do _
+        logs = Vector{ThreadLogEvent}()
+        sizehint!(logs, log_size)
+        return logs
+    end
+
     # Main grid container
     edge_size = remainder_block_size .- 2*ghost
     grid = BlockGrid{
@@ -82,7 +90,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         state_type, typeof(params.device)
     }(
         grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
-        blocks, edge_blocks, remote_blocks, threads_workload
+        blocks, edge_blocks, remote_blocks, threads_workload, threads_logs
     )
 
     # Allocate all local and remote blocks
@@ -546,6 +554,7 @@ buffers_on_device(::ObjOrType{BlockGrid{<:Any, D, H, B}}) where {D, H, B} = D ==
 
 function reset!(grid::BlockGrid, params::ArmonParameters)
     reset!(grid.global_dt, params, prod(grid.grid_size))
+    foreach(empty!, grid.threads_logs)
     for blk in all_blocks(grid)
         reset!(blk)
     end
@@ -559,6 +568,21 @@ A [`SolverState`](@ref) which can be used as a global state when outside of a so
 It belongs to the first device block.
 """
 first_state(grid::BlockGrid) = first(all_blocks(grid)).state
+
+
+function ThreadLogEvent(grid::BlockGrid, tid, step_count, no_progress_count, stop_count, mpi_waits, wait_time, cycle_time)
+    tw = grid.threads_workload[tid]
+    cycle = isempty(tw) ? first_state(grid).cycle : block_at(grid, first(tw)).state.cycle
+    blk_count = min(length(tw), typemax(Int16))
+    return ThreadLogEvent(
+        cycle, blk_count,
+        stop_count, mpi_waits,
+        step_count, no_progress_count,
+        wait_time, cycle_time
+    )
+end
+
+push_log!(grid::BlockGrid, tid, thread_log::ThreadLogEvent) = push!(grid.threads_logs[tid], thread_log)
 
 
 """

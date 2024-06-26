@@ -228,6 +228,23 @@ const SOLVER_STEPS_VARS = Dict{SolverStep.T, Tuple{Bool, UInt16}}(
 
 
 """
+    ThreadLogEvent
+
+Info about a thread, emitted after a call to `solver_cycle_async`, which itself calls [`block_state_machine`](@ref).
+"""
+struct ThreadLogEvent
+    cycle             :: Int16
+    blk_count         :: Int16
+    stop_count        :: Int16
+    mpi_waits         :: Int16
+    step_count        :: Int32
+    no_progress_count :: Int32
+    wait_time         :: Float64
+    cycle_time        :: Float64
+end
+
+
+"""
     BlockLogEvent
 
 Info about a block, emitted after a call to [`block_state_machine`](@ref) which successfully advanced

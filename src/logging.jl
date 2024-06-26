@@ -2,6 +2,7 @@
 struct BlockGridLog
     blk_logs           :: Array{Vector{BlockLogEvent}}
     blk_sizes          :: Array{NTuple{2, Int}}
+    thr_logs           :: Vector{Vector{ThreadLogEvent}}
     ghosts             :: Int
     mean_blk_cells     :: Float64  # Mean number of cells in all blocks
     mean_vars_per_cell :: Float64  # Mean number of variables in all cells
@@ -27,7 +28,7 @@ function collect_logs(grid::BlockGrid{T}) where {T}
     mean_blk_cells = tot_blk_cells / prod(grid.grid_size)
     mean_vars_per_cell = length(main_vars())
     data_type_size = sizeof(T)
-    return BlockGridLog(logs, blk_sizes, ghosts(grid), mean_blk_cells, mean_vars_per_cell, data_type_size)
+    return BlockGridLog(logs, blk_sizes, grid.threads_logs, ghosts(grid), mean_blk_cells, mean_vars_per_cell, data_type_size)
 end
 
 
@@ -69,7 +70,7 @@ end
 """
     BlockGridLogStats
 
-Metrics about the blocks of a full solver excution.
+Metrics about the blocks and threads of a full solver excution.
 """
 mutable struct BlockGridLogStats
     tot_blk                 :: Int
@@ -102,6 +103,15 @@ mutable struct BlockGridLogStats
     bytes_prev_thread       :: LogStat{Float64}  # Total bytes processed by the thread between each solver iteration
     indep_bytes_prev_thread :: LogStat{Float64}  # Unique bytes processed by the thread between each solver interation
 
+    # Thread cycle stats
+    cycle_times             :: Vector{LogStat{Float64}}  # Time of each cycle per thread
+    cycle_times_σ           :: Float64           # Standard deviation of `cycle_times`
+    useful_steps_frac       :: LogStat{Float64}  # Fraction of sweeps over the thread's blocks which progressed their state
+    cycle_time              :: LogStat{Float64}  # Time for one cycle (in seconds) per thread
+    wait_time               :: LogStat{Float64}  # Time spent waiting during a cycle (in seconds) per thread
+    stop_count              :: LogStat{Int}      # Number of sleeps/MPI waits done to avoid a long busy wait during a cycle per thread
+    mpi_waits               :: LogStat{Int}      # Number of stops resolved by a `MPI_Waitall` per thread
+
     # Stats from the original `BlockGrid`
     blk_ghosts              :: Int
     mean_blk_cells          :: Float64
@@ -119,6 +129,9 @@ mutable struct BlockGridLogStats
         Dict{UInt16, BlockGridLogThreadStats}(), 0,
         LogStat{Int}(), LogStat{Int}(), LogStat{Int}(),
         LogStat{Float64}(), LogStat{Float64}(),
+        LogStat{Float64}[], zero(Float64),
+        LogStat{Float64}(), LogStat{Float64}(), LogStat{Float64}(),
+        LogStat{Int}(), LogStat{Int}(),
         0, zero(Float64), zero(Float64), 0, zero(Float64)
     )
 end
@@ -186,6 +199,24 @@ function accumulate_grid_stats!(gs::BlockGridLogStats, ::CartesianIndex, blk_eve
 end
 
 
+function accumulate_grid_stats!(gs::BlockGridLogStats, tid, tle::ThreadLogEvent)
+    tle.blk_count == 0 && return  # ignore threads which did not do any work
+
+    if length(gs.cycle_times) < tle.cycle
+        push!(gs.cycle_times, LogStat{Float64}())
+    end
+    accumulate_grid_stats!(gs.cycle_times[tle.cycle], tle.cycle_time)
+    accumulate_grid_stats!(gs.cycle_time, tle.cycle_time)
+    accumulate_grid_stats!(gs.wait_time, tle.wait_time)
+
+    useful_steps_frac = (tle.step_count - tle.no_progress_count) / tle.step_count
+    accumulate_grid_stats!(gs.useful_steps_frac, useful_steps_frac)
+
+    accumulate_grid_stats!(gs.stop_count, tle.stop_count)
+    accumulate_grid_stats!(gs.mpi_waits, tle.mpi_waits)
+end
+
+
 """
     analyse_log_stats(f, grid_log::BlockGridLog)
 
@@ -196,6 +227,13 @@ function analyse_log_stats(f, grid_log::BlockGridLog)
     for pos in eachindex(Base.IndexCartesian(), grid_log.blk_logs)
         !isassigned(grid_log.blk_logs, pos) && continue
         f(pos, grid_log.blk_logs[pos], grid_log.blk_sizes[pos])
+    end
+end
+
+
+function analyse_threads_log_stats(f, grid_log::BlockGridLog)
+    for (tid, logs) in enumerate(grid_log.thr_logs), log in logs
+        f(tid, log)
     end
 end
 
@@ -214,6 +252,7 @@ function analyse_log_stats(grid_log::BlockGridLog)
     gs.mean_blk_size = gs.mean_blk_cells * gs.mean_vars_per_cell * gs.var_data_type_size
 
     analyse_log_stats((args...) -> accumulate_grid_stats!(gs, args...), grid_log)
+    analyse_threads_log_stats((args...) -> accumulate_grid_stats!(gs, args...), grid_log)
 
     tot_events = gs.events_per_blk.tot
     gs.events_per_blk.mean = tot_events / gs.tot_blk
@@ -234,6 +273,20 @@ function analyse_log_stats(grid_log::BlockGridLog)
     gs.events_per_thread.mean = gs.events_per_thread.tot / gs.active_threads
     gs.stalls_per_thread.mean = gs.stalls_per_thread.tot / gs.active_threads
 
+    cycles = length(gs.cycle_times)
+    gs.useful_steps_frac.mean = gs.useful_steps_frac.tot / cycles / gs.active_threads
+    gs.cycle_time.mean        = gs.cycle_time.tot        / cycles / gs.active_threads / 1e9
+    gs.wait_time.mean         = gs.wait_time.tot         / cycles / gs.active_threads / 1e9
+    gs.stop_count.mean        = gs.stop_count.tot        / cycles / gs.active_threads
+    gs.mpi_waits.mean         = gs.mpi_waits.tot         / cycles / gs.active_threads
+
+    tot_mean_dist = 0.0
+    for cycle_time in gs.cycle_times
+        cycle_time.mean = cycle_time.tot / gs.active_threads / 1e9
+        tot_mean_dist += (cycle_time.mean - gs.cycle_time.mean)^2
+    end
+    gs.cycle_times_σ = sqrt(tot_mean_dist / cycles)
+
     gs.event_size = gs.vars_per_event * gs.mean_blk_cells * gs.var_data_type_size
     gs.event_indep_size = gs.indep_vars_per_event * gs.mean_blk_cells * gs.var_data_type_size
 
@@ -247,12 +300,26 @@ function analyse_log_stats(grid_log::BlockGridLog)
 end
 
 
-function as_SI_magnitude(x)
-    prefixes = ["", "k", "M", "G", "T", "P"]
+function SI_magnitude(x)
+    (!isfinite(x) || iszero(x)) && return 0
     mag = floor(Int, log(1000, abs(x)))
-    mag = clamp(mag, 0, length(prefixes) - 1)
-    prefix = prefixes[mag + 1]
-    return x / 1000^mag, prefix
+    return clamp(mag, -4, 5)
+end
+
+function as_SI_magnitude(x, mag=SI_magnitude(x))
+    prefixes = ("f", "n", "µ", "m", "", "k", "M", "G", "T", "P")
+    prefix = prefixes[mag + 5]
+    if x isa Integer
+        return x / 1000^mag, prefix  # mag can only be positive here
+    else
+        return round(x / 1000.0^mag; sigdigits=4), prefix  # output can only be 5 chars long (excluding the minus sign)
+    end
+end
+
+function as_percentage_str(x)
+    # The returned string is always 6 chars long
+    x = round(x * 100; sigdigits=3)
+    return x ≥ 100 || x < 0 ? @sprintf("%4.0f %%", x) : @sprintf("%4.1f %%", x)
 end
 
 
@@ -273,8 +340,8 @@ function Base.show(io::IO, ::MIME"text/plain", gs::BlockGridLogStats)
     println(io, " - vars per event\t\t", gs.vars_per_event)
     println(io, " - indep vars per event\t\t", gs.indep_vars_per_event)
     println(io, " - blocks before event\t\t", gs.blk_before_per_event)
-    println(io, " - mean block cells\t\t", @sprintf("%5.2f", gs.mean_blk_cells))
-    println(io, " - mean vars per cell\t\t", @sprintf("%5.2f", gs.mean_vars_per_cell), ", ",
+    println(io, " - mean block cells\t\t", @sprintf("%6.2f %s", as_SI_magnitude(gs.mean_blk_cells)...))
+    println(io, " - mean vars per cell\t\t", @sprintf("%6.2f", gs.mean_vars_per_cell), ", ",
         gs.var_data_type_size, " bytes per var")
 
     println(io, " - blocks per thread\t\t", gs.blk_per_thread, ", ", gs.active_threads, " active threads")
@@ -298,4 +365,14 @@ function Base.show(io::IO, ::MIME"text/plain", gs::BlockGridLogStats)
         println(io)
         print(io, "    - $step = $cnt")
     end
+    println()
+
+    cycle_time_mag = SI_magnitude(gs.cycle_time.mean)
+    cycle_time, SI_prefix = as_SI_magnitude(gs.cycle_time.mean, cycle_time_mag)
+    cycle_time_σ, _ = as_SI_magnitude(gs.cycle_times_σ, cycle_time_mag)
+    println(io, " - cycle time pe thread\t\t", @sprintf("%-6.2f ± %6.2f %ss", cycle_time, cycle_time_σ, SI_prefix))
+    println(io, " - wait time per cycle\t\t", @sprintf("%-6.2f %ss", as_SI_magnitude(gs.wait_time.mean)...))
+    println(io, " - thread progress rate\t\t", as_percentage_str(gs.useful_steps_frac.mean), " of block sweeps")
+    print(io, " - non-busy waits\t\t", @sprintf("%6.2f %s", as_SI_magnitude(gs.stop_count.mean)...), ", ")
+    print(io, as_percentage_str(gs.mpi_waits.mean / max(gs.stop_count.mean, 1)), " caused by MPI")
 end
