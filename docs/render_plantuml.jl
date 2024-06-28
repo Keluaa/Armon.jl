@@ -4,6 +4,7 @@ using CodecZlib
 using HTTP
 using Documenter
 using MarkdownAST
+using Random
 
 import Documenter: HTMLWriter
 import MarkdownAST: Node
@@ -211,14 +212,14 @@ function Documenter.Selectors.runner(::Type{PlantUMLBlocks}, node, page, doc)
     m = match(r"""@puml ("[^"]+"|\S+)((?> +[\w=]+)*)$""", x.info)
     m === nothing && error("invalid '@puml <PlantUML file path> [option=value]' syntax: $(x.info)")
 
-    if !isnothing(m[1])
-        file_path = joinpath(doc.user.source, strip(m[1]))
+    file_name = strip(m[1])
+    if file_name != "inline"
+        file_path = joinpath(doc.user.source, file_name)
         !isfile(file_path) && @error "file '$file_path' does not exist"
         puml_source = read(file_path, String)
     else
-        # idea: inline PlantUML script in a documenter file
-        # simply put the `x.code` in a tmp file and render it
-        @error "missing PlantUML source file path"
+        puml_source = x.code
+        file_path = randstring()
     end
 
     # The default dimensions of "100%"x"exact" will display the SVG in its whole height
