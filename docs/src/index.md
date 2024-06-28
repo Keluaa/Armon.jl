@@ -153,6 +153,7 @@ memory_required
 
 ```@docs
 BlockLogEvent
+ThreadLogEvent
 collect_logs
 analyse_log_stats
 BlockGridLogStats
