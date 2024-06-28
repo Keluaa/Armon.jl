@@ -35,6 +35,7 @@ if isinteractive()
      - domains        Domain 2D indexing
      - blocking       Blocking tests
      - logging        Block logging tests
+     - numa           Memory pages placement tests
      - convergence    Convergence to the reference solutions
      - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
@@ -99,6 +100,7 @@ function do_tests(tests_to_do)
             elseif test === :gpu            run_file("gpu.jl")
             elseif test === :kokkos         run_file("kokkos.jl")
             elseif test === :logging        run_file("logging.jl")
+            elseif test === :numa           run_file("numa.jl")
             elseif test === :mpi
                 if MPI_PROCS > 0 && world_size < MPI_PROCS
                     @info "Launching $MPI_PROCS MPI sub-processes"
