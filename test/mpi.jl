@@ -450,6 +450,15 @@ end
 
 
 total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
+total_core_count = if parse(Bool, get(ENV, "CI", "false"))
+    # Limit the use of CPU cores only in the CI, as it can only run on a single node, with very
+    # limited resources. Using more cores than available can cause deadlocks.
+    Sys.CPU_THREADS
+elseif (core_limit = parse(Int, get(ENV, "TEST_MPI_CORE_LIMIT", "0")); core_limit > 0)
+    core_limit
+else
+    typemax(Int)
+end
 
 
 @testset "MPI" begin
@@ -472,6 +481,13 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
             is_root && @info "Not enough processes to test a $P domain"
             comm, proc_in_grid = MPI.COMM_NULL, false
         end
+
+        enough_cores = prod(P) * Threads.nthreads() ≤ total_core_count
+        if enough_processes && !enough_cores && is_root
+            @warn "Not enough cores to run the test with multithreading: \
+                   need $(prod(P) * Threads.nthreads()), got $total_core_count"
+        end
+        use_threading = enough_cores
 
         if comm == MPI.COMM_NULL
             # This rank will test nothing for this test iteration.
@@ -497,37 +513,37 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
             @testset "Reference" begin
                 @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
                     @MPI_test comm begin
-                        test_reference("CPU", comm, test, type, P)
+                        test_reference("CPU", comm, test, type, P; use_threading)
                     end skip=!enough_processes || !proc_in_grid
                 end
             end
 
             @testset "No Blocking" begin
                 @MPI_test comm begin
-                    test_reference("CPU", comm, :Sod_circ, Float64, P; use_cache_blocking=false)
+                    test_reference("CPU", comm, :Sod_circ, Float64, P; use_threading, use_cache_blocking=false)
                 end skip=!enough_processes || !proc_in_grid
             end
 
             @testset "Conservation" begin
                 @MPI_test comm begin
-                    test_conservation(:Sod_circ, P, (100, 100); global_comm=comm)
+                    test_conservation(:Sod_circ, P, (100, 100); use_threading, global_comm=comm)
                 end skip=!enough_processes || !proc_in_grid
             end
 
             @testset "Async cycle" begin
                 @MPI_test comm begin
-                    test_reference("CPU", comm, :Sod_circ, Float64, P; async_cycle=true)
+                    test_reference("CPU", comm, :Sod_circ, Float64, P; use_threading, async_cycle=true)
                 end skip=!enough_processes || !proc_in_grid
 
                 @testset "No patience" begin
                     @MPI_test comm begin
-                        test_reference("CPU", comm, :Sod_circ, Float64, P; async_cycle=true, busy_wait_limit=0)
+                        test_reference("CPU", comm, :Sod_circ, Float64, P; use_threading, async_cycle=true, busy_wait_limit=0)
                     end skip=!enough_processes || !proc_in_grid
                 end
 
                 @testset "Conservation" begin
                     @MPI_test comm begin
-                        test_conservation(:Sod_circ, P, (100, 100); async_cycle=true, global_comm=comm)
+                        test_conservation(:Sod_circ, P, (100, 100); use_threading, async_cycle=true, global_comm=comm)
                     end skip=!enough_processes || !proc_in_grid
                 end
             end
@@ -539,7 +555,7 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
                         (37, 241)
                     )
                     @MPI_test comm begin
-                        test_conservation(:Sod_circ, P, domain; maxcycle=100, global_comm=comm)
+                        test_conservation(:Sod_circ, P, domain; use_threading, maxcycle=100, global_comm=comm)
                     end skip=!enough_processes || !proc_in_grid
                 end
             end
@@ -548,7 +564,7 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
         @testset "CUDA" begin
             @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
                 @MPI_test comm begin
-                    test_reference("CUDA", comm, test, type, P; use_gpu=true, device=:CUDA)
+                    test_reference("CUDA", comm, test, type, P; use_threading, use_gpu=true, device=:CUDA)
                 end skip=!TEST_CUDA_MPI ||!enough_processes || !proc_in_grid
             end
         end
@@ -556,7 +572,7 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
         @testset "ROCm" begin
             @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
                 @MPI_test comm begin
-                    test_reference("ROCm", comm, test, type, P; use_gpu=true, device=:ROCM)
+                    test_reference("ROCm", comm, test, type, P; use_threading, use_gpu=true, device=:ROCM)
                 end skip=!TEST_ROCM_MPI || !enough_processes || !proc_in_grid
             end
         end
@@ -564,7 +580,7 @@ total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
         @testset "Kokkos" begin
             @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
                 @MPI_test comm begin
-                    test_reference("kokkos", comm, test, type, P; use_kokkos=true)
+                    test_reference("kokkos", comm, test, type, P; use_threading, use_kokkos=true)
                 end skip=!TEST_KOKKOS_MPI || !enough_processes || !proc_in_grid
             end
         end
