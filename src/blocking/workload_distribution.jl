@@ -1,399 +1,4 @@
 
-# From https://stackoverflow.com/a/40700741
-function largest_2_factors(n)
-    # TODO: 3D+
-    # n = a*b  =>  a ≤ √n ≤ b  =>  choose (a, b) such that a - b is minimized
-    a = round(Int, sqrt(n))
-    while n % a > 0
-        a -= 1
-    end
-    b = n ÷ a
-    return a, b
-end
-
-
-function surface_perimeter_ratio(g)
-    # TODO: 3D+
-    surface = prod(g)
-    perimeter = sum(g) .* 2
-    return surface / perimeter
-end
-
-
-function smoothest_square_subdivision(grid_size, k; optimize=true)
-    # F = largest_2_factors(k)  # TODO: remove?
-    N = prod(grid_size)
-    # r = N % k  # extra elements
-    # G = (N - r) ÷ k  # group size
-
-    r = 0
-    G = (N + (k - N % k)) ÷ k  # group size
-
-    # Find the group dimensions with the largest group size and biggest surface/perimeter ratio.
-    # Starting from an initial group size, we only decrease it to keep a minimum of `k` groups.
-    best_G = G
-    best_Gd = init_Gd = largest_2_factors(G)
-    best_Gd_score = surface_perimeter_ratio(best_Gd)
-    for Gi in G-1:-1:max(1, G-k, optimize ? 0 : G)
-        Gd = largest_2_factors(Gi)
-        Gd_score = surface_perimeter_ratio(Gd)
-        if Gd_score > best_Gd_score  # No ties to break: we would always keep the bigger `best_G`, the previous one
-            best_G = Gi
-            best_Gd = Gd
-            best_Gd_score = Gd_score
-        end
-    end
-    r += (prod(init_Gd) - prod(best_Gd)) * k
-
-    best_Gd = Tuple(sort(collect(best_Gd); rev=true))  # Place the biggest axes first
-    F = cld.(grid_size, best_Gd)
-    prod(F) < k && (F = F .+ 1)
-
-    return F, best_G, best_Gd, r
-end
-
-
-function expanding_chocolate_chips_cake(grid_size::Dims{D}, k::Int) where {D}
-    ideal_size = ceil(Int, k^(1/D))
-    ideal_size = min(ideal_size, minimum(grid_size))
-
-    expansion_factor = minimum(grid_size .÷ ideal_size)  # at least 1
-    group_grid = ntuple(Returns(ideal_size), D)
-    group_size = ntuple(Returns(expansion_factor), D)
-
-    changed = true
-    while changed && any(group_grid .* group_size .< grid_size)
-        changed = false
-        # Continue expanding in each direction until we fill the `grid_size`
-        for axis in instances(Axis.T)  # TODO: replace by `axis_of(D)`
-            new_group_size = group_size .+ offset_to(axis)
-            if all(group_grid .* new_group_size .< grid_size .+ new_group_size)
-                group_size = new_group_size
-                changed = true
-            end
-        end
-    end
-
-    return group_grid, group_size
-end
-
-
-function square_block_distribution(threads, grid_size::Dims{D}) where {D}
-    # group_grid, _, group_size, _ = smoothest_square_subdivision(grid_size, threads)
-    # @show F, G, Gd, r
-    # TODO: fix this, but how?
-    # any(group_size .> grid_size) && error("invalid group size with $threads groups: $group_size vs grid size: $grid_size")
-
-    group_grid, group_size = expanding_chocolate_chips_cake(grid_size, threads)
-
-    threads_workload = Vector{Vector{CartesianIndex{D}}}(undef, threads)
-    groups_pos = CartesianIndices(group_grid)
-    blk_grid = zeros(Int, grid_size)
-    for tid in 1:threads
-        group_pos = groups_pos[tid]
-        thread_work = CartesianIndex{D}[]
-        sizehint!(thread_work, prod(group_size))
-        threads_workload[tid] = thread_work
-
-        # Trivial distribution of the first `G` elements
-        group_origin = CartesianIndex(group_size .* (Tuple(group_pos) .- 1))
-        for blk_group_pos in CartesianIndices(group_size)
-            blk_pos = group_origin + blk_group_pos
-            !in_grid(blk_pos, grid_size) && continue  # TODO: debug??
-            push!(thread_work, blk_pos)
-            blk_grid[blk_pos] = tid
-        end
-
-        isempty(thread_work) && error("$threads $grid_size led ")
-    end
-
-    # Parse through the grid, assigning the unassigned blocks to nearby groups.
-    # Since we do `group_origin = group_size .* group_pos`, then they must be at the edges.
-    # R_size = grid_size .% group_size
-    # Magic code similar to `EdgeBlockRegions` to iterate over edges of a n-grid
-    # edge_iter = Iterators.product(ifelse.(R_size .> 0, Ref((false, true)), Ref((false,)))...)
-    # edge_iter = Iterators.drop(edge_iter, 1)  # drop the all `false` element
-    # for edge_axes in edge_iter
-        # `R_size` controls the 'width' of the edge
-        # first_pos = CartesianIndex(ifelse.(edge_axes, grid_size .- R_size .+ 1, 1))
-        # last_pos  = CartesianIndex(ifelse.(edge_axes, grid_size, grid_size .- R_size))
-        # for blk_pos in first_pos:last_pos
-        for blk_pos in CartesianIndices(grid_size)
-            blk_grid[blk_pos] != 0 && continue  # already assigned
-            # `first_pos` is the corner closest to the grid's origin, therefore it always has one
-            # assigned neighbouring block. Hence we can be sure that at any stage in the algorithm,
-            # we would have one assigned block in the neighbours of `blk_pos`.
-            # Here we choose the neighbouring group with the least amount of assigned blocks.
-            min_workload = (typemax(Int), 0)
-            for side in instances(Side.T)  # TODO: replace by `sides_of(D)`
-                neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
-                !in_grid(neighbour_pos, grid_size) && continue
-                tid = blk_grid[neighbour_pos]
-                tid == 0 && continue
-                min_workload = min(min_workload, (length(threads_workload[tid]), tid))
-            end
-            _, tid = min_workload
-            tid == 0 && error("at `$(blk_pos)`, no assigned neighbours")
-            push!(threads_workload[tid], blk_pos)
-            blk_grid[blk_pos] = tid
-        end
-    # end
-
-    return blk_grid, threads_workload
-end
-
-
-function diffuse_workload!(
-    threads_workload::Vector{Vector{CartesianIndex{D}}}, blk_grid::Array{Int, D}, grid_size::Dims{D};
-    workload_tolerance=1.01, max_iter=1000
-) where {D}
-    # All threads should handle a maximum of `min_workload*workload_tolerance` blocks.
-    mean_workload = round(prod(grid_size) / length(threads_workload))  # Ideal expected workload
-    workload_tolerance = max(1 + 1 / mean_workload, workload_tolerance)  # 5% or 1 whole additional block
-
-    function move_to_group(blk::CartesianIndex, prev_tid, new_tid)
-        deleteat!(threads_workload[prev_tid], findfirst(==(blk), threads_workload[prev_tid]))
-        push!(threads_workload[new_tid], blk)
-        blk_grid[blk] = new_tid
-    end
-
-    function move_cost(blk::CartesianIndex, prev_tid, new_tid)
-        prev_tid == new_tid && return 0
-    
-        # The cost is the added (`D-1` dimensional) perimeter length to `new_tid`.
-        perimeter_increment = 0
-        for side in instances(Side.T)  # TODO: replace by `sides_of(D)`
-            neighbour_pos = blk + CartesianIndex(offset_to(side))
-            # !in_grid(neighbour_pos, grid_size) && continue
-            # perimeter_increment += blk_grid[neighbour_pos] != new_tid ? 1 : -1
-
-            # TODO: this seems to improve results
-            if in_grid(neighbour_pos, grid_size)
-                perimeter_increment += blk_grid[neighbour_pos] != new_tid ? 1 : -1
-            else
-                perimeter_increment += 1
-            end
-        end
-
-        workload_increment = 0  # TODO: get the weight of what we move, e.g. 1 for a static block, something else for an edge block
-        return perimeter_increment + workload_increment
-    end
-
-    # "Diffuse" the workload by moving blocks from one thread to another, until the condition is met for all threads.
-    # Candidates are sorted by ascending target tid workload then ascending move cost.
-    move_candidates = Vector{Tuple{Int, Int, Int, Int, CartesianIndex{D}}}()
-    performed_changes = true
-    iter = 0
-    while performed_changes && iter < max_iter
-        performed_changes = false
-        iter += 1
-        min_workload = minimum(length.(threads_workload))
-        ideal_workload = ceil(Int, min_workload * workload_tolerance)
-
-        # TODO: debug
-        # println("After $(iter-1) iterations (min: $min_workload, max: $(maximum(length.(threads_workload)))):")
-        # Main.disp_block_distrib(grid_size, threads_workload)
-        # println()
-
-        # Build a list of possible blocks to move to neighbouring threads
-        empty!(move_candidates)
-        for (tid, thread_workload) in enumerate(threads_workload)
-            length(thread_workload) ≤ ideal_workload && continue
-
-            for blk_pos in thread_workload
-                for side in instances(Side.T)  # TODO: replace by `sides_of(D)`
-                    neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
-                    !in_grid(neighbour_pos, grid_size) && continue
-
-                    neighbour_tid = blk_grid[neighbour_pos]
-                    neighbour_tid == tid && continue
-                    neighbour_workload = length(threads_workload[neighbour_tid])
-                    length(thread_workload) ≤ neighbour_workload + 1 && continue  # `+1` after the move
-
-                    # TODO: privilégier `length(thread_workload) > neighbour_workload + 1` avant `length(thread_workload) > neighbour_workload`
-                    cost = move_cost(blk_pos, tid, neighbour_tid)
-                    candidate = (neighbour_workload, cost, tid, neighbour_tid, blk_pos)
-                    insert!(move_candidates, searchsortedfirst(move_candidates, candidate), candidate)
-                    break
-                end
-            end
-        end
-
-        while !isempty(move_candidates)
-            # Move a block to another neighbouring block with a lower amount of workload                
-            _, _, prev_tid, new_tid, blk_pos = popfirst!(move_candidates)
-            length(threads_workload[prev_tid]) ≤ ideal_workload && continue
-            move_to_group(blk_pos, prev_tid, new_tid)
-            performed_changes = true
-            break  # TODO: this seems to improve results
-
-            # Update the move cost of the other candidates
-            changed_move_candidates = false
-            for (i, (neighbour_workload, cost, current_tid, neighbour_tid, pos)) in enumerate(move_candidates)
-                if !(neighbour_tid in (prev_tid, new_tid) || sum(abs, Tuple(blk_pos - pos)) == 1)
-                    continue  # Only update if same tid or is a neighbour of the block we just moved
-                end
-                neighbour_workload = length(threads_workload[neighbour_tid])
-                cost = move_cost(pos, current_tid, neighbour_tid)
-                move_candidates[i] = (neighbour_workload, cost, current_tid, neighbour_tid, pos)
-                changed_move_candidates = true
-            end
-            changed_move_candidates && sort!(move_candidates)
-        end
-    end
-
-    # TODO: remove?
-    if iter == max_iter && max_iter ≥ 20
-        @warn "workload diffusion did not converge after $iter iterations"
-    else
-        @info "workload diffusion convered after $iter iterations"
-    end
-
-    return blk_grid, threads_workload
-end
-
-
-function diffuse_workload_matrix!(
-    threads_workload::Vector{Vector{CartesianIndex{D}}}, blk_grid::Array{Int, D}, grid_size::Dims{D};
-    workload_tolerance=1.01, max_iter=1000
-) where {D}
-    # All threads should handle a maximum of `min_workload*workload_tolerance` blocks.
-    mean_workload = round(prod(grid_size) / length(threads_workload))  # Ideal expected workload
-    workload_tolerance = max(1 + 1 / mean_workload, workload_tolerance)  # 5% or 1 whole additional block
-
-    function move_to_group(blk::CartesianIndex, prev_tid, new_tid)
-        deleteat!(threads_workload[prev_tid], findfirst(==(blk), threads_workload[prev_tid]))
-        push!(threads_workload[new_tid], blk)
-        blk_grid[blk] = new_tid
-    end
-
-    function move_cost(blk::CartesianIndex, prev_tid, new_tid)
-        prev_tid == new_tid && return 0
-    
-        # The cost is the added (`D-1` dimensional) perimeter length to `new_tid`.
-        perimeter_increment = 0
-        for side in instances(Side.T)  # TODO: replace by `sides_of(D)`
-            neighbour_pos = blk + CartesianIndex(offset_to(side))
-            # !in_grid(neighbour_pos, grid_size) && continue
-            # perimeter_increment += blk_grid[neighbour_pos] != new_tid ? 1 : -1
-
-            # TODO: this seems to improve results
-            if in_grid(neighbour_pos, grid_size)
-                perimeter_increment += blk_grid[neighbour_pos] != new_tid ? 1 : -1
-            else
-                perimeter_increment += 1
-            end
-        end
-
-        workload_increment = 0  # TODO: get the weight of what we move, e.g. 1 for a static block, something else for an edge block
-        return perimeter_increment + workload_increment
-    end
-
-
-    function update_gradient!(workload_gradient)
-        min_workload = minimum(length.(threads_workload))
-        min_ideal_workload = floor(Int, min_workload * workload_tolerance)
-        max_ideal_workload =  ceil(Int, min_workload * workload_tolerance)
-
-        # Initial fill
-        for (tid, thread_workload) in enumerate(threads_workload)
-            gradient = if min_ideal_workload < length(thread_workload)
-                min_ideal_workload - length(thread_workload)  # negative (needs more work)
-            elseif length(thread_workload) ≤ max_ideal_workload
-                0  # should not change
-            else
-                max_ideal_workload - length(thread_workload)  # positive (needs less work)
-            end
-
-            workload_gradient[tid] = gradient
-        end
-
-        # Spread the gradient to neighbours with a basic 
-        for (tid, threads_workload) in enumerate(threads_workload)
-            workload_gradient[tid] != 0.0 && continue
-            neighbours = Int[]
-            for blk_pos in threads_workload, side in instances(Side.T)  # TODO: replace by `sides_of(D)`
-                neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
-                !in_grid(neighbour_pos, grid_size) && continue
-                neighbour_tid = blk_grid[neighbour_pos]
-                neighbour_tid == tid && continue
-                neighbour_tid in neighbours
-            end
-        end
-    end
-
-    workload_gradient = zeros(Float64, length(threads_workload))
-
-    # "Diffuse" the workload by moving blocks from one thread to another, until the condition is met for all threads.
-    # Candidates are sorted by ascending target tid workload then ascending move cost.
-    move_candidates = Vector{Tuple{Int, Int, Int, Int, CartesianIndex{D}}}()
-    performed_changes = true
-    iter = 0
-    while performed_changes && iter < max_iter
-        performed_changes = false
-        iter += 1
-        min_workload = minimum(length.(threads_workload))
-        ideal_workload = ceil(Int, min_workload * workload_tolerance)
-
-        # TODO: debug
-        # println("After $(iter-1) iterations (min: $min_workload, max: $(maximum(length.(threads_workload)))):")
-        # Main.disp_block_distrib(grid_size, threads_workload)
-
-        # Build a list of possible blocks to move to neighbouring threads
-        empty!(move_candidates)
-        for (tid, thread_workload) in enumerate(threads_workload)
-            length(thread_workload) ≤ ideal_workload && continue
-
-            for blk_pos in thread_workload
-                for side in instances(Side.T)  # TODO: replace by `sides_of(D)`
-                    neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
-                    !in_grid(neighbour_pos, grid_size) && continue
-
-                    neighbour_tid = blk_grid[neighbour_pos]
-                    neighbour_tid == tid && continue
-                    neighbour_workload = length(threads_workload[neighbour_tid])
-                    length(thread_workload) ≤ neighbour_workload && continue
-
-                    cost = move_cost(blk_pos, tid, neighbour_tid)
-                    candidate = (neighbour_workload, cost, tid, neighbour_tid, blk_pos)
-                    insert!(move_candidates, searchsortedfirst(move_candidates, candidate), candidate)
-                    break
-                end
-            end
-        end
-
-        while !isempty(move_candidates)
-            # Move a block to another neighbouring block with a lower amount of workload                
-            _, _, prev_tid, new_tid, blk_pos = popfirst!(move_candidates)
-            length(threads_workload[prev_tid]) ≤ ideal_workload && continue
-            move_to_group(blk_pos, prev_tid, new_tid)
-            performed_changes = true
-            break  # TODO: this seems to improve results, if we keep this we can remove `move_candidates` entierely
-
-            # Update the move cost of the other candidates
-            changed_move_candidates = false
-            for (i, (neighbour_workload, cost, current_tid, neighbour_tid, pos)) in enumerate(move_candidates)
-                if !(neighbour_tid in (prev_tid, new_tid) || sum(abs, Tuple(blk_pos - pos)) == 1)
-                    continue  # Only update if same tid or is a neighbour of the block we just moved
-                end
-                neighbour_workload = length(threads_workload[neighbour_tid])
-                cost = move_cost(pos, current_tid, neighbour_tid)
-                move_candidates[i] = (neighbour_workload, cost, current_tid, neighbour_tid, pos)
-                changed_move_candidates = true
-            end
-            changed_move_candidates && sort!(move_candidates)
-        end
-    end
-
-    # TODO: remove?
-    if iter == max_iter && max_iter ≥ 20
-        @warn "workload diffusion did not converge after $iter iterations"
-    end
-
-    return blk_grid, threads_workload
-end
-
-
 function sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
     function is_block_at_thread_perimeter(blk_pos, tid)
         for side in instances(Side.T)  # TODO: replace by `sides_of(length(blk_pos))`
@@ -601,6 +206,7 @@ function scotch_grid_partition(
         best_eveness   = weighted ? workload_eveness(best_workload, block_weights, grid_size) : workload_eveness(best_workload)
         best_perimeter = total_workload_perimeter(best_workload)
         for _ in 1:retries
+            # TODO: reuse the same graph for the retries, as introduces unnecessary overhead
             new_threads_workload = scotch_grid_partition(threads, grid_size; strategy, workload_tolerance, repart, retries=0)
             new_threads_workload == best_workload && continue
 
@@ -627,7 +233,7 @@ function thread_workload_distribution(params::ArmonParameters; threads=nothing, 
     grid_size, static_sized_grid, remainder_block_size = grid_dimensions(params)
     simple = params.workload_distribution === :simple
     scotch = params.workload_distribution in (:scotch, :sorted_scotch, :weighted_sorted_scotch)
-    perimeter_first = params.workload_distribution in (:sorted_square, :sorted_scotch, :weighted_sorted_scotch)
+    perimeter_first = params.workload_distribution in (:sorted_scotch, :weighted_sorted_scotch)
     merged_kw = merge(params.distrib_params, Dict(kwargs...))
     if params.workload_distribution === :weighted_sorted_scotch
         return thread_workload_distribution(thread_count, grid_size;
@@ -645,7 +251,7 @@ end
     thread_workload_distribution(params::ArmonParameters; threads=nothing)
     thread_workload_distribution(
         threads::Int, grid_size::Tuple;
-        scotch=true, simple=false, diffuse=true, perimeter_first=false, kwargs...
+        scotch=true, simple=false, perimeter_first=false, kwargs...
     )
 
 Distribute each block in `grid_size` among the `threads`, as evenly as possible.
@@ -662,7 +268,7 @@ By doing so, communications between threads may be overlapped more frequently.
 """
 function thread_workload_distribution(
     threads::Int, grid_size::Tuple;
-    scotch=true, simple=false, diffuse=true, perimeter_first=false, kwargs...
+    scotch=true, simple=false, perimeter_first=false, kwargs...
 )
     if simple
         threads_workload = simple_workload_distribution(threads, grid_size)
@@ -673,9 +279,7 @@ function thread_workload_distribution(
             sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
         end
     else
-        blk_grid, threads_workload = square_block_distribution(threads, grid_size)
-        diffuse && diffuse_workload!(threads_workload, blk_grid, grid_size; kwargs...)
-        perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
+        error("unknown workload distribution, expected `simple == true` or `scotch == true`")
     end
     return threads_workload
 end

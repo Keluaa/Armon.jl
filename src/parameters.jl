@@ -99,13 +99,9 @@ could avoid those by doing it in two steps.
 
 Dictates how blocks are distributed among threads when `async_cycle == true`:
 - `:simple` trivially spreads all blocks to all threads evenly
-- `:square` divides the block grid into rectangles (closely shaped as squares) for each thread, with
-  the goal of minimizing the perimeter of rectangles to reduce the interaction with other threads as
-  much as possible
-- `:sorted_square` is the same as `:square`, but additionally sorts the blocks to work on those at
-  the perimeter of the square first, reducing the likelyness of waiting for neighbouring threads
 - `:scotch` uses the [`Scotch`](https://gitlab.inria.fr/scotch/scotch) solver to partition the block grid
-- `:sorted_scotch` is the same as `:scotch`, but with the same additional sorting strategy of `:sorted_square`
+- `:sorted_scotch` is the same as `:scotch`, but additionally sorts the blocks to work on those at
+  the perimeter of the square first, reducing the likelyness of waiting for neighbouring threads
 - `:weighted_sorted_scotch` takes into account the number of cells in each block instead of assuming
   an even workload for all blocks
 
@@ -519,7 +515,7 @@ function init_device(params::ArmonParameters;
     length(block_size) > 2 && solver_error(:config, "Expected `block_size` to contain up to 2 elements, got: $block_size")
     params.block_size = tuple(block_size..., ntuple(Returns(1), 2 - length(block_size))...)
 
-    if !(workload_distribution in (:simple, :square, :sorted_square, :scotch, :sorted_scotch, :weighted_sorted_scotch))
+    if !(workload_distribution in (:simple, :scotch, :sorted_scotch, :weighted_sorted_scotch))
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
     end
     params.workload_distribution = workload_distribution
