@@ -165,25 +165,9 @@ The partitioning is random, hence results may vary. To counterbalance this, givi
 repeat the partitioning `retries` times and keep the best one.
 """
 function scotch_grid_partition(
-    threads, grid_size;
-    strategy=:default, workload_tolerance=0, repart=false, retries=10, weighted=false,
-    static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0
+    graph::Scotch.Graph, strat::Scotch.Strat, threads, grid_size;
+    repart=false, retries=10, weighted=false
 )
-    graph = grid_to_scotch_graph(grid_size;
-        weighted, static_sized_grid, block_size, remainder_block_size, ghosts
-    )
-
-    # TODO: with `Scotch.graph_map` it is possible to partition the grid according to a topology of threads, is it better?
-    # -> by adding weights to the topology it might be possible to reproduce the processor topology to account for e.g. NUMA or caches
-    # -> cores sharing the same L3      => dense graph + weight 1
-    # -> cores on the same NUMA         => dense graph + weight 2?
-    # -> cores on the same socket       => dense graph + weight 4?
-    # -> cores on the different sockets => dense graph + weight 8?
-
-    # TODO: for larger grids, using graph coarsening might be necessary (+ it may help the solver to reach better solutions)
-
-    # TODO: results are random, impose the RNG seed or do something else (repeatedly call the solver N times and keep the best?)
-    strat = Scotch.strat_build(:graph_map; strategy, parts=threads, imbalance_ratio=Float64(workload_tolerance))
     partition = Scotch.graph_part(graph, threads, strat)
 
     if repart
@@ -206,8 +190,7 @@ function scotch_grid_partition(
         best_eveness   = weighted ? workload_eveness(best_workload, block_weights, grid_size) : workload_eveness(best_workload)
         best_perimeter = total_workload_perimeter(best_workload)
         for _ in 1:retries
-            # TODO: reuse the same graph for the retries, as introduces unnecessary overhead
-            new_threads_workload = scotch_grid_partition(threads, grid_size; strategy, workload_tolerance, repart, retries=0)
+            new_threads_workload = scotch_grid_partition(graph, strat, threads, grid_size; repart, retries=0, weighted)
             new_threads_workload == best_workload && continue
 
             new_eveness = weighted ? workload_eveness(new_threads_workload, block_weights, grid_size) : workload_eveness(new_threads_workload)
@@ -225,6 +208,27 @@ function scotch_grid_partition(
     else
         return threads_workload
     end
+end
+
+
+function scotch_grid_partition(
+    threads, grid_size;
+    strategy=:default, workload_tolerance=0, weighted=false,
+    static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0,
+    kwargs...
+)
+    # TODO: for larger grids, using graph coarsening might be necessary (+ it may help the solver to reach better solutions)
+    graph = grid_to_scotch_graph(grid_size;
+        weighted, static_sized_grid, block_size, remainder_block_size, ghosts
+    )
+    # TODO: with `Scotch.graph_map` it is possible to partition the grid according to a topology of threads, is it better?
+    # -> by adding weights to the topology it might be possible to reproduce the processor topology to account for e.g. NUMA or caches
+    # -> cores sharing the same L3      => dense graph + weight 1
+    # -> cores on the same NUMA         => dense graph + weight 2?
+    # -> cores on the same socket       => dense graph + weight 4?
+    # -> cores on the different sockets => dense graph + weight 8?
+    strat = Scotch.strat_build(:graph_map; strategy, parts=threads, imbalance_ratio=Float64(workload_tolerance))
+    return scotch_grid_partition(graph, strat, threads, grid_size; weighted, kwargs...)
 end
 
 

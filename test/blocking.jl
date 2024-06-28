@@ -293,7 +293,7 @@ end
 
 
 @testset "Workload Distribution" begin
-    function check_distribution(params, parts; kwargs...)
+    function check_distribution(params, parts, weighted=false; kwargs...)
         grid_size, _, _ = Armon.grid_dimensions(params)
         distrib = Armon.thread_workload_distribution(params; threads=parts, kwargs...)
 
@@ -303,8 +303,10 @@ end
 
         distrib_count = length.(distrib)
         @test sum(distrib_count) == prod(grid_size)
-        @test maximum(distrib_count) ≤ expected_max_workload
-        @test sum(abs.(distrib_count .- expected_workload)) == expected_remainder
+
+        # Weighted distribution have much more variation to them, therefore we can't test them as precisely
+        !weighted && @test maximum(distrib_count) ≤ expected_max_workload
+        !weighted && @test sum(abs.(distrib_count .- expected_workload)) == expected_remainder
 
         blk_grid = Armon.block_grid_from_workload(grid_size, distrib)
         @test count(==(0), blk_grid) == 0  # All blocks are assigned to a thread
@@ -345,12 +347,8 @@ end
             end
 
             ref_params = get_reference_params(:Sod, Float64; nghost, N, block_size, workload_distribution=:weighted_sorted_scotch)
-            @testset "Weighted - parts=$parts" for parts in (1, #=4, 7, 59, =# 64)
-                # For some reason, the 4, 7 and 59 parts tests will rarely fail, due to the Scotch
-                # RNG advancing differently when it happens.
-                # The 59 parts fails ~10% of the time, while the 7 parts fails ~1% of the time.
-                # Adding more retries does not help, so it seems that this a Scotch bug.
-                check_distribution(ref_params, parts)
+            @testset "Weighted - parts=$parts" for parts in (1, 4, 7, 59, 64)
+                check_distribution(ref_params, parts, true)
             end
         end
     end

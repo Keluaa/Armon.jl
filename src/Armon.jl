@@ -10,7 +10,7 @@ using NUMA
 using TimerOutputs
 using Preferences
 using EnumX
-using Scotch  # TODO: turn it into an extension?
+using Scotch
 
 export ArmonParameters, BlockGrid, SolverStats, armon, data_type, memory_required
 export device_to_host!, host_to_device!
