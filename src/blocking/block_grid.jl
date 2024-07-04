@@ -442,7 +442,7 @@ block_idx(grid::BlockGrid, idx::CartesianIndex) =
 Linear index in `grid.edge_blocks` of the block at `idx`, along the (dynamically-sized) edges of the
 `grid`.
 """
-function edge_block_idx(grid::BlockGrid, idx::CartesianIndex)
+function edge_block_idx(grid::BlockGrid, idx::CartesianIndex, ::Val{:slow})
     offset = 0
     for (block_count, blocks_pos, _) in EdgeBlockRegions(grid)
         if idx in blocks_pos
@@ -452,6 +452,62 @@ function edge_block_idx(grid::BlockGrid, idx::CartesianIndex)
         offset += block_count
     end
     error("Block index $idx is not at the edge of the grid $grid")
+end
+
+
+@generated function edge_block_idx(grid::BlockGrid, idx::CartesianIndex{N}) where {N}
+    if N > 8
+        # Don't exceed 255 if statements. Above that, unrolling the loop seems too heavy to be more efficient.
+        return quote edge_block_idx(grid, idx, Val{:slow}()) end
+    end
+
+    # Here we "simply" unroll the iteration over `EdgeBlockRegions` of the slow version of `edge_block_idx`
+    # There is a lot of additional optimizations the compiler is able to do in this version, but the
+    # most important part is the fact that this version requires 0 allocations.
+    # For N=2, we go from >1µs to <10ns in execution time: a x100 improvement. Since this function is
+    # can be used very frequently in `solver_async_cycle`, it is a worthwhile optimization.
+
+    edge_regions = repeat([(false, true)], N)
+    iter = Iterators.product(edge_regions...)
+    iter = Iterators.drop(iter, 1)
+
+    expr = quote
+        grid_size = grid.grid_size
+        static_sized_grid = grid.static_sized_grid
+        offset = 0
+    end
+
+    for side_states in iter
+        cond = Expr(:&&)  # crazy fact: the && expression gives coherent results even with 0 or 1 arguments
+        for (i, side_state) in enumerate(side_states)
+            !side_state && continue
+            push!(cond.args, :(grid_size[$i] != static_sized_grid[$i]))
+        end
+
+        side_states_t = Tuple(side_states)
+        test_edge_region = quote
+            if $cond
+                # Equivalent to a subset of `Base.iterate(::EdgeBlockRegions)` (see above)
+                first_pos = CartesianIndex(ifelse.($side_states_t, grid_size, 1))
+                last_pos  = CartesianIndex(ifelse.($side_states_t, grid_size, max.(static_sized_grid, grid_size .- 1)))
+                edge_block_range = first_pos:last_pos
+                if idx in edge_block_range
+                    pos_idx = idx - first(edge_block_range) + oneunit(idx)  # `block_pos[pos_idx] == idx`
+                    return LinearIndices(edge_block_range)[pos_idx] + offset
+                else
+                    offset += length(edge_block_range)
+                end
+            end
+        end
+
+        push!(expr.args, test_edge_region)
+    end
+
+    push!(expr.args, quote
+        error("Block index $idx is not at the edge of the grid $grid")
+    end)
+
+    return expr
 end
 
 

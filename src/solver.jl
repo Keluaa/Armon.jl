@@ -202,6 +202,7 @@ function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiti
     # continue further (e.g. another process' thread is bound to the same core as this thread).
     # Wait twice as long as the previous time, starting from 2µs and up to 8ms
     µs_to_wait = 2^clamp(stop_count, 1, 13)
+    # TODO: the thread is not marked as GC_STATE_SAFE, therefore this wait may prevent GC
     Libc.systemsleep(µs_to_wait * 1e-6)  # this is `usleep` on Linux btw
     return time_ns() - wait_start, false
 end
