@@ -9,6 +9,7 @@ SolverState
 first_state
 SolverStep
 block_state_machine
+solver_cycle_async
 ```
 
 ## Time step reduction
