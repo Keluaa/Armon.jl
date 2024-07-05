@@ -57,11 +57,8 @@ package "CFD Solver" as pkg_solver {
             **Time Step**
             read from ""u"", ""v"", ""c""
             uses 1 tmp array on GPU
+            [["[Global time step](@ref strct_global_time_step)" See below]]
         ]
-
-        package "Global Time Step" as pkg_global_time_step {
-            label "See below  "
-        }
 
         card "Axes Sweeps (X, Y...)" as solver_sweeps {
             rectangle step_EOS [
@@ -74,6 +71,7 @@ package "CFD Solver" as pkg_solver {
                 **Halo exchange**
                 7 variables to
                 exchange per cell
+                [["[Halo exchange](@ref strct_halo_exchange)" See below]]
             ]
             rectangle step_riemann [
                 **Riemann solver**
@@ -138,14 +136,9 @@ package "CFD Solver" as pkg_solver {
             ""Euler2ndProjection""
         ]
 
-        package "Halo Exchange" as pkg_halo_exchange {
-            label "See below"
-        }
-
         solver_sweeps -> axis_splitting
         step_riemann -> limiters
         step_projection -> projection_schemes
-        step_halo_exchange -> pkg_halo_exchange
     }
 
     rectangle "Solver Advancement" as block_iter {
@@ -154,7 +147,7 @@ package "CFD Solver" as pkg_solver {
             ""time_loop""
             Runs the all solver iterations:
             * ""reset!(grid)"": reset all states
-              this allows to reuse the same ""[["[`BlockGrid`](@ref)" BlockGrid]]""
+              this allows to reuse the same ""[[`BlockGrid`]]""
               across multiple solver executions
             * run the solver cycles
             * print the final state (if verbose)
@@ -176,33 +169,8 @@ package "CFD Solver" as pkg_solver {
                 on all blocks, block by block.
                 Blocks are evenly dispatched
                 to each thread.
+                ""[["[Solver async cycle](@ref strct_solver_async_cycle)" See below]]""
             ]
-
-            rectangle "Thread loop" as solver_async_cycle_thread {
-                usecase thread_cycle_loop_start [
-                    Apply once on each of
-                    the thread's block.
-                    Same order everytime.
-                    **Implicit busy wait**
-                ]
-
-                rectangle block_state_machine [
-                    ""[["[`block_state_machine`](@ref)" block_state_machine]]""
-                    Advances the state of a
-                    block by applying solver steps.
-                    Stop when we must wait.
-                    Kernels are single-threaded.
-                ]
-
-                hexagon cond_thread_cycle_end [
-                    All of the thread's
-                    blocks have finished?
-                ]
-
-                thread_cycle_loop_start --> block_state_machine
-                block_state_machine --> cond_thread_cycle_end
-                cond_thread_cycle_end --> thread_cycle_loop_start : no
-            }
 
             rectangle solver_cycle_end [
                 End of cycle
@@ -221,10 +189,9 @@ package "CFD Solver" as pkg_solver {
 
             cond_async_cycle --> solver_cycle : no
             cond_async_cycle --> solver_async_cycle : yes
-            solver_async_cycle --> thread_cycle_loop_start
 
             solver_cycle --> solver_cycle_end
-            cond_thread_cycle_end --> solver_cycle_end : yes
+            solver_async_cycle --> solver_cycle_end
             solver_cycle_end -> next_cycle
         }
 
@@ -232,7 +199,7 @@ package "CFD Solver" as pkg_solver {
     }
 
     package "Solver State" {
-        frame """[["[`SolverState`](@ref)" SolverState]]""" as solver_state {
+        frame """[[`SolverState`]]""" as solver_state {
             rectangle """step""" as solver_state_step
             rectangle """global_dt""" as solver_state_global_dt
 
@@ -247,7 +214,7 @@ package "CFD Solver" as pkg_solver {
         }
 
         card solver_step [
-            ""[["[`SolverStep`](@ref)" SolverStep]]""
+            ""[[`SolverStep`]]""
             ====
             ""NewCycle""
             ----
@@ -275,19 +242,17 @@ package "CFD Solver" as pkg_solver {
         solver_state_step --> solver_step
     }
 
-    step_time_step -> pkg_global_time_step
-
     solver_state_solver_params --> solver_steps
 }
 
 rectangle armon [
-    ""[["[`armon`](@ref)" armon]]""
+    ""[[`armon`]]""
     Main entry point of the solver.
-    Given a ""[["[`ArmonParameters`](@ref)" ArmonParameters]]"" struct:
-    * Creates a new ""[["[`BlockGrid`](@ref)" BlockGrid]]""
+    Given a ""[[`ArmonParameters`]]"" struct:
+    * Creates a new ""[[`BlockGrid`]]""
     * Apply ""init_test""
     * run ""time_loop""
-    * Builds a ""[["[`SolverStats`](@ref)" SolverStats]]"" from the results
+    * Builds a ""[[`SolverStats`]]"" from the results
 ]
 
 armon --> solver_init_test

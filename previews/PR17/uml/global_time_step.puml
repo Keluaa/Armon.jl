@@ -15,7 +15,7 @@
 </style>
 
 package "Global Time Step" {
-    frame """[["[`GlobalTimeStep`](@ref)" GlobalTimeStep]]""" as global_time_step {
+    frame """[[`GlobalTimeStep`]]""" as global_time_step {
         rectangle """state""" as global_time_step_state
         rectangle """next_cycle_dt""" as global_time_step_next_cycle_dt
         rectangle """next_dt""" as global_time_step_next_dt
@@ -24,24 +24,24 @@ package "Global Time Step" {
         card time_step_state [
             ""TimeStepState""
             ====
-            ""[["[`TimeStepState.Ready`](@ref)" Ready]]""
+            ""[[`TimeStepState.Ready` Ready]]""
             ----
-            ""[["[`TimeStepState.AllContributed`](@ref)" AllContributed]]""
+            ""[[`TimeStepState.AllContributed` AllContributed]]""
             ----
-            ""[["[`TimeStepState.DoingMPI`](@ref)" DoingMPI]]""
+            ""[[`TimeStepState.DoingMPI` DoingMPI]]""
             ----
-            ""[["[`TimeStepState.WaitingForMPI`](@ref)" WaitingForMPI]]""
+            ""[[`TimeStepState.WaitingForMPI` WaitingForMPI]]""
             ----
-            ""[["[`TimeStepState.Done`](@ref)" Done]]""
+            ""[[`TimeStepState.Done` Done]]""
         ]
 
         global_time_step_state --> time_step_state
     }
 
-    usecase """[["[`GlobalTimeStep`](@ref)" GlobalTimeStep]]"" instance" as global_time_step_instance
+    usecase """[[`GlobalTimeStep`]]"" instance" as global_time_step_instance
 
     package "Time step reduction" as pkg_blk_time_step {
-        rectangle """[["[`next_time_step`](@ref)" next_time_step]]""" as time_step_next_time_step
+        rectangle """[[`next_time_step`]]""" as time_step_next_time_step
         hexagon cond_time_step_wait [
             MPI reduce in progress?
             This means that the previous
