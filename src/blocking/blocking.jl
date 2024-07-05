@@ -353,7 +353,7 @@ If `global_ghosts == true`, then the ghost cells of at the border of the global 
 If `all_ghosts == true`, then the ghost cells of at the border of all blocks are also returned.
 
 ```jldoctest
-julia> params = ArmonParameters(; N=(24, 8), nghost=4, block_size=(20, 12), use_MPI=false);
+julia> params = ArmonParameters(; N=(24, 8), nghost=4, block_size=(20, 12), use_MPI=false, numa_aware=false);
 
 julia> grid = BlockGrid(params);
 

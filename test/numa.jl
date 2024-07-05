@@ -3,7 +3,7 @@ import NUMA
 using ThreadPinning
 
 @testset "NUMA" begin
-    if NUMA.numa_available()
+    if !Sys.iswindows() && NUMA.numa_available()
         pinthreads(:cores)
         tid_map = Armon.tid_to_numa_node_map()
     else
@@ -109,7 +109,7 @@ using ThreadPinning
     end
 
 
-    if NUMA.numa_available()
+    if !Sys.iswindows() && NUMA.numa_available()
         @testset "move_pages" begin
             GC.gc(true)
             # It is a bit difficult to find an array size for which the kernel will always give us

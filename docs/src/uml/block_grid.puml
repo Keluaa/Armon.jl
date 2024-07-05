@@ -1,0 +1,126 @@
+@startuml Armon.jl#block_grid
+
+<style>
+.mpi {
+  BackGroundColor #22ccaa
+  LineThickness 1
+  LineColor black
+}
+
+.pause {
+  BackGroundColor #ee1100
+  LineThickness 1
+  LineColor black
+}
+</style>
+
+package "Block Grid" as pkg_block_grid {
+    frame """[[`BlockGrid`]]""" as block_grid {
+
+        node "Grid blocks" as grid_blocks {
+            rectangle block_grid_blocks [
+                ""blocks""
+                The blocks of size ""block_size""
+            ]
+            rectangle block_grid_edge_blocks [
+                ""edge_blocks""
+                The blocks at the edge of the grid
+                Usually smaller than ""block_size"".
+                Since they mustn't be smaller than
+                ""nghosts"", in some cases they can
+                be larger than ""block_size"".
+            ]
+            rectangle block_grid_remote_blocks [
+                ""remote_blocks""
+                Represent the distant blocks
+                connected to our local blocks
+                ""rank == -1"" if they don't exist
+            ]
+        }
+
+        rectangle block_grid_dims [
+            ""grid_size""
+            ""static_sized_grid""
+            ""cell_size""
+            ""edge_size""
+            Dimensions of the grid
+        ]
+
+        block_grid_blocks --> block_grid_remote_blocks : connected to
+        block_grid_edge_blocks --> block_grid_remote_blocks : connected to
+        block_grid_blocks <-> block_grid_edge_blocks : connected to
+    }
+
+    rectangle block_grid_dimensions [
+        ""[[`grid_dimensions`]]""
+        Computes the dimensions of
+        the grid
+    ]
+
+    rectangle block_grid_mem_required [
+        ""[[`memory_required`]]""
+        Estimates the total memory
+        required for a ""[[`BlockGrid`]]""
+    ]
+
+    rectangle """[[`RemoteBlockRegions`]]""" as block_grid_RemoteBlockRegions
+    rectangle """[[`EdgeBlockRegions`]]""" as block_grid_EdgeBlockRegions
+
+    block_grid_dimensions --> block_grid_dims
+    block_grid_dimensions <- block_grid_mem_required
+
+    frame """[[`LocalTaskBlock`]]""" as local_task_block {
+        usecase """device_data""" as local_task_block_device_data
+        usecase """host_data""" as local_task_block_host_data
+
+        rectangle local_task_block_data [
+            ""[[`BlockData`]]""
+            Holds all arrays of a block
+        ]
+
+        rectangle local_task_block_state [
+            ""state""
+            Individual state of the block
+            A ""[[`SolverState`]]""
+        ]
+
+        rectangle local_task_block_neighbours [
+            ""neighbours""
+            References to neighbouring blocks
+        ]
+
+        rectangle local_task_block_exchanges [
+            ""exchanges""
+            The ""[[`BlockInterface`]]s""
+            managing local halo exchanges
+        ]
+
+        local_task_block_neighbours <--> local_task_block_exchanges
+
+        local_task_block_device_data --> local_task_block_data
+        local_task_block_host_data --> local_task_block_data
+    }
+
+    rectangle block_grid_row_iterator [
+        ""[[`BlockRowIterator`]]""
+        Iterates a grid row by row
+    ]
+
+    rectangle block_grid_iter_blocks [
+        ""[[`@iter_blocks`]]""
+        Iterates a grid block by block.
+        Is multithreaded.
+        Respects the distribution of
+        blocks to threads.
+    ]
+
+    block_grid_RemoteBlockRegions -up-> block_grid_remote_blocks : Iterates
+    block_grid_EdgeBlockRegions -down-> block_grid_edge_blocks : Iterates
+    block_grid_row_iterator --> grid_blocks
+    block_grid_iter_blocks --> grid_blocks
+
+    block_grid_blocks --> local_task_block
+    block_grid_edge_blocks --> local_task_block
+}
+
+@enduml
