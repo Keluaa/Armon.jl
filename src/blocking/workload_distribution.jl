@@ -178,7 +178,7 @@ function scotch_grid_partition(
     end
 
     threads_workload = map(1:threads) do tid
-        indices = findall(==(tid), partition)
+        indices = findall(==(tid - 1), partition)
         return CartesianIndices(grid_size)[indices]
     end
 
