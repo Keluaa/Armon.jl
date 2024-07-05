@@ -1,0 +1,93 @@
+@startuml state_machine_and_logging
+allowmixing
+
+<style>
+.mpi {
+  BackGroundColor #22ccaa
+  LineThickness 1
+  LineColor black
+}
+
+.pause {
+  BackGroundColor #ee1100
+  LineThickness 1
+  LineColor black
+}
+</style>
+
+frame """[[`solver_cycle_async`]]"" and logging" as solver_cycle_async {
+
+    rectangle "Thread loop" {
+
+        portin "Start of thread loop" as loop_start
+        portout "End of thread loop" as loop_end
+
+        usecase apply_on_all_blocs [
+            Apply on all blocks
+        ]
+
+        card bsm [
+            ""[[`block_state_machine`]]""
+            * Run all steps
+            * If state did not advance,
+              count it as a stall
+            * If state did advance,
+              record before/after metrics:
+              - n° of steps done
+              - which variables where used
+              - amount of stalls
+        ]
+
+        hexagon "Any progress on a block?" as if_progess
+        hexagon "No progress for a while?" as if_busy_wait
+        hexagon "All blocks are done?" as if_thread_done
+        diamond tmp
+
+        cloud active_wait << mpi >> [
+            ""MPI.Wait"" on the first
+            block with a pending request.
+
+            Otherwise we do a ""usleep"",
+            with twice the previous delay
+            for each consecutive sleep.
+        ]
+
+        loop_start -down-> apply_on_all_blocs
+        apply_on_all_blocs --> bsm
+        bsm --> if_progess
+        if_progess -> if_busy_wait : no
+        if_progess --> if_thread_done : yes
+        if_busy_wait --> if_thread_done : no
+        if_busy_wait --> active_wait : yes
+        active_wait -left-> if_thread_done
+        tmp -- if_thread_done : no
+        tmp -left-> apply_on_all_blocs
+        if_thread_done --> loop_end : yes
+    }
+
+    rectangle thread_logging [
+        Record about the thread's
+        blocks of this cycle:
+        * total thread cycle time
+        * total MPI wait time
+        * active wait count
+        * [[`block_state_machine`]]
+          call count
+    ]
+
+    frame """[[`BlockLogEvent`]]"" record" as block_log_record
+    bsm -> block_log_record
+
+    frame """[[`ThreadLogEvent`]]"" record" as thread_log_record
+    loop_end --> thread_logging
+    thread_logging -> thread_log_record
+
+    rectangle stored_in_block_grid [
+        All logs are stored in the ""[[`BlockGrid`]]""
+    ]
+
+    thread_log_record -> stored_in_block_grid
+    block_log_record --> stored_in_block_grid
+}
+
+@enduml

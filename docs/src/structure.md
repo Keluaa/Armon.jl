@@ -6,20 +6,25 @@ CurrentModule = Armon
 
 ## Solver structure
 
-```@puml uml/structure.puml
+```@puml uml/structure.puml width=exact
 ```
 
-## Halo exchange
+## [Solver async cycle](@id strct_solver_async_cycle)
 
-```@puml uml/halo_exchange.puml
+```@puml uml/async_cycle.puml width=exact
 ```
 
-## Global time step
+## [Halo exchange](@id strct_halo_exchange)
 
-```@puml uml/global_time_step.puml
+```@puml uml/halo_exchange.puml width=exact
+```
+
+## [Global time step](@id strct_global_time_step)
+
+```@puml uml/global_time_step.puml width=exact
 ```
 
 ## Block Grid
 
-```@puml uml/block_grid.puml
+```@puml uml/block_grid.puml width=exact
 ```
