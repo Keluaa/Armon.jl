@@ -14,10 +14,13 @@ Enumeration of the axes of a domain. Accepts values from `1` (X axis) to `126`.
 Only the first 3 axes are explicitly named.
 """
 module Axis
-    primitive type T <: Base.Enums.Enum{UInt8} 8 end 
+    primitive type T <: Base.Enums.Enum{UInt8} 8 end
+
+    @noinline dim_error(d::Integer) = throw(ArgumentError("Axis index must be ≥ 1 and ≤ 127, got: $d"))
+    @inline check_dim(d::Integer) = ((1 ≤ d ≤ 127) || dim_error(d); UInt8(d))
 
     function T(a::Integer)
-        !(1 ≤ a ≤ 126) && throw(ArgumentError("Axis index must be ≥ 1 and ≤ 126"))
+        check_dim(a)
         return Core.bitcast(T, Base.convert(UInt8, a))
     end
 
@@ -25,7 +28,7 @@ module Axis
     Base.cconvert(::Type{UInt8}, a::T) = UInt8(a)::UInt8
 
     Base.typemin(::Type{T}) = T(UInt8(1))
-    Base.typemax(::Type{T}) = T(UInt8(126))  # Nearest multiple of two before `typemax(UInt8)÷2`
+    Base.typemax(::Type{T}) = T(UInt8(127))  # `typemax(UInt8)÷2` for compat with `Side`
 
     axis_name(a::UInt8) = 1 ≤ a ≤ 3 ? (:X, :Y, :Z)[a] : Symbol(:Axis_, a)
     axis_name(a::T) = axis_name(UInt8(a))
@@ -66,8 +69,8 @@ julia> Armon.axes_of(3)
 (Armon.Axis.X, Armon.Axis.Y, Armon.Axis.Z)
 ```
 """
-axes_of(::Val{dim}) where {dim} = ntuple(Axis.T, dim)
-axes_of(dim::Integer) = axes_of(Val(dim))
+axes_of(dim::Integer) = ntuple(Axis.T, dim)
+axes_of(::Val{dim}) where {dim} = axes_of(dim)
 
 
 """
@@ -84,11 +87,15 @@ julia> Armon.next_axis(Armon.Axis.Z, 3)
 X::Axis.T = 1
 ```
 """
-next_axis(axis::Axis.T, ::Val{dim}) where {dim} = Axis.T(mod1(UInt(axis) + 1, dim))
-next_axis(axis::Axis.T, dim::Integer) = next_axis(axis, Val(dim))
+next_axis(axis::Axis.T, dim::Integer) = Axis.T(mod1(UInt8(axis) + 1, Axis.check_dim(dim)))
+next_axis(axis::Axis.T, ::Val{dim}) where {dim} = next_axis(axis, dim)
 
 
-offset_to(axis::Axis.T) = ntuple(i -> i == Integer(axis) ? 1 : 0, dim)
+offset_to(axis::Axis.T, ::Val{dim}) where {dim} = offset_to(axis, dim)
+function offset_to(axis::Axis.T, dim::Integer)
+    i_ax = Int64(axis)
+    return ntuple(i -> i == i_ax ? 1 : 0, dim)
+end
 
 
 """
@@ -98,10 +105,13 @@ Enumeration of the sides of a domain. Accepts values from `1` (Left side) to `25
 Only the sides of the first 3 axes are explicitly named.
 """
 module Side
-    primitive type T <: Base.Enums.Enum{UInt8} 8 end 
+    primitive type T <: Base.Enums.Enum{UInt8} 8 end
+
+    @noinline side_error(s::Integer) = throw(ArgumentError("Side index must be ≥ 1 and ≤ 254, got: $s"))
+    @inline side_check(s::Integer) = (1 ≤ s ≤ 254) || side_error(s)
 
     function T(s::Integer)
-        !(1 ≤ s ≤ 254) && throw(ArgumentError("Side index must be ≥ 1 and ≤ 254"))
+        side_check(s)
         return Core.bitcast(T, Base.convert(UInt8, s))
     end
 
@@ -111,7 +121,7 @@ module Side
     Base.typemin(::Type{T}) = T(UInt8(1))
     Base.typemax(::Type{T}) = T(UInt8(254))  # Nearest multiple of two before `typemax(UInt8)`
 
-    side_name(s::UInt8) = 1 ≤ s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Back, :Front)[s] : Symbol(:Side_, s)
+    side_name(s::UInt8) = 1 ≤ s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Front, :Back)[s] : Symbol(:Side_, s)
     side_name(s::T) = side_name(UInt8(s))
     Base.Symbol(s::T) = side_name(s)
     Base.Enums._symbol(s::T) = side_name(s)
@@ -133,12 +143,13 @@ module Side
     Base.instances(::Type{T}) = error("instances of Side should not be iterated, use `sides_of(dim)`")
     Base.Enums.namemap(::Type{T}) = error("names of Side should not be iterated, use `Symbol.(sides_of(dim))`")
 
+    # The names respect the right-hand rule, with the Z axis facing you, and the Y axis going up.
     const Left   = T(1)
     const Right  = T(2)
     const Bottom = T(3)
     const Top    = T(4)
-    const Back   = T(5)
-    const Front  = T(6)
+    const Front  = T(5)
+    const Back   = T(6)
 end
 
 
@@ -153,8 +164,8 @@ julia> Armon.sides_of(2)
 (Armon.Side.Left, Armon.Side.Right, Armon.Side.Bottom, Armon.Side.Top)
 ```
 """
-sides_of(::Val{dim}) where {dim} = ntuple(Side.T, dim*2)
-sides_of(dim::Integer) = sides_of(Val(dim))
+sides_of(dim::Integer) = ntuple(Side.T, dim*2)
+sides_of(::Val{dim}) where {dim} = sides_of(dim)
 
 
 """
@@ -167,7 +178,7 @@ julia> Armon.sides_along(Armon.Axis.X)
 (Armon.Side.Left, Armon.Side.Right)
 
 julia> Armon.sides_along(Armon.Axis.Z)
-(Armon.Side.Back, Armon.Side.Front)
+(Armon.Side.Front, Armon.Side.Back)
 ```
 """
 sides_along(ax::Axis.T) = (Side.T(2*UInt8(ax)-1), Side.T(2*UInt8(ax)))
@@ -197,11 +208,11 @@ Tuple of the first sides of all axes up to `dim`.
 
 ```jldoctest
 julia> Armon.first_sides(3)
-(Armon.Side.Left, Armon.Side.Bottom, Armon.Side.Back)
+(Armon.Side.Left, Armon.Side.Bottom, Armon.Side.Front)
 ```
 """
-first_sides(::Val{dim}) where {dim} = ntuple(d -> Side.T(2*d-1), dim)
-first_sides(dim::Integer) = first_sides(Val(dim))
+first_sides(dim::Integer) = ntuple(d -> Side.T(2*d-1), dim)
+first_sides(::Val{dim}) where {dim} = first_sides(dim)
 
 
 """
@@ -228,11 +239,11 @@ Tuple of the last sides of all axes up to `dim`.
 
 ```jldoctest
 julia> Armon.last_sides(3)
-(Armon.Side.Right, Armon.Side.Top, Armon.Side.Front)
+(Armon.Side.Right, Armon.Side.Top, Armon.Side.Back)
 ```
 """
-last_sides(::Val{dim}) where {dim} = ntuple(d -> Side.T(2*d), dim)
-last_sides(dim::Integer) = last_sides(Val(dim))
+last_sides(dim::Integer) = ntuple(d -> Side.T(2*d), dim)
+last_sides(::Val{dim}) where {dim} = last_sides(dim)
 
 
 """
@@ -245,7 +256,7 @@ julia> Armon.axis_of(Armon.Side.Left)
 X::Axis.T = 1
 ```
 """
-axis_of(s::Side.T) = Axis.T((Integer(s) - 1) >> 1 + 1)
+axis_of(s::Side.T) = Axis.T((UInt8(s) - 0x1) >> 1 + 0x1)
 
 
 """
@@ -258,7 +269,7 @@ julia> Armon.opposite_of(Armon.Side.Left)
 Right::Side.T = 2
 ```
 """
-opposite_of(s::Side.T) = first_side(s) ? Side.T(Integer(s)+1) : Side.T(Integer(s)-1)
+opposite_of(s::Side.T) = first_side(s) ? Side.T(UInt8(s)+0x1) : Side.T(UInt8(s)-0x1)
 
 
 """
@@ -274,8 +285,9 @@ julia> Armon.offset_to(Armon.Side.Top, 3)
 (0, 1, 0)
 ```
 """
+offset_to(s::Side.T, ::Val{dim}) where {dim} = offset_to(s, dim)
 function offset_to(s::Side.T, dim::Integer)
-    i_ax = Integer(axis_of(s))
+    i_ax = Int64(axis_of(s))
     if first_side(s)
         return ntuple(i -> i == i_ax ? -1 : 0, dim)
     else
@@ -311,8 +323,10 @@ end
     Neighbours{T, D}
 
 Immutable `Vector`-like object storing one `T` for each of [`sides_of(D)`](@ref).
-Can be indexed using [`Side`](@ref) (returns a `T`), [`Axis`](@ref) or `Int` (returns a `NTuple{2, T}`,
-one `T` for each side of the axis).
+Can be indexed using [`Side`](@ref) (returns a `T`), [`Axis`](@ref) or `Int`
+(returns a `NTuple{2, T}`, one `T` for each side of the axis).
+
+Custom accessors for each axis and side of the first 3 dimensions are also defined.
 
 ```jldoctest
 julia> n = Armon.Neighbours((ax, s) -> s, 2)
@@ -325,6 +339,12 @@ Left::Side.T = 1
 
 julia> n[Armon.Axis.X]
 (Armon.Side.Left, Armon.Side.Right)
+
+julia> n.Left
+Left::Side.T = 1
+
+julia> n.X
+(Armon.Side.Left, Armon.Side.Right)
 ```
 """
 struct Neighbours{T, D} <: AbstractVector{NTuple{2, T}}
@@ -332,17 +352,35 @@ struct Neighbours{T, D} <: AbstractVector{NTuple{2, T}}
 
     Neighbours{T, D}(val) where {T, D} = new{T, D}(val)
     Neighbours(val::NTuple{D, NTuple{2, T}}) where {T, D} = Neighbours{T, D}(val)
+    Neighbours(val::NTuple{0}) = Neighbours{Nothing, 0}(val)
 end
 
-Neighbours(f::Base.Callable, axes::Tuple{Vararg{Axis.T}}) = Neighbours(f.(axes))
-Neighbours(f::Base.Callable, dim::Integer) = Neighbours(ax -> f.(ax, sides_along(ax)), axes_of(dim))
+function Neighbours(f::Base.Callable, dim::Union{Integer, Val})
+    axis_generator = ax -> f.(ax, sides_along(ax))
+    axes = axes_of(dim)
+    return Neighbours(axis_generator.(axes))
+end
 
 Base.@propagate_inbounds Base.getindex(neigh::Neighbours, axis::Axis.T) = neigh.val[Integer(axis)]
 Base.@propagate_inbounds Base.getindex(neigh::Neighbours, side::Side.T) = neigh[axis_of(side)][1+last_side(side)]
-Base.@propagate_inbounds Base.getindex(neigh::Neighbours, i::Int) = neigh.val[i]
+Base.@propagate_inbounds Base.getindex(neigh::Neighbours, i::Integer)   = neigh.val[i]
 
 Base.IndexStyle(::Type{<:Neighbours}) = Base.IndexLinear()
 Base.size(::Neighbours{T, D}) where {T, D} = (D,)
+
+function Base.getproperty(neigh::Neighbours, sym::Symbol)
+    if     sym === :X      return neigh[Axis.X]
+    elseif sym === :Y      return neigh[Axis.Y]
+    elseif sym === :Z      return neigh[Axis.Z]
+    elseif sym === :Left   return neigh[Side.Left]
+    elseif sym === :Right  return neigh[Side.Right]
+    elseif sym === :Bottom return neigh[Side.Bottom]
+    elseif sym === :Top    return neigh[Side.Top]
+    elseif sym === :Front  return neigh[Side.Front]
+    elseif sym === :Back   return neigh[Side.Back]
+    else                   return getfield(neigh, sym)
+    end
+end
 
 
 """
@@ -373,9 +411,9 @@ struct SolverException <: Exception
 end
 
 
-solver_error(category::Symbol, msg::String) = throw(SolverException(category, msg))
+@noinline solver_error(category::Symbol, msg::String) = throw(SolverException(category, msg))
 
-function solver_error(category::Symbol, msgs::Vararg{Any, N}) where {N}
+@noinline function solver_error(category::Symbol, msgs::Vararg{Any, N}) where {N}
     throw(SolverException(category, Base.string(msgs...)))
 end
 
