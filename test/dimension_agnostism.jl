@@ -62,15 +62,15 @@ end
     @test UInt8(Side.Right)  == UInt8(Side.T(2)) == 0x2
     @test UInt8(Side.Bottom) == UInt8(Side.T(3)) == 0x3
     @test UInt8(Side.Top)    == UInt8(Side.T(4)) == 0x4
-    @test UInt8(Side.Front)  == UInt8(Side.T(5)) == 0x5
-    @test UInt8(Side.Back)   == UInt8(Side.T(6)) == 0x6
+    @test UInt8(Side.Back)   == UInt8(Side.T(5)) == 0x5
+    @test UInt8(Side.Front)  == UInt8(Side.T(6)) == 0x6
 
     @test Symbol(Side.Left)   === :Left
     @test Symbol(Side.Right)  === :Right
     @test Symbol(Side.Bottom) === :Bottom
     @test Symbol(Side.Top)    === :Top
-    @test Symbol(Side.Front)  === :Front
     @test Symbol(Side.Back)   === :Back
+    @test Symbol(Side.Front)  === :Front
     @test Symbol(Side.T(7))   === :Side_7
     @test Symbol(Side.T(254)) === :Side_254
 
@@ -80,7 +80,6 @@ end
 
 
 @testset "Axes and Sides" begin
-
     @test Armon.sides_along(Axis.X) == (Side.Left, Side.Right)
     @test Armon.sides_along(Axis.Y) == (Side.Bottom, Side.Top)
 

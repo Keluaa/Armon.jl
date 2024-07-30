@@ -121,7 +121,7 @@ module Side
     Base.typemin(::Type{T}) = T(UInt8(1))
     Base.typemax(::Type{T}) = T(UInt8(254))  # Nearest multiple of two before `typemax(UInt8)`
 
-    side_name(s::UInt8) = 1 ≤ s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Front, :Back)[s] : Symbol(:Side_, s)
+    side_name(s::UInt8) = 1 ≤ s ≤ 6 ? (:Left, :Right, :Bottom, :Top, :Back, :Front)[s] : Symbol(:Side_, s)
     side_name(s::T) = side_name(UInt8(s))
     Base.Symbol(s::T) = side_name(s)
     Base.Enums._symbol(s::T) = side_name(s)
@@ -148,8 +148,8 @@ module Side
     const Right  = T(2)
     const Bottom = T(3)
     const Top    = T(4)
-    const Front  = T(5)
-    const Back   = T(6)
+    const Back   = T(5)
+    const Front  = T(6)
 end
 
 
@@ -178,7 +178,7 @@ julia> Armon.sides_along(Armon.Axis.X)
 (Armon.Side.Left, Armon.Side.Right)
 
 julia> Armon.sides_along(Armon.Axis.Z)
-(Armon.Side.Front, Armon.Side.Back)
+(Armon.Side.Back, Armon.Side.Front)
 ```
 """
 sides_along(ax::Axis.T) = (Side.T(2*UInt8(ax)-1), Side.T(2*UInt8(ax)))
@@ -239,7 +239,7 @@ Tuple of the last sides of all axes up to `dim`.
 
 ```jldoctest
 julia> Armon.last_sides(3)
-(Armon.Side.Right, Armon.Side.Top, Armon.Side.Back)
+(Armon.Side.Right, Armon.Side.Top, Armon.Side.Front)
 ```
 """
 last_sides(dim::Integer) = ntuple(d -> Side.T(2*d), dim)
@@ -376,8 +376,8 @@ function Base.getproperty(neigh::Neighbours, sym::Symbol)
     elseif sym === :Right  return neigh[Side.Right]
     elseif sym === :Bottom return neigh[Side.Bottom]
     elseif sym === :Top    return neigh[Side.Top]
-    elseif sym === :Front  return neigh[Side.Front]
     elseif sym === :Back   return neigh[Side.Back]
+    elseif sym === :Front  return neigh[Side.Front]
     else                   return getfield(neigh, sym)
     end
 end
