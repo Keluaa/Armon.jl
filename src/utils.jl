@@ -26,6 +26,7 @@ module Axis
 
     (::Type{UInt8})(a::T) = UInt8(Core.bitcast(UInt8, a))::UInt8
     Base.cconvert(::Type{UInt8}, a::T) = UInt8(a)::UInt8
+    unsafe_cast(a::UInt8) = Core.bitcast(T, a)
 
     Base.typemin(::Type{T}) = T(UInt8(1))
     Base.typemax(::Type{T}) = T(UInt8(127))  # `typemax(UInt8)÷2` for compat with `Side`
@@ -58,12 +59,17 @@ module Axis
 end
 
 
+# Make Axis.T a valid index to any array
+Base.checkindex(::Type{Bool}, inds::AbstractUnitRange, axis::Axis.T) = Base.checkindex(Bool, inds, Int(axis))
+Base.to_index(axis::Axis.T) = Int(axis)
+
+
 """
     axes_of(::Val{dim})
     axes_of(dim::Integer)
 
 Axes for all dimensions up to `dim`.
-    
+
 ```jldoctest
 julia> Armon.axes_of(3)
 (Armon.Axis.X, Armon.Axis.Y, Armon.Axis.Z)
@@ -87,14 +93,14 @@ julia> Armon.next_axis(Armon.Axis.Z, 3)
 X::Axis.T = 1
 ```
 """
-next_axis(axis::Axis.T, dim::Integer) = Axis.T(mod1(UInt8(axis) + 1, Axis.check_dim(dim)))
+next_axis(axis::Axis.T, dim::Integer) = Axis.unsafe_cast(mod1(UInt8(axis) + 0x1, Axis.check_dim(dim)))
 next_axis(axis::Axis.T, ::Val{dim}) where {dim} = next_axis(axis, dim)
 
 
-offset_to(axis::Axis.T, ::Val{dim}) where {dim} = offset_to(axis, dim)
-function offset_to(axis::Axis.T, dim::Integer)
+offset_to(axis::Axis.T, ::Val{dim}, mag=1) where {dim} = offset_to(axis, dim, mag)
+function offset_to(axis::Axis.T, dim::Integer, mag::T=1) where {T}
     i_ax = Int64(axis)
-    return ntuple(i -> i == i_ax ? 1 : 0, dim)
+    return ntuple(i -> i == i_ax ? mag : zero(T), dim)
 end
 
 
@@ -117,6 +123,7 @@ module Side
 
     (::Type{UInt8})(s::T) = UInt8(Core.bitcast(UInt8, s))::UInt8
     Base.cconvert(::Type{UInt8}, s::T) = UInt8(s)::UInt8
+    unsafe_cast(s::UInt8) = Core.bitcast(T, s)
 
     Base.typemin(::Type{T}) = T(UInt8(1))
     Base.typemax(::Type{T}) = T(UInt8(254))  # Nearest multiple of two before `typemax(UInt8)`
@@ -181,7 +188,7 @@ julia> Armon.sides_along(Armon.Axis.Z)
 (Armon.Side.Back, Armon.Side.Front)
 ```
 """
-sides_along(ax::Axis.T) = (Side.T(2*UInt8(ax)-1), Side.T(2*UInt8(ax)))
+sides_along(ax::Axis.T) = (Side.unsafe_cast(0x2*UInt8(ax)-0x1), Side.unsafe_cast(0x2*UInt8(ax)))
 
 
 """
@@ -189,7 +196,7 @@ sides_along(ax::Axis.T) = (Side.T(2*UInt8(ax)-1), Side.T(2*UInt8(ax)))
 
 The first side of `sides_along(ax)`. Always at the lowest coordinates of `ax`.
 """
-first_side(ax::Axis.T) = Side.T(2*UInt8(ax)-1)
+first_side(ax::Axis.T) = Side.unsafe_cast(0x2*UInt8(ax)-0x1)
 
 
 """
@@ -220,7 +227,7 @@ first_sides(::Val{dim}) where {dim} = first_sides(dim)
 
 The last side of `sides_along(ax)`. Always at the highest coordinates of `ax`.
 """
-last_side(ax::Axis.T) = Side.T(2*UInt8(ax))
+last_side(ax::Axis.T) = Side.unsafe_cast(0x2*UInt8(ax))
 
 
 """
@@ -256,7 +263,7 @@ julia> Armon.axis_of(Armon.Side.Left)
 X::Axis.T = 1
 ```
 """
-axis_of(s::Side.T) = Axis.T((UInt8(s) - 0x1) >> 1 + 0x1)
+axis_of(s::Side.T) = Axis.unsafe_cast((UInt8(s) - 0x1) >> 1 + 0x1)
 
 
 """
@@ -269,11 +276,11 @@ julia> Armon.opposite_of(Armon.Side.Left)
 Right::Side.T = 2
 ```
 """
-opposite_of(s::Side.T) = first_side(s) ? Side.T(UInt8(s)+0x1) : Side.T(UInt8(s)-0x1)
+opposite_of(s::Side.T) = Side.unsafe_cast(((UInt8(s) - 0x1) ⊻ 0x1) + 0x1)
 
 
 """
-    offset_of(s::Side.T, dim::Integer)
+    offset_of(s::Side.T, dim::Integer, magnitude=1)
 
 An `NTuple{dim, Int}` offset going towards `s`.
 
@@ -283,15 +290,18 @@ julia> Armon.offset_to(Armon.Side.Left, 2)
 
 julia> Armon.offset_to(Armon.Side.Top, 3)
 (0, 1, 0)
+
+julia> Armon.offset_to(Armon.Side.Top, 3, 5)
+(0, 5, 0)
 ```
 """
-offset_to(s::Side.T, ::Val{dim}) where {dim} = offset_to(s, dim)
-function offset_to(s::Side.T, dim::Integer)
+offset_to(s::Side.T, ::Val{dim}, mag=1) where {dim} = offset_to(s, dim, mag)
+function offset_to(s::Side.T, dim::Integer, mag::T=1) where {T}
     i_ax = Int64(axis_of(s))
     if first_side(s)
-        return ntuple(i -> i == i_ax ? -1 : 0, dim)
+        return ntuple(i -> i == i_ax ? -mag : zero(T), dim)
     else
-        return ntuple(i -> i == i_ax ?  1 : 0, dim)
+        return ntuple(i -> i == i_ax ?  mag : zero(T), dim)
     end
 end
 
@@ -361,7 +371,12 @@ function Neighbours(f::Base.Callable, dim::Union{Integer, Val})
     return Neighbours(axis_generator.(axes))
 end
 
-Base.@propagate_inbounds Base.getindex(neigh::Neighbours, axis::Axis.T) = neigh.val[Integer(axis)]
+function Neighbours(f::Base.Callable, dim::Union{Integer, Val}, ::Type{T}) where {T}
+    axis_generator = ax -> (f.(ax, sides_along(ax))::NTuple{2, T})
+    axes = axes_of(dim)
+    return Neighbours{T, length(axes)}(axis_generator.(axes))
+end
+
 Base.@propagate_inbounds Base.getindex(neigh::Neighbours, side::Side.T) = neigh[axis_of(side)][1+last_side(side)]
 Base.@propagate_inbounds Base.getindex(neigh::Neighbours, i::Integer)   = neigh.val[i]
 
