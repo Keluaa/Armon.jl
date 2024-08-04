@@ -15,6 +15,7 @@ using Scotch
 export ArmonParameters, BlockGrid, SolverStats, armon
 
 # Forward declarations
+abstract type TestCase end
 abstract type Limiter end
 abstract type RiemannScheme end
 abstract type ProjectionScheme end
@@ -23,8 +24,8 @@ abstract type SplittingMethod end
 include("utils.jl")
 include("numa_utils.jl")
 include("domain_ranges.jl")
-include("tests.jl")
 include("parameters.jl")
+include("tests.jl")
 include("solver_state.jl")
 include("profiling.jl")
 include("generic_kernel.jl")

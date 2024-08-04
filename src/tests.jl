@@ -1,25 +1,36 @@
 
-abstract type TestCase end
-
 abstract type TwoStateTestCase <: TestCase end
-struct Sod       <: TwoStateTestCase end
-struct Sod_y     <: TwoStateTestCase end
+struct Sod{A}    <: TwoStateTestCase end
 struct Sod_circ  <: TwoStateTestCase end
 struct Bizarrium <: TwoStateTestCase end
 struct Sedov{T}  <: TwoStateTestCase
     r::T
+    center_cells_count::Int
 end
 
-create_test(::NTuple, ::Type{Test}) where {Test <: TestCase} = Test()
+create_test(::ArmonParameters, ::Type{Test}) where {Test <: TestCase} = Test()
 
-function create_test(Δx::NTuple, ::Type{Sedov})
-    T = eltype(Δx)
-    r_Sedov::T = hypot(Δx...) / sqrt(2)
-    return Sedov{T}(r_Sedov)
+function create_test(params::ArmonParameters{T}, ::Type{Sedov}) where {T}
+    # We want to place the energy at the center of the domain.
+    # `/2` to only include the center of cells at the center of the domain.
+    Δx = params.domain_size ./ params.N ./ 2
+    r_Sedov = T(hypot(Δx...))
+
+    # Adjustment to make sure rounding errors don't exclude a cell from the center
+    r_Sedov *= one(T) + 100*eps(T)
+
+    # The energy will be distributed to 2 cells in directions where there is an even number
+    # of cells in the mesh, up to `2^dim` cells. This way we don't have to compute
+    # intersections of cell regions with the center sphere of radius `r_Sedov`.
+    center_cells_count = 2^count(iseven, params.N)
+
+    return Sedov{T}(r_Sedov, center_cells_count)
 end
 
-test_from_name(::Val{:Sod})       = Sod
-test_from_name(::Val{:Sod_y})     = Sod_y
+test_from_name(::Val{:Sod})       = Sod{Axis.X}
+test_from_name(::Val{:Sod_x})     = Sod{Axis.X}
+test_from_name(::Val{:Sod_y})     = Sod{Axis.Y}
+test_from_name(::Val{:Sod_z})     = Sod{Axis.Z}
 test_from_name(::Val{:Sod_circ})  = Sod_circ
 test_from_name(::Val{:Bizarrium}) = Bizarrium
 test_from_name(::Val{:Sedov})     = Sedov
@@ -29,94 +40,86 @@ test_from_name(s::Symbol) = test_from_name(Val(s))
 
 test_name(::Test) where {Test <: TestCase} = nameof(Test)
 
-default_domain_size(::Type{<:TestCase}) = (1, 1)
-default_domain_size(::Type{Sedov}) = (2, 2)
+default_domain_size(::Type{<:TestCase}, D) = ntuple(Returns(1), D)
+default_domain_size(::Type{Sedov}, D) = ntuple(Returns(2), D)  # 2×2 domain centered at (0,0)
 
-default_domain_origin(::Type{<:TestCase}) = (0, 0)
-default_domain_origin(::Type{Sedov}) = (-1, -1)
+default_domain_origin(::Type{<:TestCase}, D) = ntuple(Returns(0), D)
+default_domain_origin(::Type{Sedov}, D) = ntuple(Returns(1), D)
 
-default_CFL(::Union{Sod, Sod_y, Sod_circ}) = 0.95
+default_CFL(::Union{Sod, Sod_circ}) = 0.95
 default_CFL(::Bizarrium) = 0.6
 default_CFL(::Sedov) = 0.7
 
-default_max_time(::Union{Sod, Sod_y, Sod_circ}) = 0.20
+default_max_time(::Union{Sod, Sod_circ}) = 0.20
 default_max_time(::Bizarrium) = 80e-6
 default_max_time(::Sedov) = 1.0
 
-specific_heat_ratio(::TestCase) = 7/5
+specific_heat_ratio(::TestCase) = 7/5  # Di-atomic perfect gas
 
 is_conservative(::TestCase) = true
 is_conservative(::Bizarrium) = false
 
 has_source_term(::TestCase) = false
 
-Base.show(io::IO, ::Sod)       = print(io, "Sod shock tube")
-Base.show(io::IO, ::Sod_y)     = print(io, "Sod shock tube (along the Y axis)")
-Base.show(io::IO, ::Sod_circ)  = print(io, "Sod shock tube (cylindrical symmetry around the Z axis)")
+Base.show(io::IO, ::Sod{A}) where {A} = print(io, "Sod shock tube (along the $(Symbol(A)) axis)")
+Base.show(io::IO, ::Sod_circ)  = print(io, "Sod shock tube (high-region in centered circle)")
 Base.show(io::IO, ::Bizarrium) = print(io, "Bizarrium")
 Base.show(io::IO, ::Sedov)     = print(io, "Sedov")
 
-test_region_high(x::Tuple{Vararg{T}}, ::Sod)       where {T} = x[1] ≤ 0.5
-test_region_high(x::Tuple{Vararg{T}}, ::Sod_y)     where {T} = x[2] ≤ 0.5
-test_region_high(x::Tuple{Vararg{T}}, ::Sod_circ)  where {T} = sum((x .- T(0.5)).^2) ≤ T(0.09)  # radius of 0.3 
+test_region_high(x::Tuple{Vararg{T}}, ::Sod{A})    where {T, A} = x[A] ≤ 0.5
+test_region_high(x::Tuple{Vararg{T}}, ::Sod_circ)  where {T} = sum((x .- T(0.5)).^2) ≤ T(0.3)^2
 test_region_high(x::Tuple{Vararg{T}}, ::Bizarrium) where {T} = x[1] ≤ 0.5
 test_region_high(x::Tuple{Vararg{T}}, s::Sedov{T}) where {T} = sum(x.^2) ≤ s.r^2
 
 
-struct InitTestParamsTwoState{T}
+struct InitTestParamsTwoState{T, D}
     high_ρ::T
     low_ρ::T
     high_E::T
     low_E::T
-    high_u::T
-    low_u::T
-    high_v::T
-    low_v::T
+    high_u::NTuple{D, T}
+    low_u::NTuple{D, T}
 
     function InitTestParamsTwoState(;
-        high_ρ::T, low_ρ::T, high_E::T, low_E::T, high_u::T, low_u::T, high_v::T, low_v::T
-    ) where {T}
-        new{T}(high_ρ, low_ρ, high_E, low_E, high_u, low_u, high_v, low_v)
+        high_ρ::T, low_ρ::T, high_E::T, low_E::T, high_u::NTuple{D, T}, low_u::NTuple{D, T}
+    ) where {T, D}
+        new{T, D}(high_ρ, low_ρ, high_E, low_E, high_u, low_u)
     end
 end
 
 
-function init_test_params(::Union{Sod, Sod_y, Sod_circ}, ::Type{T}) where {T}
+function init_test_params(::Union{Sod, Sod_circ}, ::Type{T}, D) where {T}
     return InitTestParamsTwoState(
         high_ρ = T(1.),
          low_ρ = T(0.125),
         high_E = T(2.5),
          low_E = T(2.0),
-        high_u = zero(T),
-         low_u = zero(T),
-        high_v = zero(T),
-         low_v = zero(T)
+        high_u = ntuple(Returns(zero(T)), D),
+         low_u = ntuple(Returns(zero(T)), D),
     )
 end
 
-function init_test_params(::Bizarrium, ::Type{T}) where {T}
+function init_test_params(::Bizarrium, ::Type{T}, D) where {T}
     return InitTestParamsTwoState(
         high_ρ = T(1.42857142857e+4),
          low_ρ = T(10000.),
         high_E = T(4.48657821135e+6),
          low_E = T(0.5 * 250^2),
-        high_u = zero(T),
-         low_u = T(250.),
-        high_v = zero(T),
-         low_v = zero(T)
+        high_u = ntuple(Returns(zero(0)), D),
+         low_u = ntuple(d -> d == 1 ? T(250.) : zero(T), D),
     )
 end
 
-function init_test_params(p::Sedov, ::Type{T}) where {T}
+function init_test_params(p::Sedov, ::Type{T}, D) where {T}
     return InitTestParamsTwoState(
         high_ρ = T(1.),
          low_ρ = T(1.),
-        high_E = T((1/1.033)^5 / (π * p.r^2)),  # E so that the blast wave reaches r=1 at t=1 (E is spread in a circle of radius `p.r`)
+        # E so that the blast wave reaches r=1 at t=1, and spread among the cells at the center of the mesh
+        # See https://en.wikipedia.org/wiki/Taylor%E2%80%93von_Neumann%E2%80%93Sedov_blast_wave#Mathematical_description
+        high_E = T((1/1.033)^5 / p.center_cells_count),
          low_E = T(2.5e-14),
-        high_u = zero(T),
-         low_u = zero(T),
-        high_v = zero(T),
-         low_v = zero(T)
+        high_u = ntuple(Returns(zero(T)), D),
+         low_u = ntuple(Returns(zero(T)), D),
     )
 end
 
@@ -124,91 +127,35 @@ end
 @enum BC FreeFlow Dirichlet
 
 
-struct Boundaries
-    left::BC
-    right::BC
-    bottom::BC
-    top::BC
-
-    Boundaries(; left, right, bottom, top) = new(left, right, bottom, top)
-end
-
-
-function Base.getindex(bounds::Boundaries, side::Side.T)
-    return if side == Side.Left
-        bounds.left
-    elseif side == Side.Right
-        bounds.right
-    elseif side == Side.Bottom
-        bounds.bottom
-    else
-        bounds.top
-    end
-end
-
-
-function boundary_condition(test, side::Side.T)::NTuple{2, Int}
-    condition = boundary_condition(test)[side]
+function boundary_condition(test, side::Side.T, D::Val{Dim}, ::Type{T}) where {Dim, T}
+    condition = boundary_condition(test, D)[side]
     if condition == FreeFlow
-        return (1, 1)
+        return ntuple(Returns(one(T)), Dim)
     else  # if condition == Dirichlet
-        if side in (Side.Left, Side.Right)
-            return (-1, 1)  # mirror along X
-        else
-            return (1, -1)  # mirror along Y
-        end
+        # mirror along the axis of side
+        return ifelse.(axis_of(side) .== axes_of(Dim), -one(T), one(T))
     end
 end
 
 
-function boundary_condition(::Sod)
-    return Boundaries(
-        left   = Dirichlet,
-        right  = Dirichlet,
-        bottom = FreeFlow,
-        top    = FreeFlow
-    )
+function boundary_condition(::Sod{A}, dim) where {A}
+    return Neighbours(dim) do axis, _
+        return axis == A ? Dirichlet : FreeFlow
+    end
 end
 
 
-function boundary_condition(::Sod_y)
-    return Boundaries(
-        left   = FreeFlow,
-        right  = FreeFlow,
-        bottom = Dirichlet,
-        top    = Dirichlet
-    )
+boundary_condition(::Sod_circ, dim) = Neighbours(Returns(Dirichlet), dim)
+
+
+function boundary_condition(::Bizarrium, dim)
+    return Neighbours(dim) do _, side
+        return side == Side.Right ? FreeFlow : Dirichlet
+    end
 end
 
 
-function boundary_condition(::Sod_circ)
-    return Boundaries(
-        left   = Dirichlet,
-        right  = Dirichlet,
-        bottom = Dirichlet,
-        top    = Dirichlet
-    )
-end
-
-
-function boundary_condition(::Bizarrium)
-    return Boundaries(
-        left   = Dirichlet,
-        right  = FreeFlow,
-        bottom = Dirichlet,
-        top    = Dirichlet
-    )
-end
-
-
-function boundary_condition(::Sedov)
-    return Boundaries(
-        left   = FreeFlow,
-        right  = FreeFlow,
-        bottom = FreeFlow,
-        top    = FreeFlow
-    )
-end
+boundary_condition(::Sedov, dim) = Neighbours(Returns(FreeFlow), dim)
 
 #
 # DebugIndexes
@@ -223,11 +170,4 @@ default_max_time(::DebugIndexes) = 0
 
 Base.show(io::IO, ::DebugIndexes) = print(io, "DebugIndexes")
 
-function boundary_condition(::DebugIndexes)
-    return Boundaries(
-        left   = Dirichlet,
-        right  = Dirichlet,
-        bottom = Dirichlet,
-        top    = Dirichlet
-    )
-end
+boundary_condition(::DebugIndexes, dim) = Neighbours(Returns(Dirichlet), dim)

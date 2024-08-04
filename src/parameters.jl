@@ -192,8 +192,8 @@ Data type for all variables. Should be an `AbstractFloat`.
     test = :Sod, domain_size = nothing, origin = nothing
 
 `test` is the test case name to use:
- - `:Sod`: Sod shock tube test
- - `:Sod_y`: Sod shock tube test along the Y axis
+ - `:Sod`/`:Sod_x`: Sod shock tube test along the X axis
+ - `:Sod_y`/`:Sod_z`: Sod shock tube test along the Y or Z axis
  - `:Sod_circ`: Circular Sod shock tube test (centered in the domain)
  - `:Bizarrium`: Bizarrium test, similar to the Sod shock tube but with a special equation of state
  - `:Sedov`: Sedov blast-wave test (centered in the domain, reaches the border at `t=1` by default)
@@ -647,18 +647,17 @@ function init_test(params::ArmonParameters{T};
     end
 
     if isnothing(domain_size)
-        domain_size = default_domain_size(test_type)
+        domain_size = default_domain_size(test_type, ndims(params))
     end
     params.domain_size = Tuple(T.(domain_size))
 
     if isnothing(origin)
-        origin = default_domain_origin(test_type)
+        origin = default_domain_origin(test_type, ndims(params))
     end
     params.origin = Tuple(T.(origin))
 
     if isnothing(test)
-        Δx = params.domain_size ./ params.N
-        test = create_test(Δx, test_type)
+        test = create_test(params, test_type)
     end
     params.test = test
     params.maxcycle = maxcycle
