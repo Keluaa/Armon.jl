@@ -40,6 +40,7 @@ unlock_pages
 ## Other
 
 ```@docs
+LinearToCartesian
 SolverException
 @section
 ```

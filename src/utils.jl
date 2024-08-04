@@ -8,6 +8,30 @@ end
 
 
 """
+    LinearToCartesian(size::NTuple{D, Int})[lin_index]
+
+Convert `lin_index` (an `Integer`) to a `CartesianIndex{D}`, from the `size` of a
+`D`-dimensional array.
+
+Unlike with `CartesianIndices(size)[lin_index]`, `@inbounds` actually removes all boundschecks.
+This can generate much more efficient code, without the additional exception handling.
+
+`LinearIndices(size)[cart_index]` does the opposite transformation.
+
+It is Julia's internal indexing mechanisms which does the transformation, therefore the
+implementation is as lightweight as it can be.
+"""
+struct LinearToCartesian{D} <: AbstractArray{CartesianIndex{D}, D}
+    size :: Dims{D}
+end
+
+Base.size(s::LinearToCartesian) = s.size
+Base.getindex(::LinearToCartesian{D}, I::Vararg{Int, D}) where {D} = I
+Base.IndexStyle(::Type{<:LinearToCartesian}) = Base.IndexCartesian()
+
+
+
+"""
     Axis
 
 Enumeration of the axes of a domain. Accepts values from `1` (X axis) to `126`.

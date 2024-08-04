@@ -92,9 +92,9 @@ Mark `blk` in the interface along its `side` as ready for an exchange.
 Return `true` if the `blk` should do the exchange, and the new [`BlockExchangeState`](@ref) of the interface.
 """
 function mark_ready_for_exchange!(blk::LocalTaskBlock, side::Side.T)
-    bint = blk.exchanges[Int(side)]
+    bint = blk.exchanges[side]
     bint_state, ready_flags = block_interface_state(bint)
-    side_flag = side in first_sides(ndims(blk)) ? 0b10 : 0b01
+    side_flag = first_side(side) ? 0b10 : 0b01
 
     if bint_state == BlockExchangeState.InProgress
         # The other block is still doing the exchange
@@ -141,7 +141,7 @@ The other block need to acknowledge this before the exchange state can be reset.
 """
 function exchange_done!(blk::LocalTaskBlock, side::Side.T)
     # Mark the exchange as done for the other block to acknowledge it
-    bint = blk.exchanges[Int(side)]
+    bint = blk.exchanges[side]
     interface_end_exchange!(bint)
     return BlockExchangeState.Done
 end
@@ -153,9 +153,9 @@ end
 The value set by [`side_is_done!`](@ref).
 """
 function is_side_done(blk::LocalTaskBlock, side::Side.T)
-    bint = blk.exchanges[Int(side)]
+    bint = blk.exchanges[side]
     # left/right are reversed as sides are relative to the interface
-    return side in first_sides(ndims(blk)) ? bint.is_right_side_done : bint.is_left_side_done
+    return first_side(side) ? bint.is_right_side_done : bint.is_left_side_done
 end
 
 
@@ -166,8 +166,8 @@ Set the interface of `blk` along `side` as `done`. This is a non-atomic operatio
 avoid repeating the exchange logic multiple times.
 """
 function side_is_done!(blk::LocalTaskBlock, side::Side.T, done::Bool=true)
-    bint = blk.exchanges[Int(side)]
-    if side in first_sides(ndims(blk))
+    bint = blk.exchanges[side]
+    if first_side(side)
         bint.is_right_side_done = done
     else
         bint.is_left_side_done = done

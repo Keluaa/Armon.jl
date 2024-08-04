@@ -1,26 +1,28 @@
 
 """
-    BlockSize
+    BlockSize{D}
 
-Dimensions of a [`LocalTaskBlock`](@ref).
+Dimensions of a [`LocalTaskBlock`](@ref) of `D` dimensions.
 """
-abstract type BlockSize end
+abstract type BlockSize{D} end
+
+Base.ndims(::ObjOrType{BlockSize{D}}) where {D} = D
 
 
 """
-    StaticBSize{S, Ghost} <: BlockSize
+    StaticBSize{S, Ghost, D} <: BlockSize{D}
 
-A [`BlockSize`](@ref) of size `S` and `Ghost` cells. `S` is embedded in the type, this reduces the
-amount of memory in the parameters of every kernel, as well as allowing the compiler to make some
-minor optizations in indexing expressions.
+A [`BlockSize`](@ref) of size `S` in `D` dimensions, with `Ghost` cells.
+`S` is embedded in the type, this reduces the amount of memory in the parameters of every
+kernel, as well as allowing the compiler to make some minor optizations in indexing expressions.
 
 Ghost cells are included in `S`: there are `S .- 2*Ghost` real cells.
 """
-struct StaticBSize{S, Ghost} <: BlockSize
-    StaticBSize{S, G}() where {S, G} = new{S, G}()
+struct StaticBSize{S, Ghost, D} <: BlockSize{D}
+    StaticBSize{S, G, D}() where {S, G, D} = new{S::NTuple{D}, G, D}()
 end
 
-StaticBSize(s::Tuple{Vararg{Integer}}, g) = StaticBSize{s, g}()
+StaticBSize(s::Tuple{Vararg{Integer}}, g) = StaticBSize{s, g, length(s)}()
 
 "`NTuple` of the dimensions of a [`BlockSize`](@ref)"
 block_size(::ObjOrType{StaticBSize{S}}) where {S} = S
@@ -31,11 +33,9 @@ ghosts(::ObjOrType{StaticBSize{S, G}}) where {S, G} = G
 "`NTuple` of the dimensions of a [`BlockSize`](@ref), excluding ghost cells"
 real_block_size(::ObjOrType{StaticBSize{S, G}}) where {S, G} = S .- 2*G
 
-Base.ndims(::ObjOrType{StaticBSize}) = 2
-
 
 """
-    DynamicBSize{Ghost} <: BlockSize
+    DynamicBSize{Ghost, D} <: BlockSize{D}
 
 Similar to [`StaticBSize`](@ref), but for blocks with a less-than-ideal size: block size is therefore
 not stored in the type. This results in less compilation when testing for different domain sizes with
@@ -44,18 +44,17 @@ a constant [`StaticBSize`](@ref).
 The number of `Ghost` cells is still embedded in the type, as it can simplify some indexing expressions
 and for coherency.
 """
-struct DynamicBSize{Ghost} <: BlockSize
-    s::NTuple{2, UInt16}  # TODO: should it really be UInt16? What about 1D?
+struct DynamicBSize{Ghost, D} <: BlockSize{D}
+    s::NTuple{D, UInt32}
 
-    DynamicBSize{G}(s) where {G} = new{G}(s)
+    DynamicBSize{G, D}(s) where {G, D} = new{G, D}(s)
 end
 
-DynamicBSize(s::Tuple{Vararg{Integer}}, g) = DynamicBSize{g}(Base.convert(Tuple{Vararg{UInt16}}, s))
+DynamicBSize(s::NTuple{D, Integer}, g) where {D} = DynamicBSize{g, D}(Base.convert(NTuple{D, UInt32}, s))
 
 block_size(bs::DynamicBSize) = bs.s
 ghosts(::ObjOrType{DynamicBSize{G}}) where {G} = G
 real_block_size(bs::DynamicBSize{G}) where {G} = bs.s .- 2*G
-Base.ndims(::ObjOrType{DynamicBSize}) = 2
 
 
 """
@@ -68,10 +67,12 @@ A [`DomainRange`](@ref) built from offsets from the corners of `bsize`.
 `block_domain_range(bsize, (-g, -g), (g, g))` would be the domain of all cells (real cells + `g`
 ghost cells) in the block.
 """
-block_domain_range(bsize::BlockSize, corners::NTuple{2, Dims{2}}) = block_domain_range(bsize, corners...)
+block_domain_range(bsize::BlockSize, corners::NTuple{2, Dims}) = block_domain_range(bsize, corners...)
 function block_domain_range(bsize::BlockSize, bottom_left::Dims{2}, top_right::Dims{2})
     ghost = ghosts(bsize)
     row = block_size(bsize)[1]
+
+    # TODO: dimension agnostic
 
     block_start = row * (ghost - 1) + ghost
     block_idx(I) = block_start + I[2] * row + I[1]
@@ -88,49 +89,23 @@ end
 """
     position(bsize::BlockSize, i)
 
-N-dim position of the `i`-th cell in the block.
+N-dim position of the `i`-th cell in the block, as a `Tuple`.
 
 If `1 ≤ position(bsize, i)[d] ≤ block_size(bsize)[d]` then the cell is not a ghost cell along the `d`
 dimension. See [`is_ghost`](@ref).
 """
-position(bsize::BlockSize, i) = position(bsize, block_size(bsize), i)
-
-position(bsize::BlockSize, ::NTuple{1}, i) = i - ghosts(bsize)
-
-function position(bsize::BlockSize, size::NTuple{2}, i::I) where {I}
-    row_length = I(size[1])
-    iy = (i - one(I)) ÷ row_length
-    ix = (i - one(I)) % row_length
-    return (ix, iy) .- ghosts(bsize) .+ 1
-end
-
-function position(bsize::BlockSize, size::NTuple{3}, i::I) where {I}
-    row_length   = I(size[1])
-    plane_length = I(size[2]) * row_length
-
-    iz      = (i - one(I)) ÷ plane_length
-    i_plane = (i - one(I)) % plane_length
-
-    iy = i_plane ÷ row_length
-    ix = i_plane % row_length
-
-    return (ix, iy, iz) .- ghosts(bsize) .+ 1
+function position(bsize::BlockSize, i::I) where {I}
+    return I.(Tuple(@inbounds LinearToCartesian(block_size(bsize))[i]) .- ghosts(bsize))
 end
 
 
 """
-    lin_position(bsize::BlockSize, I)
+    lin_position(bsize::BlockSize, I::Tuple)
 
-From the `NTuple` (e.g. returned from [`position`](@ref)), return the linear index in the block.
+From `I` (e.g. returned from [`position`](@ref)), return the linear index in the block.
 `lin_position(bsize, position(bsize, i)) == i`.
 """
-lin_position(bsize::BlockSize, I::NTuple{1}) = I + ghosts(bsize)
-
-function lin_position(bsize::BlockSize, I::NTuple{2})
-    return (I[2] + ghosts(bsize) - 1) * block_size(bsize)[1] + (I[1] + ghosts(bsize))
-end
-
-function lin_position(bsize::BlockSize, I::NTuple)
+function lin_position(bsize::BlockSize{D}, I::NTuple{D}) where {D}
     return sum((I .+ (ghosts(bsize) - 1)) .* Base.size_to_strides(1, block_size(bsize)...)) + 1
 end
 
@@ -140,31 +115,25 @@ end
 
 [`DomainRange`](@ref) of the real cells along `side`.
 
-If `single_strip == true`,  it includes only one "strip" of cells, that is
+If `single_strip == true`, it includes only one "strip" of cells, that is
 `length(border_domain(bsize, side)) == size_along(bsize, side)`.
 Otherwise, there are `ghosts(bsize)` strips of cells: all real cells which would be exchanged with
 another block along `side`.
 """
-function border_domain(bsize::BlockSize, side::Side.T; single_strip=true)
+function border_domain(bsize::BlockSize{D}, side::Side.T; single_strip=true) where {D}
     rsize = real_block_size(bsize)
 
-    if side == Side.Left
-        bl_corner = (0, 0)
-        tr_corner = (1 - rsize[1], 0)
-    elseif side == Side.Right
-        bl_corner = (rsize[1] - 1, 0)
-        tr_corner = (0, 0)
-    elseif side == Side.Bottom
-        bl_corner = (0, 0)
-        tr_corner = (0, 1 - rsize[2])
-    elseif side == Side.Top
-        bl_corner = (0, rsize[2] - 1)
-        tr_corner = (0, 0)
-    end
+    ax_i = Integer(axis_of(side))
+    zero_offset = ntuple(Returns(0), D)
+    side_offset = offset_to(side, D, rsize[ax_i] - 1)  # offset to move a corner to the opposite face along the axis of side
+
+    # First sides move the TR corner to them, last sides move to BL corner to them.
+    bl_corner = first_side(side) ? zero_offset : side_offset
+    tr_corner = first_side(side) ? side_offset : zero_offset
 
     domain = block_domain_range(bsize, bl_corner, tr_corner)
     single_strip && return domain
-    if side in first_sides(ndims(bsize))
+    if first_side(side)
         return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
     else
         return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
@@ -184,9 +153,9 @@ another block along `side`.
 """
 function ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
     domain = border_domain(bsize, side)
-    domain = shift_dir(domain, axis_of(side), side in first_sides(ndims(bsize)) ? -ghosts(bsize) : ghosts(bsize))
+    domain = shift_dir(domain, axis_of(side), first_sides(side) ? -ghosts(bsize) : ghosts(bsize))
     single_strip && return domain
-    if side in first_sides(ndims(bsize))
+    if first_sides(side)
         return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
     else
         return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
@@ -194,10 +163,11 @@ function ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
 end
 
 
-stride_along(bsize::BlockSize, axis::Axis.T)    = Base.size_to_strides(1, block_size(bsize)...)[Int(axis)]
-size_along(bsize::BlockSize, axis::Axis.T)      = block_size(bsize)[Int(axis)]
+Base.strides(bsize::BlockSize)                  = Base.size_to_strides(1, block_size(bsize)...)
+stride_along(bsize::BlockSize, axis::Axis.T)    = strides(bsize)[axis]
+size_along(bsize::BlockSize, axis::Axis.T)      = block_size(bsize)[axis]
 size_along(bsize::BlockSize, side::Side.T)      = size_along(bsize, axis_of(side))
-real_size_along(bsize::BlockSize, axis::Axis.T) = real_block_size(bsize)[Int(axis)]
+real_size_along(bsize::BlockSize, axis::Axis.T) = real_block_size(bsize)[axis]
 real_size_along(bsize::BlockSize, side::Side.T) = real_size_along(bsize, axis_of(side))
 
 face_size(bsize::BlockSize, side::Axis.T)      = prod(block_size(bsize)) ÷ size_along(bsize, side)
@@ -245,7 +215,7 @@ in_grid(start, idx, grid) = all(Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))
 Same as `in_grid(start, idx, grid)`, but only checks along `axis`.
 """
 in_grid(idx, grid, axis::Axis.T) = in_grid(1, idx, grid, axis)
-in_grid(start, idx, grid, axis::Axis.T) = (Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))[Int(axis)]
+in_grid(start, idx, grid, axis::Axis.T) = (Tuple(start) .≤ Tuple(idx) .≤ Tuple(grid))[axis]
 
 
 """
@@ -344,7 +314,7 @@ If `global_ghosts == true`, then the ghost cells of at the border of the global 
 If `all_ghosts == true`, then the ghost cells of at the border of all blocks are also returned.
 
 ```jldoctest
-julia> params = ArmonParameters(; N=(24, 8), nghost=4, block_size=(20, 12), use_MPI=false);
+julia> params = ArmonParameters(; N=(24, 8), nghost=4, block_size=(20, 12), use_MPI=false, numa_aware=false);
 
 julia> grid = BlockGrid(params);
 
@@ -369,10 +339,10 @@ julia> for (blk, row_idx, row_range) in Armon.BlockRowIterator(grid)
 (2, 2) - (2, 8) - 145:156
 ```
 """
-struct BlockRowIterator  # TODO: use have Dim as type param + use NTuple 
-    grid          :: BlockGrid
-    row_iter      :: CartesianIndices
-    rows_per_blk  :: CartesianIndex
+struct BlockRowIterator{D}
+    grid          :: BlockGrid{<:Any, D}
+    row_iter      :: CartesianIndices{D}
+    rows_per_blk  :: CartesianIndex{D}
     global_ghosts :: Bool
     all_ghosts    :: Bool
 end
@@ -459,12 +429,12 @@ function BlockRowIterator(grid::BlockGrid, row_iter::CartesianIndices; global_gh
         row_count = (1, real_block_size(grid)[2:end]...)
     end
     row_count = ifelse.(row_count .≤ 0, grid.edge_size, row_count)
-    return BlockRowIterator(grid, row_iter, CartesianIndex(row_count), global_ghosts, all_ghosts)
+    return BlockRowIterator{ndims(grid)}(grid, row_iter, CartesianIndex(row_count), global_ghosts, all_ghosts)
 end
 
 
 Base.IteratorSize(::Type{BlockRowIterator}) = Base.SizeUnknown()
-Base.eltype(::Type{BlockRowIterator}) = Tuple{LocalTaskBlock, NTuple{2, Int}, UnitRange}
+Base.eltype(::Type{BlockRowIterator{D}}) where {D} = Tuple{LocalTaskBlock, NTuple{D, Int}, UnitRange}
 
 
 function Base.iterate(iter::BlockRowIterator, row_iter_state=0)

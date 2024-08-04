@@ -1,8 +1,8 @@
 
 function sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
     function is_block_at_thread_perimeter(blk_pos, tid)
-        for side in instances(Side.T)  # TODO: replace by `sides_of(length(blk_pos))`
-            neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
+        for side in sides_of(length(blk_pos))
+            neighbour_pos = blk_pos + CartesianIndex(offset_to(side, length(grid_size)))
             !in_grid(neighbour_pos, grid_size) && return true
             blk_grid[neighbour_pos] != tid && return true
         end
@@ -96,8 +96,8 @@ function grid_to_scotch_graph(grid_size; weighted=false,
     adjncy_idx = 1
     for (vn, v) in enumerate(CartesianIndices(grid_size))
         ne = 0
-        for side in instances(Side.T)  # TODO: replace with `sides_of(dim)`
-            v_neighbour = v + CartesianIndex(offset_to(side))
+        for side in sides_of(dim)
+            v_neighbour = v + CartesianIndex(offset_to(side, dim))
             !in_grid(v_neighbour, grid_size) && continue
             i_neighbour = LinearIndices(grid_size)[v_neighbour]
             adjncy[adjncy_idx] = i_neighbour
@@ -119,13 +119,14 @@ end
 function partition_cost(parts, grid_size, partition)
     part_tmp = Vector{eltype(partition)}(undef, parts)
     costs = Vector{eltype(partition)}(undef, prod(grid_size))
+    dim = length(grid_size)
     for (i, p) in enumerate(partition)
         blk_pos = CartesianIndices(grid_size)[i]
         out_connections = 0
         part_tmp .= 0
         part_tmp_i = 0
-        for side in instances(Side.T)
-            neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
+        for side in sides_of(dim)
+            neighbour_pos = blk_pos + CartesianIndex(offset_to(side, dim))
             !in_grid(neighbour_pos, grid_size) && continue
             neighbour_i = LinearIndices(grid_size)[neighbour_pos]
             neighbour_p = partition[neighbour_i]
@@ -290,10 +291,11 @@ end
 
 
 function total_workload_perimeter(threads_workload)
+    dim = length(eltype(eltype(threads_workload)))
     return map(threads_workload) do thread_workload
         perimeter = 0
-        for blk_pos in thread_workload, side in instances(Side.T)
-            neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
+        for blk_pos in thread_workload, side in sides_of(dim)
+            neighbour_pos = blk_pos + CartesianIndex(offset_to(side, dim))
             perimeter += !(neighbour_pos in thread_workload)
         end
         return perimeter

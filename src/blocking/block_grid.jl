@@ -1,8 +1,8 @@
 
 """
-    BlockGrid{T, DeviceA, HostA, BufferA, Ghost, BlockSize, Device, SolverState}
+    BlockGrid{T, D, DeviceA, HostA, BufferA, Ghost, BlockSize, Device, SolverState}
 
-Stores [`TaskBlock`](@ref)s on the `Device` and host memory, in a grid.
+Stores [`TaskBlock`](@ref)s on the `Device` and host memory, in a `D`-dimensional grid.
 
 [`LocalTaskBlock`](@ref) are stored separately depending on if they have a [`StaticBSize`](@ref) of
 `BlockSize` (in `blocks`) or if they have a [`DynamicBSize`](@ref) (in `edge_blocks`).
@@ -20,25 +20,25 @@ handle domains with dimensions which are not multiples of the block size.
 all on the host or all on the device.
 """
 struct BlockGrid{
-    T,
+    T, D,
     DeviceArray <: AbstractArray{T},
     HostArray   <: AbstractArray{T},
     BufferArray <: AbstractArray{T},
     Ghost,
-    BS          <: StaticBSize{<:Any, Ghost},
+    BS          <: StaticBSize{<:Any, Ghost, D},
     SState      <: SolverState,
     Device
 }
-    grid_size          :: NTuple{2, Int}  # Size of the grid, including all local blocks
-    static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
-    cell_size          :: NTuple{2, Int}  # Number of real cells in each direction
-    edge_size          :: NTuple{2, Int}  # Number of real cells in edge blocks in each direction (only along non-edge directions)
+    grid_size          :: NTuple{D, Int}  # Size of the grid, including all local blocks
+    static_sized_grid  :: NTuple{D, Int}  # Size of the grid of statically sized local blocks
+    cell_size          :: NTuple{D, Int}  # Number of real cells in each direction
+    edge_size          :: NTuple{D, Int}  # Number of real cells in edge blocks in each direction (only along non-edge directions)
     device             :: Device
     global_dt          :: GlobalTimeStep{T}
-    blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, BS, SState}}
-    edge_blocks        :: Vector{LocalTaskBlock{DeviceArray, HostArray, DynamicBSize{Ghost}, SState}}
-    remote_blocks      :: Vector{RemoteTaskBlock{BufferArray}}
-    threads_workload   :: Vector{Vector{CartesianIndex{2}}}  # `tid => block index` map for all threads, distributing each block to each thread
+    blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, D, BS, SState}}
+    edge_blocks        :: Vector{LocalTaskBlock{DeviceArray, HostArray, D, DynamicBSize{Ghost, D}, SState}}
+    remote_blocks      :: Vector{RemoteTaskBlock{BufferArray, D}}
+    threads_workload   :: Vector{Vector{CartesianIndex{D}}}  # `tid => block index` map for all threads, distributing each block to each thread
     threads_logs       :: Vector{Vector{ThreadLogEvent}}
 end
 
@@ -64,15 +64,18 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
     # Container for blocks with a static size
     static_size = StaticBSize(params.block_size, ghost)
-    blocks = Vector{LocalTaskBlock{device_array, host_array, typeof(static_size), state_type}}(undef, static_sized_block_count)
+    static_block_t = LocalTaskBlock{device_array, host_array, dim, typeof(static_size), state_type}
+    blocks = Vector{static_block_t}(undef, static_sized_block_count)
 
     # Container for blocks on the edges, with a non-uniform size
-    edge_blocks = Vector{LocalTaskBlock{device_array, host_array, DynamicBSize{ghost}, state_type}}(undef, dyn_sized_block_count)
+    edge_block_t = LocalTaskBlock{device_array, host_array, dim, DynamicBSize{ghost, dim}, state_type}
+    edge_blocks = Vector{edge_block_t}(undef, dyn_sized_block_count)
 
     # Container for remote blocks, neighbours of blocks on the edges. Corners are excluded.
     buffer_array = params.gpu_aware ? device_array : host_array
-    grid_perimeter = sum(grid_size) * length(grid_size)  # (nx+ny) * 2
-    remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
+    grid_perimeter = communication_surface(grid_size)
+    remote_block_t = RemoteTaskBlock{buffer_array, dim}
+    remote_blocks = Vector{remote_block_t}(undef, grid_perimeter)
 
     threads_workload = thread_workload_distribution(params)
 
@@ -86,7 +89,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     # Main grid container
     edge_size = remainder_block_size .- 2*ghost
     grid = BlockGrid{
-        T, device_array, host_array, buffer_array,
+        T, dim, device_array, host_array, buffer_array,
         ghost, typeof(static_size),
         state_type, typeof(params.device)
     }(
@@ -111,7 +114,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                 idx = block_idx(grid, pos)
                 blk_size = static_size
                 blk_state = SolverState(params, global_dt)
-                blocks[idx] = eltype(blocks)(blk_size, pos, blk_state, device_kwargs, host_kwargs)
+                blocks[idx] = static_block_t(blk_size, pos, blk_state, device_kwargs, host_kwargs)
             else
                 idx = edge_block_idx(grid, pos)
                 blk_size = DynamicBSize(
@@ -122,12 +125,12 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                     ghost
                 )
                 blk_state = SolverState(params, global_dt)
-                edge_blocks[idx] = eltype(edge_blocks)(blk_size, pos, blk_state, device_kwargs, host_kwargs)
+                edge_blocks[idx] = edge_block_t(blk_size, pos, blk_state, device_kwargs, host_kwargs)
             end
 
             # Create the neighbouring remote blocks if we are at the border of the grid
             is_border_block = !in_grid(2, pos, grid_size .- 1)
-            is_border_block && for side in instances(Side.T)
+            is_border_block && for side in sides_of(dim)
                 # Position of the neighbouring block in the grid
                 remote_blk_pos = pos + CartesianIndex(offset_to(side, dim))
                 in_grid(remote_blk_pos, grid_size) && continue
@@ -136,15 +139,22 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                     # The buffer must be the same size as the side of our block which is a neighbour to...
                     buffer_size = real_face_size(local_block.size, side)
                     # ...for each variable to communicate of each ghost cell
-                    buffer_size *= length(comm_vars()) * params.nghost
+                    buffer_size *= num_arrays_per_comm(dim) * params.nghost
 
                     neighbour = neighbour_at(params, side)  # MPI rank
                     global_pos = CartesianIndex(params.cart_coords .+ offset_to(side, dim))  # pos in the cart_comm
 
-                    RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm, side)
+                    # We need a unique index for the remote block among this side of the grid.
+                    # Here it is the linear index of the block's position on the side of the grid.
+                    comm_axis_i = Integer(next_axis(axis_of(side), dim))
+                    side_size = ifelse.((1:dim) .== comm_axis_i, 1, grid_size)  # `grid_size` with a 1 along the comm axis
+                    side_pos  = ifelse.((1:dim) .== comm_axis_i, 1, Tuple(remote_blk_pos))  # same with the block's pos
+                    side_lin_idx = LinearIndices(side_size)[CartesianIndex(side_pos)]
+
+                    remote_block_t(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm, side_lin_idx)
                 else
                     # "Fake" remote block for non-existant neighbour at the edge of the global domain
-                    RemoteTaskBlock{buffer_array}(remote_blk_pos)
+                    remote_block_t(remote_blk_pos)
                 end
 
                 remote_blocks[remote_block_idx(grid, remote_blk_pos)] = remote_block
@@ -153,10 +163,10 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     end
 
     # Initialize all block neighbours references and exchanges
-    for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
+    for idx in one(CartesianIndex{dim}):CartesianIndex(grid_size)
         this_block = block_at(grid, idx)
 
-        this_block.neighbours = Neighbours(dim) do _, side
+        this_block.neighbours = Neighbours(dim, TaskBlock) do _, side
             neighbour_idx = idx + CartesianIndex(offset_to(side, dim))
             neighbour_block = block_at(grid, neighbour_idx)
             if neighbour_block isa RemoteTaskBlock
@@ -442,7 +452,7 @@ function edge_block_idx(grid::BlockGrid, idx::CartesianIndex)
     offset = 0
     for (block_count, blocks_pos, _) in EdgeBlockRegions(grid)
         if idx in blocks_pos
-            pos_idx = idx - first(blocks_pos) + oneunit(idx)  # `block_pos[pos_idx] == idx`
+            pos_idx = idx - first(blocks_pos) + one(idx)  # `block_pos[pos_idx] == idx`
             return LinearIndices(blocks_pos)[pos_idx] + offset
         end
         offset += block_count
@@ -460,7 +470,7 @@ function remote_block_idx(grid::BlockGrid, idx::CartesianIndex)
     offset = 0
     for (_, blocks_pos) in RemoteBlockRegions(grid)
         if idx in blocks_pos
-            pos_idx = idx - first(blocks_pos) + oneunit(idx)  # `block_pos[pos_idx] == idx`
+            pos_idx = idx - first(blocks_pos) + one(idx)  # `block_pos[pos_idx] == idx`
             return LinearIndices(blocks_pos)[pos_idx] + offset
         end
         offset += length(blocks_pos)
@@ -504,8 +514,9 @@ function block_size_at(idx, grid_size, static_sized_grid, block_size, remainder_
     if in_grid(idx, static_sized_grid)
         return block_size .- 2*ghosts
     else
+        dim = length(grid_size)
         edge_block_size = ifelse.(
-            in_grid.(Ref(idx), max.(static_sized_grid, grid_size .- 1), instances(Axis.T)),  # TODO: replace with `axes_of(dim)`
+            in_grid.(Ref(idx), max.(static_sized_grid, grid_size .- 1), axes_of(dim)),
             block_size, remainder_block_size
         )
         return edge_block_size .- 2*ghosts
@@ -513,13 +524,13 @@ function block_size_at(idx, grid_size, static_sized_grid, block_size, remainder_
 end
 
 
-device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
-host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
-buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
-ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
-static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = block_size(BS)
-real_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = real_block_size(BS)
-Base.ndims(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = Base.ndims(BS)
+device_array_type(::ObjOrType{BlockGrid{<:Any, Dim, D}}) where {Dim, D} = D
+host_array_type(::ObjOrType{BlockGrid{<:Any, Dim, <:Any, H}}) where {Dim, H} = H
+buffer_array_type(::ObjOrType{BlockGrid{<:Any, Dim, <:Any, <:Any, B}}) where {Dim, B} = B
+ghosts(::ObjOrType{BlockGrid{<:Any, Dim, <:Any, <:Any, <:Any, Ghost}}) where {Dim, Ghost} = Ghost
+static_block_size(::ObjOrType{BlockGrid{<:Any, Dim, <:Any, <:Any, <:Any, G, BS}}) where {Dim, G, BS} = block_size(BS)
+real_block_size(::ObjOrType{BlockGrid{<:Any, Dim, <:Any, <:Any, <:Any, G, BS}}) where {Dim, G, BS} = real_block_size(BS)
+Base.ndims(::ObjOrType{BlockGrid{<:Any, Dim}}) where {Dim} = Dim
 
 
 """
@@ -531,12 +542,12 @@ all_blocks(grid::BlockGrid) = Iterators.flatten((grid.blocks, grid.edge_blocks))
 
 
 """
-    device_is_host(::BlockGrid{T, D, H})
-    device_is_host(::Type{<:BlockGrid{T, D, H}})
+    device_is_host(::BlockGrid{T, Dim, D, H})
+    device_is_host(::Type{<:BlockGrid{T, Dim, D, H}})
 
 `true` if the device is the host, i.e. device blocks and host blocks are the same (and `D == H`).
 """
-device_is_host(::ObjOrType{BlockGrid{<:Any, D, H}}) where {D, H} = D === H
+device_is_host(::ObjOrType{BlockGrid{<:Any, Dim, D, H}}) where {Dim, D, H} = D === H
 
 
 """
@@ -546,7 +557,7 @@ device_is_host(::ObjOrType{BlockGrid{<:Any, D, H}}) where {D, H} = D === H
 `true` if the communication buffers are stored on the device, allowing direct transfers without
 passing through the host (GPU-aware communication).
 """
-buffers_on_device(::ObjOrType{BlockGrid{<:Any, D, H, B}}) where {D, H, B} = D === B
+buffers_on_device(::ObjOrType{BlockGrid{<:Any, Dim, D, H, B}}) where {Dim, D, H, B} = D === B
 
 
 function reset!(grid::BlockGrid, params::ArmonParameters)
@@ -627,8 +638,8 @@ end
 
 
 """
-    memory_required(N::NTuple{2, Int}, block_size::NTuple{2, Int}, ghost::Int, data_type)
-    memory_required(N::NTuple{2, Int}, block_size::NTuple{2, Int}, ghost::Int,
+    memory_required(N::NTuple{D, Int}, block_size::NTuple{D, Int}, ghost::Int, data_type)
+    memory_required(N::NTuple{D, Int}, block_size::NTuple{D, Int}, ghost::Int,
         device_array_type, host_array_type, buffer_array_type[, solver_state_type])
 
 Compute the number of bytes needed to allocate all blocks. If only `data_type` is given, then
@@ -655,10 +666,10 @@ end
 ```
 """
 function memory_required(
-    N::NTuple{2, Int}, block_size::NTuple{2, Int}, ghost::Int,
+    N::NTuple{D, Int}, block_size::NTuple{D, Int}, ghost::Int,
     ::Type{DeviceArray}, ::Type{HostArray}, ::Type{BufferArray}, ::Type{SState}
 ) where {
-    T,
+    T, D,
     DeviceArray <: AbstractArray{T},
     HostArray   <: AbstractArray{T},
     BufferArray <: AbstractArray{T},
@@ -674,25 +685,24 @@ function memory_required(
         cell_count += block_count * prod(edge_block_size)
     end
 
-    arrays_byte_count = cell_count * length(block_vars()) * sizeof(T)
+    arrays_byte_count = cell_count * num_arrays_per_cell(D) * sizeof(T)
 
     # Size of `TaskBlock`s objects. They are only stored on the host memory.
     static_block_size = StaticBSize(block_size, ghost)
     static_block_count = prod(static_sized_grid)
-    sizeof_static_block = sizeof(LocalTaskBlock{DeviceArray, HostArray, typeof(static_block_size), SState})
+    sizeof_static_block = sizeof(LocalTaskBlock{DeviceArray, HostArray, D, typeof(static_block_size), SState})
     blocks_overhead = static_block_count * sizeof_static_block
 
     edge_block_size = DynamicBSize(remainder_block_size, ghost)  # Dummy size
     edge_block_count = prod(grid_size) - static_block_count
-    sizeof_edge_block = sizeof(LocalTaskBlock{DeviceArray, HostArray, typeof(edge_block_size), SState})
+    sizeof_edge_block = sizeof(LocalTaskBlock{DeviceArray, HostArray, D, typeof(edge_block_size), SState})
     blocks_overhead += edge_block_count * sizeof_edge_block
 
     remote_block_count = sum((length∘last).(RemoteBlockRegions(grid_size)))
-    blocks_overhead += remote_block_count * sizeof(RemoteTaskBlock{BufferArray})
+    blocks_overhead += remote_block_count * sizeof(RemoteTaskBlock{BufferArray, D})
 
     # MPI Buffers size
-    domain_perimeter = sum(N) * 2  # TODO: dimension agnostic
-    MPI_buffer_byte_count = domain_perimeter * #= send+recv =# 2 * length(comm_vars()) * ghost * sizeof(T)
+    MPI_buffer_byte_count = communication_surface(N) * #= send+recv =# 2 * num_arrays_per_comm(D) * ghost * sizeof(T)
 
     return arrays_byte_count, MPI_buffer_byte_count, blocks_overhead
 end
@@ -706,18 +716,27 @@ memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
     memory_required(N, block_size, ghost, Vector{T}, Vector{T}, Vector{T})
 
 
+function communication_surface(N::Dims{D}) where {D}
+    # Amount of cells touching the `D-1` perimeter of the cube of dimensions `N`.
+    # `communication_surface(N) * ghosts` would be the number of ghost cells in the MPI
+    # buffers of a subdomain of size `N`.
+    V = prod(N)
+    return iszero(V) ? 0 : 2*sum(V .÷ N)
+end
+
+
 """
     device_to_host!(grid::BlockGrid)
 
 Copies device data of all blocks to the host data. A no-op if the device is the host.
 """
-function device_to_host!(grid::BlockGrid{<:Any, D, H}) where {D, H}
+function device_to_host!(grid::BlockGrid{<:Any, Dim, D, H}) where {Dim, D, H}
     for blk in all_blocks(grid)
         device_to_host!(blk)
     end
 end
 
-device_to_host!(::BlockGrid{<:Any, D, D}) where {D} = nothing
+device_to_host!(::BlockGrid{<:Any, Dim, D, D}) where {Dim, D} = nothing
 
 
 """
@@ -725,13 +744,13 @@ device_to_host!(::BlockGrid{<:Any, D, D}) where {D} = nothing
 
 Copies host data of all blocks to the device data. A no-op if the device is the host.
 """
-function host_to_device!(grid::BlockGrid{<:Any, D, H}) where {D, H}
+function host_to_device!(grid::BlockGrid{<:Any, Dim, D, H}) where {Dim, D, H}
     for blk in all_blocks(grid)
         host_to_device!(blk)
     end
 end
 
-host_to_device!(::BlockGrid{<:Any, D, D}) where {D} = nothing
+host_to_device!(::BlockGrid{<:Any, Dim, D, D}) where {Dim, D} = nothing
 
 
 """
@@ -839,7 +858,7 @@ function print_grid_dimensions(
     edge_block_count = prod(grid_size) - static_block_count
     edge_pos = String[]
     for axis in axes_of(length(grid_size))
-        static_grid[Int(axis)] ≥ grid_size[Int(axis)] && continue
+        static_grid[axis] ≥ grid_size[axis] && continue
         push!(edge_pos, lowercasefirst(string(last_side(axis))))
     end
     if !isempty(edge_pos)
@@ -884,10 +903,10 @@ function print_grid_dimensions(
 end
 
 
-function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, D, H, B, Ghost, BS, Device};
+function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, Dim, D, H, B, Ghost, BS, Device};
     pad=16
-) where {T, D, H, B, Ghost, BS, Device}
-    println(io, "BlockGrid:")
+) where {T, Dim, D, H, B, Ghost, BS, Device}
+    println(io, "$(Dim)D BlockGrid:")
     print_grid_dimensions(io, grid.grid_size, grid.static_sized_grid, block_size(BS), grid.cell_size, Ghost; pad)
     println()
 
@@ -899,8 +918,9 @@ function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, D, H, B, Ghost
 end
 
 
-function Base.show(io::IO, grid::BlockGrid{T, D, H, B, G, BS}) where {T, D, H, B, G, BS}
+function Base.show(io::IO, grid::BlockGrid{T, Dim, D, H, B, G, BS}) where {T, Dim, D, H, B, G, BS}
     grid_str = join(grid.grid_size, '×')
     bs_str = join(block_size(BS), '×')
-    print(io, "BlockGrid{$T, $D, $H, $B}($grid_str, bs: $bs_str, ghost: $G)")
+    print(io, "BlockGrid{$T, $Dim, $D, $H, $B}($grid_str, bs: $bs_str, ghost: $G)")
+end
 end
