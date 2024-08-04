@@ -151,7 +151,7 @@ function Armon.init_backend(params::ArmonParameters, ::Kokkos.ExecutionSpace;
 end
 
 
-function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:Kokkos.ExecutionSpace})
+function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, <:Kokkos.ExecutionSpace}) where {Dim}
     Armon.print_parameter(io, pad, "use_kokkos", true)
 
     device_str = Kokkos.main_space_type(p.device) |> nameof |> string
@@ -180,7 +180,7 @@ function Armon.device_memory_info(exec::Kokkos.ExecutionSpace)
 end
 
 
-function Base.wait(::ArmonParameters{<:Any, <:Kokkos.ExecutionSpace})
+function Base.wait(::ArmonParameters{<:Any, Dim, <:Kokkos.ExecutionSpace}) where {Dim}
     Kokkos.fence()
 end
 
@@ -210,8 +210,8 @@ end
 # TODO: fix
 
 @generated function Armon.dtCFL_kernel(
-    params::ArmonParameters{T, <:Kokkos.ExecutionSpace}, data::BlockGrid{V}, range, dx, dy
-) where {T, V <: AbstractArray{T}}
+    params::ArmonParameters{T, Dim, <:Kokkos.ExecutionSpace}, data::BlockGrid{V}, range, dx, dy
+) where {T, Dim, V <: AbstractArray{T}}
     quote
         cpp_range = params.backend_options.range
         cpp_range.start = 0
@@ -232,8 +232,8 @@ end
 
 
 @generated function Armon.conservation_vars_kernel(
-    params::ArmonParameters{T, <:Kokkos.ExecutionSpace}, data::BlockGrid{V}, range
-) where {T, V <: Kokkos.View{T}}
+    params::ArmonParameters{T, Dim, <:Kokkos.ExecutionSpace}, data::BlockGrid{V}, range
+) where {T, Dim, V <: Kokkos.View{T}}
     quote
         cpp_range = params.backend_options.range
         cpp_range.start = 0
@@ -268,7 +268,7 @@ function Base.copyto!(dst_blk::LocalTaskBlock{A, Size}, src_blk::LocalTaskBlock{
         error("Destination and source blocks have different sizes: $(block_size(dst_blk)) != $(block_size(src_blk))")
     end
 
-    for (dst_var, src_var) in zip(main_vars(dst_blk), main_vars(src_blk))
+    for (dst_var, src_var) in zip(main_arrays(dst_blk), main_arrays(src_blk))
         Kokkos.deep_copy(Armon.device_type(dst_blk), dst_var, src_var)
     end
 end
