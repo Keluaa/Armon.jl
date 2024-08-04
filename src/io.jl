@@ -16,7 +16,7 @@ function write_blocks_to_file(
             for_3D && println(file)  # Separate rows to use pm3d plotting with gnuplot
         end
 
-        blk_vars = get_vars(blk, vars; on_device=false)
+        blk_vars = var_arrays(blk, vars; on_device=false)
         # TODO: center the positions of the cells
         for idx in row_range
             Printf.format(file, format, getindex.(blk_vars, idx)...)
@@ -32,7 +32,7 @@ function read_data_from_file(
     global_ghosts=false, all_ghosts=false, vars=saved_vars()
 ) where {T}
     for (blk, _, row_range) in BlockRowIterator(grid, row_iter_params...; global_ghosts, all_ghosts)
-        blk_vars = get_vars(blk, vars; on_device=false)
+        blk_vars = var_arrays(blk, vars; on_device=false)
         for idx in row_range
             for var in blk_vars[1:end-1]
                 var[idx] = parse(T, readuntil(file, ','))
@@ -110,16 +110,17 @@ end
 
 function compare_block(
     params::ArmonParameters, ref_blk::LocalTaskBlock, our_blk::LocalTaskBlock, label::String;
-    vars=saved_vars()
+    vars=saved_vars
 )
     different = false
 
     real_static_bsize = params.block_size .- 2*params.nghost
     blk_global_pos = params.N_origin .- 1 .+ (Tuple(our_blk.pos) .- 1) .* real_static_bsize
 
-    ref_vars = get_vars(ref_blk, vars; on_device=false)
-    our_vars = get_vars(our_blk, vars; on_device=false)
-    for (var, ref_var, our_var) in zip(vars, ref_vars, our_vars)
+    var_names = var_arrays_names(ref_blk, vars)
+    ref_vars = var_arrays(ref_blk, vars; on_device=false)
+    our_vars = var_arrays(our_blk, vars; on_device=false)
+    for (var, ref_var, our_var) in zip(var_names, ref_vars, our_vars)
         diff_mask = (!isapprox).(ref_var, our_var; rtol=params.comparison_tolerance)
         !params.write_ghosts && (diff_mask .*= (!is_ghost).(Ref(our_blk.size), 1:prod(block_size(our_blk))))
 
@@ -157,7 +158,7 @@ end
 
 function compare_data(
     params::ArmonParameters, ref_data::BlockGrid, our_data::BlockGrid, label::String;
-    vars=saved_vars()
+    vars=saved_vars
 )
     different = false
     for (ref_blk, our_blk) in zip(all_blocks(ref_data), all_blocks(our_data))

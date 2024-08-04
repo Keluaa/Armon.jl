@@ -49,7 +49,7 @@
                 @test all_cell_count  == prod(N .+ 2*ref_params.nghost)
             end
 
-            total_mem = all_cell_count * sizeof(Float64) * length(Armon.block_vars())
+            total_mem = all_cell_count * sizeof(Float64) * Armon.num_arrays_per_cell(ndims(grid))
             remote_blocks_overhead = sum(sizeof.(grid.remote_blocks))
             device_memory, host_memory = Armon.memory_required(ref_params)
             @test total_mem == device_memory

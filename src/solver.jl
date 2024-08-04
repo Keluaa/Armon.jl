@@ -73,7 +73,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         update_EOS!(params, state, blk)
     end
     next_time_step(params, blk)  # Yields to other blocks until this cycle's time step is available
-    for (axis, dt_factor) in split_axes(state)
+    for (axis, dt_factor) in split_axes(state, ndims(params))
         update_solver_state!(params, state, axis, dt_factor)
         update_EOS!(params, state, blk)
         block_ghost_exchange(params, state, blk)  # Yields to other blocks until all neighbours are updated
@@ -156,12 +156,15 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     steps_completed += 1
     if params.log_blocks
         axis_dependent, var_flags = SOLVER_STEPS_VARS[blk_state]
-        if axis_dependent
-            # TODO: dimension agnostic
-            var_flags |= state.axis == Axis.X ? STEPS_VARS_FLAGS.u : STEPS_VARS_FLAGS.v
+        if !axis_dependent
+            # All arrays of dimensional variables have been used by the step
+            extra_dim_arrays = count_ones(var_flags & steps_dimensional_vars_flags()) * (ndims(blk) - 1)
+        else
+            # Only one array of dimensional variables has been used
+            extra_dim_arrays = 0
         end
         steps_vars |= var_flags
-        steps_var_count += count_ones(var_flags)
+        steps_var_count += count_ones(var_flags) + extra_dim_arrays
     end
     !stop_processing && @goto next_step
 
@@ -297,7 +300,7 @@ function solver_cycle(params::ArmonParameters, data::BlockGrid)
     (@section "time_step" next_time_step(params, state, data)) && return true
     @checkpoint("time_step") && return true
 
-    @section "$axis" for (axis, dt_factor) in split_axes(state)
+    @section "$axis" for (axis, dt_factor) in split_axes(state, ndims(params))
         update_solver_state!(params, state, axis, dt_factor)
 
         @section "EOS" update_EOS!(params, state, data)
@@ -423,8 +426,8 @@ function armon(params::ArmonParameters{T}) where T
         local_rank = MPI.Comm_rank(node_local_comm)
         local_size = MPI.Comm_size(node_local_comm)
 
-        rank_info = @sprintf(" - %2d/%-2d, local: %2d/%-2d, coords: (%2d,%-2d), cores: %3d to %3d",
-                             rank, proc_size-1, local_rank, local_size-1, cart_coords[1], cart_coords[2],
+        rank_info = @sprintf(" - %2d/%-2d, local: %2d/%-2d, coords: (%s), cores: %3d to %3d",
+                             rank, proc_size-1, local_rank, local_size-1, join(cart_coords, ','),
                              minimum(getcpuids()), maximum(getcpuids()))
 
         is_root && println("\nProcesses info:")

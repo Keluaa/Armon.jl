@@ -264,7 +264,7 @@ An error is thrown otherwise. Accepts a relative `comparison_tolerance`.
 If `return_data=true`, then in the [`SolverStats`](@ref) returned by [`armon`](@ref), the `data`
 field will contain the [`BlockGrid`](@ref) used by the solver.
 """
-mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
+mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams}
     # Test problem type, riemann solver and solver scheme
     test::TestCase
     riemann_scheme::RiemannScheme
@@ -274,15 +274,15 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
 
     # Domain parameters
     nghost::Int
-    N::NTuple{2, Int}
-    N_origin::NTuple{2, Int}  # Position of the first cell in the global domain
-    domain_size::NTuple{2, Flt_T}
-    origin::NTuple{2, Flt_T}
+    N::NTuple{Dim, Int}
+    N_origin::NTuple{Dim, Int}  # Position of the first cell in the global domain
+    domain_size::NTuple{Dim, Flt_T}
+    origin::NTuple{Dim, Flt_T}
     cfl::Flt_T
     Dt::Flt_T
     cst_dt::Bool
     dt_on_even_cycles::Bool
-    steps_ranges::Vector{StepsRanges}
+    steps_ranges::Vector{StepsRanges{Dim}}
 
     # Bounds
     maxtime::Flt_T
@@ -316,7 +316,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     async_cycle::Bool
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
-    block_size::NTuple{2, Int}
+    block_size::NTuple{Dim, Int}
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
@@ -329,12 +329,12 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     rank::Int
     root_rank::Int
     proc_size::Int
-    proc_dims::NTuple{2, Int}
+    proc_dims::NTuple{Dim, Int}
     global_comm::MPI.Comm
     cart_comm::MPI.Comm
-    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
-    neighbours::Neighbours{Int32, 2}  # Ranks of the neighbours of this process
-    global_grid::NTuple{2, Int}  # Dimensions of the global grid
+    cart_coords::NTuple{Dim, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
+    neighbours::Neighbours{Int32, Dim}  # Ranks of the neighbours of this process
+    global_grid::NTuple{Dim, Int}  # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
 
@@ -349,7 +349,8 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     function ArmonParameters(; data_type = Float64, N = (10, 10), options...)
         device, options = get_device(; options...)
 
-        params = new{data_type, typeof(device), Any}()
+        dim = length(N)
+        params = new{data_type, dim, typeof(device), Any}()
         params.N = N
         params.device = device
 
@@ -379,7 +380,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
         # TODO: this is ugly, but allows to circumvent a circular dependency between `init_device`,
         # `ArmonParameters` and the Kokkos backend of `@generic_kernel`: this way we can access the
         # index type from the `@generated` function without relying on external functions.
-        complete_params = new{data_type, typeof(device), typeof(params.backend_options)}()
+        complete_params = new{data_type, dim, typeof(device), typeof(params.backend_options)}()
         for field in fieldnames(typeof(params))
             setfield!(complete_params, field, getfield(params, field))
         end
@@ -405,17 +406,15 @@ function get_device(; device = :CUDA, options...)
 end
 
 
-function init_MPI(params::ArmonParameters;
-    use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing, gpu_aware = true,
+function init_MPI(params::ArmonParameters{<:Any, Dim};
+    use_MPI = true, P = ntuple(Returns(1), Dim), reorder_grid = true, global_comm = nothing, gpu_aware = true,
     options...
-)
+) where {Dim}
     global_comm = something(global_comm, MPI.COMM_WORLD)
     params.global_comm = global_comm
 
-    dim = length(params.N)
-
-    if length(P) != dim
-        solver_error(:config, "Mismatched dimensions: expected a grid of $dim processes, got: $(length(P))")
+    if length(P) != Dim
+        solver_error(:config, "Mismatched dimensions: expected a grid of $Dim processes, got: $(length(P))")
     end
 
     params.use_MPI = use_MPI
@@ -441,16 +440,16 @@ function init_MPI(params::ArmonParameters;
         params.cart_comm = C_COMM
         params.cart_coords = Tuple(MPI.Cart_coords(C_COMM))
 
-        params.neighbours = Neighbours(dim) do axis, side
-            return MPI.Cart_shift(C_COMM, Int(axis) - 1, offset_to(side, 1)[1])[2]
+        params.neighbours = Neighbours(Dim) do axis, side
+            return MPI.Cart_shift(C_COMM, Int(axis) - 1, first_side(side) ? -1 : 1)[2]
         end
     else
         params.rank = 0
         params.proc_size = 1
-        params.proc_dims = ntuple(Returns(1), dim)
+        params.proc_dims = ntuple(Returns(1), Dim)
         params.cart_comm = global_comm
-        params.cart_coords = ntuple(Returns(0), dim)
-        params.neighbours = Neighbours(Returns(MPI.PROC_NULL), dim)
+        params.cart_coords = ntuple(Returns(0), Dim)
+        params.neighbours = Neighbours(Returns(MPI.PROC_NULL), Dim)
     end
 
     params.root_rank = 0
@@ -489,24 +488,34 @@ function init_device(params::ArmonParameters;
 
     if !use_cache_blocking
         if use_gpu
-            # The literal block size for GPU kernels
-            block_size = something(block_size, 1024)
+            # The literal GPU block size for GPU kernels
+            block_size = something(block_size, (1024,))
         else
             # Disable cache blocking by using an empty block size
-            block_size = (0, 0)
+            block_size = ntuple(Returns(0), ndims(params))
         end
     elseif isnothing(block_size)
         # TODO: Estimate the optimal block size, given the solver's stencils
         if !use_gpu
-            block_size = (64, 64)
+            # Default is 4096 cells per block on CPU
+            if     ndims(params) == 1  block_size = (4096,)
+            elseif ndims(params) == 2  block_size = (64, 64)
+            elseif ndims(params) == 3  block_size = (16, 16, 16)
+            elseif ndims(params) == 4  block_size = (8, 8, 8, 8)
+            elseif ndims(params) == 6  block_size = (4, 4, 4, 4, 4)
+            else   solver_error(:config, "no default `block_size` in $(ndims(params))-dimensions on CPU")
+            end
         else
-            # TODO: GPU block size ?? 1024? but how?
-            block_size = (32, 32)
+            # Default on GPU is to use one whole grid
+            if     ndims(params) == 1  block_size = (1024,)
+            elseif ndims(params) == 2  block_size = (32, 32)
+            elseif ndims(params) == 3  block_size = (10, 10, 10)
+            else   solver_error(:config, "no default `block_size` in $(ndims(params))-dimensions on GPU")
+            end
         end
     end
 
-    length(block_size) > 2 && solver_error(:config, "Expected `block_size` to contain up to 2 elements, got: $block_size")
-    params.block_size = tuple(block_size..., ntuple(Returns(1), 2 - length(block_size))...)
+    params.block_size = block_size
 
     if !(workload_distribution in (:simple, :scotch, :sorted_scotch, :weighted_sorted_scotch))
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
@@ -552,7 +561,7 @@ function init_profiling(params::ArmonParameters;
         end
 
         if estimated_blk_log_size == 0
-            sweep_count = length(split_axes(params.axis_splitting, data_type(params), 1))
+            sweep_count = length(split_axes(params.axis_splitting, data_type(params), ndims(params), 1))
             estimated_blk_log_size = min(params.maxcycle, 1000) * sweep_count
         end
         params.estimated_blk_log_size = estimated_blk_log_size
@@ -777,7 +786,7 @@ function print_parameter(io::IO, pad::Int, name::String, value; nl=true, suffix=
 end
 
 
-function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
+function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, CPU_HP}) where {Dim}
     print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
     if p.use_threading
         println(io, " ($(Threads.nthreads()) $(use_std_lib_threads ? "standard " : "")thread",
@@ -789,7 +798,7 @@ function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
 end
 
 
-function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU})
+function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, CPU}) where {Dim}
     print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": KA.jl's CPU backend (block size: ", join(p.block_size, '×'), ")")
 end
@@ -799,6 +808,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
     print_device_info(io, pad, p)
+    print_parameter(io, pad, "dimension", ndims(p))
     print_parameter(io, pad, "blocking", p.use_cache_blocking ? (p.async_cycle ? "async" : "sync") : false, nl=false)
     if p.use_cache_blocking && p.async_cycle
         print(io, ", distribution: ", p.workload_distribution)
@@ -893,6 +903,8 @@ end
 print_parameters(p::ArmonParameters) = print_parameters(stdout, p)
 Base.show(io::IO, p::ArmonParameters) = print_parameters(io::IO, p::ArmonParameters)
 
+Base.ndims(::ArmonParameters{<:Any, Dim}) where {Dim} = Dim
+
 
 """
     memory_info(params)
@@ -975,17 +987,19 @@ end
 #
 
 function compute_steps_ranges(params::ArmonParameters)
-    params.steps_ranges = collect(compute_steps_ranges.(axes_of(length(params.N)), params.nghost, Ref(params.projection_scheme)))
+    params.steps_ranges = collect(compute_steps_ranges.(
+        axes_of(ndims(params)), params.nghost, Ref(params.projection_scheme), Ref(Val(ndims(params)))
+    ))
 end
 
-function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme)
+function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme, ::Val{Dim}) where {Dim}
     # Extra cells to compute in each step for the projection
     extra_FLX = stencil_width(projection)
     extra_UP = stencil_width(projection)
 
     # Real domain
-    bl_corner = (0, 0)  # Bottom-Left corner offset
-    tr_corner = (0, 0)  # Top-Right   corner offset
+    bl_corner = ntuple(Returns(0), Dim)  # Bottom-Left corner offset
+    tr_corner = ntuple(Returns(0), Dim)  # Top-Right   corner offset
     real_range = (bl_corner, tr_corner)
     real_domain = real_range
 
@@ -995,23 +1009,21 @@ function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionS
     # Steps ranges, computed so that there is no need for an extra BC step before the projection
     EOS = real_range  # The BC overwrites any changes to the ghost cells right after
 
-    if axis == Axis.X
-        # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes
-        fluxes_bl  = (extra_FLX, 0); fluxes_tr  = (extra_FLX+1, 0)
-        cell_up_bl = (extra_UP,  0); cell_up_tr = (extra_UP,    0)
-        advec_bl   = (0,         0); advec_tr   = (1,           0)
-    else
-        fluxes_bl  = (0, extra_FLX); fluxes_tr  = (0, extra_FLX+1)
-        cell_up_bl = (0, extra_UP ); cell_up_tr = (0, extra_UP   )
-        advec_bl   = (0, 0        ); advec_tr   = (0, 1          )
-    end
+    # Offests from each corner for each step.
+    # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes.
+    fluxes_bl  = bl_corner .- offset_to(axis, Dim, extra_FLX)
+    fluxes_tr  = tr_corner .+ offset_to(axis, Dim, extra_FLX+1)
+    cell_up_bl = bl_corner .- offset_to(axis, Dim, extra_UP)
+    cell_up_tr = tr_corner .+ offset_to(axis, Dim, extra_UP)
+    advec_bl   = bl_corner .- offset_to(axis, Dim, 0)
+    advec_tr   = tr_corner .+ offset_to(axis, Dim, 1)
 
-    fluxes      = (bl_corner .- fluxes_bl,  tr_corner .+ fluxes_tr )
-    cell_update = (bl_corner .- cell_up_bl, tr_corner .+ cell_up_tr)
-    advection   = (bl_corner .- advec_bl,   tr_corner .+ advec_tr  )
+    fluxes      = (fluxes_bl,  fluxes_tr )
+    cell_update = (cell_up_bl, cell_up_tr)
+    advection   = (advec_bl,   advec_tr  )
     projection  = real_range
 
-    return StepsRanges(
+    return StepsRanges{Dim}(
         axis, real_domain, full_domain,
         EOS, fluxes, cell_update, advection, projection
     )
@@ -1021,11 +1033,11 @@ end
 # Synchronisation
 #
 
-function Base.wait(::ArmonParameters{<:Any, <:Union{CPU, CPU_HP}})
+function Base.wait(::ArmonParameters{<:Any, Dim, <:Union{CPU, CPU_HP}}) where {Dim}
     # CPU backends are synchronous
 end
 
 
-function Base.wait(params::ArmonParameters{<:Any, <:GPU})
+function Base.wait(params::ArmonParameters{<:Any, Dim, <:GPU}) where {Dim}
     KernelAbstractions.synchronize(params.device)
 end

@@ -85,7 +85,7 @@ linear_range(dr::DomainRange) = first(dr):last(dr)
 show(io::IO, dr::DomainRange) = print(io, "DomainRange($(dr.col), $(dr.row))")
 
 """
-    StepsRanges
+    StepsRanges{D}
 
 Holds indexing information for all steps of the solver.
 
@@ -93,13 +93,13 @@ Domains are stored as block corner offsets: blocks can have different sizes, but
 amount of ghost cells, therefore the iteration domain is determined from the dimensions of the block.
 The first field is the offset to the first cell, the second is the offset to the last cell.
 """
-mutable struct StepsRanges
+mutable struct StepsRanges{D}
     direction       :: Axis.T
-    real_domain     :: NTuple{2, Dims{2}}
-    full_domain     :: NTuple{2, Dims{2}}
-    EOS             :: NTuple{2, Dims{2}}
-    fluxes          :: NTuple{2, Dims{2}}
-    cell_update     :: NTuple{2, Dims{2}}
-    advection       :: NTuple{2, Dims{2}}
-    projection      :: NTuple{2, Dims{2}}
+    real_domain     :: NTuple{2, Dims{D}}
+    full_domain     :: NTuple{2, Dims{D}}
+    EOS             :: NTuple{2, Dims{D}}
+    fluxes          :: NTuple{2, Dims{D}}
+    cell_update     :: NTuple{2, Dims{D}}
+    advection       :: NTuple{2, Dims{D}}
+    projection      :: NTuple{2, Dims{D}}
 end
