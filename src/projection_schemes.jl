@@ -22,22 +22,20 @@ end
 
 @generic_kernel function euler_projection!(
     s::Int, dx::T, dt::T,
-    uˢ::V, ρ::V, u::V, v::V, E::V,
-    advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V
-) where {T, V <: AbstractArray{T}}
+    uˢ::V, ρ::V, E::V, U::NTuple{D, V},
+    advection_ρ::V, advection_Eρ::V, advection_uρ::NTuple{D, V}
+) where {T, V <: AbstractArray{T}, D}
     i = @index_2D_lin()
 
     dX = dx + dt * (uˢ[i+s] - uˢ[i])
 
     tmp_ρ  = (dX * ρ[i]        - (advection_ρ[i+s]  - advection_ρ[i] )) / dx
-    tmp_uρ = (dX * ρ[i] * u[i] - (advection_uρ[i+s] - advection_uρ[i])) / dx
-    tmp_vρ = (dX * ρ[i] * v[i] - (advection_vρ[i+s] - advection_vρ[i])) / dx
     tmp_Eρ = (dX * ρ[i] * E[i] - (advection_Eρ[i+s] - advection_Eρ[i])) / dx
+    tmp_uρ = (dX .* ρ[i] .* get_tuple(U, i) .- (get_tuple(advection_uρ, i+s) .- get_tuple(advection_uρ, i))) ./ dx
 
     ρ[i] = tmp_ρ
-    u[i] = tmp_uρ / tmp_ρ
-    v[i] = tmp_vρ / tmp_ρ
     E[i] = tmp_Eρ / tmp_ρ
+    set_tuple!(U, tmp_uρ ./ tmp_ρ, i)
 end
 
 
@@ -46,8 +44,8 @@ function euler_projection!(params::ArmonParameters, state::SolverState, blk::Loc
     s = stride_along(blk.size, state.axis)
     blk_data = block_device_data(blk)
     euler_projection!(
-        params, blk_data, projection_range, s, state.dx, state.dt,
-        blk_data.work_1, blk_data.work_2, blk_data.work_3, blk_data.work_4
+        params, blk_data, projection_range, s, state.dx, state.dt, blk_data.dim_vars.u,
+        blk_data.scalar_vars.work_1, blk_data.scalar_vars.work_2, blk_data.dim_vars.work_3
     )
 end
 
@@ -61,9 +59,9 @@ end
 
 @generic_kernel function advection_first_order!(
     s::Int, dt::T,
-    uˢ::V, ρ::V, u::V, v::V, E::V,
-    advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V
-) where {T, V <: AbstractArray{T}}
+    uˢ::V, ρ::V, E::V, U::NTuple{D, V},
+    advection_ρ::V, advection_Eρ::V, advection_uρ::NTuple{D, V}
+) where {T, V <: AbstractArray{T}, D}
     i = @index_2D_lin()
     is = i
     disp = dt * uˢ[i]
@@ -71,10 +69,9 @@ end
         i = i - s
     end
 
-    advection_ρ[is]  = disp * (ρ[i]       )
-    advection_uρ[is] = disp * (ρ[i] * u[i])
-    advection_vρ[is] = disp * (ρ[i] * v[i])
-    advection_Eρ[is] = disp * (ρ[i] * E[i])
+    advection_ρ[is]  = disp * ρ[i]
+    advection_Eρ[is] = disp * ρ[i] * E[i]
+    set_tuple!(advection_uρ, disp .* ρ[i] .* get_tuple(U, i), is)
 end
 
 
@@ -83,17 +80,17 @@ function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::Loc
     s = stride_along(blk.size, state.axis)
     blk_data = block_device_data(blk)
     advection_first_order!(
-        params, blk_data, advection_range, s, state.dt,
-        blk_data.work_1, blk_data.work_2, blk_data.work_3, blk_data.work_4
+        params, blk_data, advection_range, s, state.dt, blk_data.dim_vars.u,
+        blk_data.scalar_vars.work_1, blk_data.scalar_vars.work_2, blk_data.dim_vars.work_3
     )
 end
 
 
 @generic_kernel function advection_second_order!(
     s::Int, dx::T, dt::T,
-    uˢ::V, ρ::V, u::V, v::V, E::V,
-    advection_ρ::V, advection_uρ::V, advection_vρ::V, advection_Eρ::V
-) where {T, V <: AbstractArray{T}}
+    uˢ::V, ρ::V, E::V, u::NTuple{D, V},
+    advection_ρ::V, advection_Eρ::V, advection_uρ::NTuple{D, V}
+) where {T, V <: AbstractArray{T}, D}
     i = @index_2D_lin()
     is = i
     disp = dt * uˢ[i]
@@ -112,15 +109,13 @@ end
     r₊  = (2 * Δxₗ) / (Δxₗ + Δxₗ₊)
 
     slopes_ρ  = slope_minmod(ρ[i-s]         , ρ[i]       , ρ[i+s]         , r₋, r₊)
-    slopes_uρ = slope_minmod(ρ[i-s] * u[i-s], ρ[i] * u[i], ρ[i+s] * u[i+s], r₋, r₊)
-    slopes_vρ = slope_minmod(ρ[i-s] * v[i-s], ρ[i] * v[i], ρ[i+s] * v[i+s], r₋, r₊)
     slopes_Eρ = slope_minmod(ρ[i-s] * E[i-s], ρ[i] * E[i], ρ[i+s] * E[i+s], r₋, r₊)
+    slopes_uρ = slope_minmod.(ρ[i-s] .* get_tuple(u, i-s), ρ[i] .* get_tuple(u, i), ρ[i+s] .* get_tuple(u, i+s), r₋, r₊)
 
     length_factor = Δxₑ / (2 * Δxₗ)
     advection_ρ[is]  = disp * (ρ[i]        - slopes_ρ  * length_factor)
-    advection_uρ[is] = disp * (ρ[i] * u[i] - slopes_uρ * length_factor)
-    advection_vρ[is] = disp * (ρ[i] * v[i] - slopes_vρ * length_factor)
     advection_Eρ[is] = disp * (ρ[i] * E[i] - slopes_Eρ * length_factor)
+    set_tuple!(advection_uρ, disp .* (ρ[i] .* get_tuple(u, i) .- slopes_uρ .* length_factor), is)
 end
 
 
@@ -129,8 +124,8 @@ function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::Loc
     s = stride_along(blk.size, state.axis)
     blk_data = block_device_data(blk)
     advection_second_order!(
-        params, blk_data, advection_range, s, state.dx, state.dt,
-        blk_data.work_1, blk_data.work_2, blk_data.work_3, blk_data.work_4
+        params, blk_data, advection_range, s, state.dx, state.dt, blk_data.dim_vars.u,
+        blk_data.scalar_vars.work_1, blk_data.scalar_vars.work_2, blk_data.dim_vars.work_3
     )
 end
 

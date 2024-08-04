@@ -29,6 +29,12 @@ Base.size(s::LinearToCartesian) = s.size
 Base.getindex(::LinearToCartesian{D}, I::Vararg{Int, D}) where {D} = I
 Base.IndexStyle(::Type{<:LinearToCartesian}) = Base.IndexCartesian()
 
+"`getindex` for a tuple of arrays, returning a tuple of values"
+Base.@propagate_inbounds get_tuple(arrays::NTuple{D}, i) where {D} = ntuple(d -> arrays[d][i], D)
+
+"`setindex!` for a tuple of arrays, assigning from a scalar or a tuple of values"
+Base.@propagate_inbounds set_tuple!(arrays::NTuple{D}, v, i) where {D} = ntuple(d -> (arrays[d][i] = v), D)
+Base.@propagate_inbounds set_tuple!(arrays::NTuple{D}, v::NTuple{D}, i) where {D} = ntuple(d -> (arrays[d][i] = v[d]), D)
 
 
 """

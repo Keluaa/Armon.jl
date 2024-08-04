@@ -37,6 +37,13 @@ lock_pages(::Ptr, ::Any)
 unlock_pages
 ```
 
+## `Tuple` utilities
+
+```@docs
+get_tuple
+set_tuple!
+```
+
 ## Other
 
 ```@docs

@@ -46,9 +46,9 @@ end
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGodunov)
     range = block_domain_range(blk.size, state.steps_ranges.fluxes)
     blk_data = block_device_data(blk)
-    u = state.axis == Axis.X ? blk_data.u : blk_data.v
+    uₐ = blk_data.dim_vars.u[state.axis]
     s = stride_along(blk.size, state.axis)
-    return acoustic!(params, blk_data, range, s, blk_data.uˢ, blk_data.pˢ, u)
+    return acoustic!(params, blk_data, range, s, blk_data.uˢ, blk_data.pˢ, uₐ)
 end
 
 
@@ -107,9 +107,9 @@ end
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGAD)
     range = block_domain_range(blk.size, state.steps_ranges.fluxes)
     blk_data = block_device_data(blk)
-    u = state.axis == Axis.X ? blk_data.u : blk_data.v
+    uₐ = blk_data.dim_vars.u[state.axis]
     s = stride_along(blk.size, state.axis)
-    return acoustic_GAD!(params, blk_data, range, s, state.dt, state.dx, u, state.riemann_limiter)
+    return acoustic_GAD!(params, blk_data, range, s, state.dt, state.dx, uₐ, state.riemann_limiter)
 end
 
 
