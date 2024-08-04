@@ -68,20 +68,25 @@ no_zero(x::Flt) where {Flt <: AbstractFloat} = ifelse(iszero(x), nextfloat(zero(
 
 function count_differences(
     ref_params::ArmonParameters{T}, grid::BlockGrid,
-    blk::Armon.LocalTaskBlock{<:Any, <:Any, BS}, ref_blk::Armon.LocalTaskBlock{<:Any, <:Any, BS};
+    blk::Armon.LocalTaskBlock{<:Any, <:Any, Dim, BS}, ref_blk::Armon.LocalTaskBlock{<:Any, <:Any, Dim, BS};
     atol=abs_tol(T, ref_params.test), rtol=rel_tol(T, ref_params.test), save_diff=false, on_device=false
-) where {T, BS}
+) where {T, Dim, BS}
     diff_var = Armon.block_data(blk; on_device).work_1
     save_diff && (diff_var .= 0)
 
     ref_data = Armon.block_data(ref_blk; on_device)
     cur_data = Armon.block_data(blk; on_device)
 
+    array_names = Armon.var_arrays_names(Armon.saved_vars)
+    ref_arrays = Armon.saved_arrays(ref_data)
+    cur_arrays = Armon.saved_arrays(cur_data)
+
     differences_count = 0
     max_diff = zero(T)
-    for (_, row_idx, row_range) in Armon.BlockRowIterator(grid, blk), field in Armon.saved_vars()
-        ref_row = @view getfield(ref_data, field)[row_range]
-        cur_row = @view getfield(cur_data, field)[row_range]
+    for (_, row_idx, row_range) in Armon.BlockRowIterator(grid, blk),
+            (array_name, ref_array, cur_array) in zip(array_names, ref_arrays, cur_arrays)
+        ref_row = @view ref_array[row_range]
+        cur_row = @view cur_array[row_range]
 
         diff_count = sum((!isapprox).(ref_row, cur_row; atol, rtol))
         differences_count += diff_count
@@ -101,7 +106,8 @@ function count_differences(
             blk_str = join(Tuple(blk.pos), '×')
             row_str = join(row_idx, '×')
             ulp = row_max_diff / eps(T)
-            "In block $blk_str row $row_str has $diff_count differences in '$field' with the reference. Max diff=$row_max_diff ($ulp ulp)"
+            "In block $blk_str row $row_str has $diff_count differences in '$array_name'\
+             with the reference. Max diff=$row_max_diff ($ulp ulp)"
         end
     end
 

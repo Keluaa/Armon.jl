@@ -35,7 +35,7 @@ function axis_invariance(test::Symbol, type::Type, axis::Armon.Axis.T; options..
     atol = abs_tol(type, ref_params.test)
     rtol = rel_tol(type, ref_params.test)
 
-    vars = setdiff(Armon.main_vars(), (:x, :y))
+    vars = setdiff(Armon.main_vars(), (:x,))
     vars_errors = Dict(vars .=> 0)
 
     for blk in Armon.all_blocks(data)
@@ -47,7 +47,7 @@ function axis_invariance(test::Symbol, type::Type, axis::Armon.Axis.T; options..
         r        = ntuple(i -> i == Int(axis) ? (1:real_blk_size[i]-1) : Colon(), ndims(bsize))
         r_offset = ntuple(i -> i == Int(axis) ? (2:real_blk_size[i])   : Colon(), ndims(bsize))
 
-        blk_vars = Armon.get_vars(blk, vars; on_device=false)
+        blk_vars = Armon.var_arrays(blk, vars; on_device=false)
         for (var, v_data) in zip(vars, blk_vars)
             v_data = reshape(v_data, blk_size)  # 1D to n-D array
             v_data = view(v_data, real_blk_range...)  # the real (non-ghost) data
@@ -71,11 +71,11 @@ function uninit_vars_propagation(test, type; options...)
     Armon.init_test(ref_params, data)
 
     big_val = type == Float32 ? 1e30 : 1e100
-    vars = setdiff(Armon.main_vars(), (:x, :y, :mask))
+    vars = setdiff(Armon.main_vars(), (:x, :mask))
     for blk in Armon.all_blocks(data)
         for i in 1:prod(Armon.block_size(blk.size))
             !Armon.is_ghost(blk.size, i) && continue  # only set `big_val` to ghost cells
-            blk_vars = Armon.get_vars(blk, vars; on_device=false)
+            blk_vars = Armon.var_arrays(blk, vars; on_device=false)
             for blk_var in blk_vars
                 blk_var[i] = big_val
             end

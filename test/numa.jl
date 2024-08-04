@@ -39,8 +39,8 @@ using ThreadPinning
         for (tid, blks_pos) in enumerate(grid.threads_workload), blk_pos in blks_pos
             blk = Armon.block_at(grid, blk_pos)
             numa_id = tid_map[tid]
-            for var in Armon.block_vars(blk)
-                push!(all_pages, (numa_id, Armon.array_pages(var)))
+            for array in Armon.var_arrays(blk)
+                push!(all_pages, (numa_id, Armon.array_pages(array)))
             end
         end
         return all_pages
@@ -52,7 +52,7 @@ using ThreadPinning
         numa_blks = Array{Int}(undef, grid.grid_size)
         for blk_pos in eachindex(Base.IndexCartesian(), numa_blks)
             blk = Armon.block_at(grid, blk_pos)
-            var = Armon.get_vars(blk, (:x,)) |> only
+            var = first(Armon.var_arrays(blk, (:x,)))
             idx_mid = (lastindex(var) + firstindex(var)) ÷ 2
             numa_node = NUMA.which_numa_node(var, idx_mid)
             numa_blks[blk_pos] = numa_node
@@ -62,17 +62,16 @@ using ThreadPinning
 
 
     function check_block_numa(blk, test_domain, expected_tid)
-        vars = Armon.block_vars()
         blk_range = Armon.block_domain_range(blk.size, test_domain)
         target_numa = tid_map[expected_tid]
         err_count = 0
         first_err_var = nothing
-        for (var_name, var) in zip(vars, Armon.get_vars(blk, vars))
+        for (var_name, array) in zip(Armon.var_arrays_names(blk), Armon.var_arrays(blk))
             # Only check the first and last index of the array
-            first_numa = NUMA.which_numa_node(var, first(blk_range))
-            last_numa  = NUMA.which_numa_node(var, last(blk_range))
+            first_numa = NUMA.which_numa_node(array, first(blk_range))
+            last_numa  = NUMA.which_numa_node(array, last(blk_range))
             if !(first_numa == last_numa == target_numa)
-                println("at block $(Tuple(blk.pos)) for var $var_name \
+                println("at block $(Tuple(blk.pos)) for array $var_name \
                          expected $target_numa for tid $expected_tid, got:\n\
                           - first_numa = $first_numa (idx=$(first(blk_range)))\n\
                           - last_numa  = $last_numa (idx=$(last(blk_range)))\n")

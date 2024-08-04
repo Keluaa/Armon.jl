@@ -294,7 +294,7 @@ end
 
 function positions_along(grid::BlockGrid, side::Armon.Side.T)
     axis = Armon.axis_of(side)
-    side_pos  = ifelse.(side in Armon.first_sides(ndims(grid)), 1, grid.grid_size)
+    side_pos  = ifelse.(Armon.first_sides(side), 1, grid.grid_size)
     first_pos = ifelse.(Armon.axes_of(ndims(grid)) .== axis, side_pos, 1)
     last_pos  = ifelse.(Armon.axes_of(ndims(grid)) .== axis, side_pos, grid.grid_size)
     return CartesianIndex(first_pos):CartesianIndex(last_pos)
@@ -331,7 +331,7 @@ function test_halo_exchange(P, global_comm)
 
                 # Halo exchange, but with one neighbour at a time
                 remote_blk = blk.neighbours[side]
-                @root_test length(domain) * length(Armon.comm_vars()) == length(remote_blk.send_buf.data)
+                @root_test length(domain) * Armon.num_arrays_per_comm(ndims(block_grid)) == length(remote_blk.send_buf.data)
                 if !Armon.start_exchange(ref_params, blk, remote_blk, side)
                     MPI.Waitall(remote_blk.requests)
                     @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
