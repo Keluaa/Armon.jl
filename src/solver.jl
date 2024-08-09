@@ -168,7 +168,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     if params.log_blocks
         # `> 1` since `stop_processing` means that we did not finish `blk_state`, apart from `EndCycle`.
         # This allows to exclude stalls from logs.
-        if steps_completed > 1 
+        if steps_completed > 1
             push_log!(state, BlockLogEvent(state, new_state, steps_completed, steps_vars, steps_var_count))
         else
             state.total_stalls += 1

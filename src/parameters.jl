@@ -200,6 +200,11 @@ Data type for all variables. Should be an `AbstractFloat`.
  - `:DebugIndexes`: Set all variables to their index in the global domain. Debug only.
 
 
+    periodic = (false, false)
+
+`true` if an axis has periodic boundary conditions.
+
+
     cfl = 0., maxtime = 0., maxcycle = 500_000
 
 `cfl` defaults to the test's default value, same for `maxtime`.
@@ -283,6 +288,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     cst_dt::Bool
     dt_on_even_cycles::Bool
     steps_ranges::Vector{StepsRanges}
+    periodic::NTuple{2, Bool}
 
     # Bounds
     maxtime::Flt_T
@@ -429,7 +435,7 @@ function init_MPI(params::ArmonParameters;
 
         # Create a cartesian grid communicator of P processes. `reorder=true` can be very important
         # for performance since it will optimize the layout of the processes.
-        C_COMM = MPI.Cart_create(global_comm, P; reorder=reorder_grid)
+        C_COMM = MPI.Cart_create(global_comm, P; reorder=reorder_grid, periodic=params.periodic)
         if C_COMM == MPI.COMM_NULL
             p_str = join(P, '×')
             solver_error(:config, "`MPI_Cart_create` could not create a $p_str cartesian topology \
@@ -453,10 +459,10 @@ function init_MPI(params::ArmonParameters;
         params.cart_comm = global_comm
         params.cart_coords = ntuple(Returns(0), length(params.N))
         params.neighbours = Dict(
-            Side.Left   => MPI.PROC_NULL,
-            Side.Right  => MPI.PROC_NULL,
-            Side.Bottom => MPI.PROC_NULL,
-            Side.Top    => MPI.PROC_NULL
+            Side.Left   => params.periodic[Int(Axis.X)] ? 0 : MPI.PROC_NULL,
+            Side.Right  => params.periodic[Int(Axis.X)] ? 0 : MPI.PROC_NULL,
+            Side.Bottom => params.periodic[Int(Axis.Y)] ? 0 : MPI.PROC_NULL,
+            Side.Top    => params.periodic[Int(Axis.Y)] ? 0 : MPI.PROC_NULL
         )
     end
 
@@ -633,6 +639,7 @@ function init_test(params::ArmonParameters{T};
     test = :Sod,
     domain_size = nothing, origin = nothing,
     cfl = 0., maxtime = 0., maxcycle = 500_000,
+    periodic = (false, false),
     options...
 ) where {T}
     if test isa Symbol
@@ -665,6 +672,14 @@ function init_test(params::ArmonParameters{T};
 
     params.cfl     = cfl     != 0 ? cfl     : default_CFL(test)
     params.maxtime = maxtime != 0 ? maxtime : default_max_time(test)
+
+    bc = boundary_condition(test)
+    for (axis, ax_periodic) in zip(instances(Axis.T), periodic), side in sides_along(axis)
+        !ax_periodic && continue
+        bc[side] == FreeFlow && continue
+        solver_error(:config, "Cannot use periodic boundary along $axis: $side side uses $(bc[side]) condition for $(test_name(test))")
+    end
+    params.periodic = periodic
 
     return options
 end
@@ -890,7 +905,12 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     end
 
     print_parameter(io, pad, "domain size", join(p.domain_size, " × "), nl=false)
-    println(io, ", origin: (", join(p.origin, ", "), ")")
+    print(io, ", origin: (", join(p.origin, ", "), ")")
+    periodic_axes = filter(ax -> is_periodic(p, ax), instances(Axis.T))
+    if !isempty(periodic_axes)
+        print(io, ", periodic along the ", join(periodic_axes, ", ", " and "), length(periodic_axes) > 1 ? " axes" : " axis")
+    end
+    println(io)
 
     grid_size, static_sized_grid, _ = grid_dimensions(p)
     print_grid_dimensions(io, grid_size, static_sized_grid, p.block_size, p.N, p.nghost; pad)
@@ -934,8 +954,11 @@ Get `T`, the type used for numbers by the solver
 data_type(::ArmonParameters{T}) where T = T
 
 
+is_periodic(params::ArmonParameters, axis::Axis.T) = params.periodic[Int(axis)]
+is_periodic(params::ArmonParameters, side::Side.T) = is_periodic(params, axis_of(side))
+
 neighbour_at(params::ArmonParameters, side::Side.T) = params.neighbours[side]
-has_neighbour(params::ArmonParameters, side::Side.T) = params.neighbours[side] ≠ MPI.PROC_NULL
+has_neighbour(params::ArmonParameters, side::Side.T) = is_periodic(params, side) || params.neighbours[side] ≠ MPI.PROC_NULL
 
 neighbour_count(params::ArmonParameters) = count(≠(MPI.PROC_NULL), values(params.neighbours))
 neighbour_count(params::ArmonParameters, dir::Axis.T) = count(≠(MPI.PROC_NULL), neighbour_at.(params, sides_along(dir)))

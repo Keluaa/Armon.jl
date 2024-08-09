@@ -33,6 +33,7 @@ struct BlockGrid{
     static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
     cell_size          :: NTuple{2, Int}  # Number of real cells in each direction
     edge_size          :: NTuple{2, Int}  # Number of real cells in edge blocks in each direction (only along non-edge directions)
+    periodic           :: NTuple{2, Bool}  # If the grid is periodic along an axis
     device             :: Device
     global_dt          :: GlobalTimeStep{T}
     blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, BS, SState}}
@@ -84,12 +85,13 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
     # Main grid container
     edge_size = remainder_block_size .- 2*ghost
+    periodic_grid = params.periodic .&& params.proc_dims .== 1  # `true` only if the grid itself should be periodic
     grid = BlockGrid{
         T, device_array, host_array, buffer_array,
         ghost, typeof(static_size),
         state_type, typeof(params.device)
     }(
-        grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
+        grid_size, static_sized_grid, cell_size, edge_size, periodic_grid, params.device, global_dt,
         blocks, edge_blocks, remote_blocks, threads_workload, threads_logs
     )
 
@@ -131,13 +133,17 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                 remote_blk_pos = pos + CartesianIndex(offset_to(side))
                 in_grid(remote_blk_pos, grid_size) && continue
 
-                remote_block = if has_neighbour(params, side)
+                # Neighbour MPI rank. If this side is periodic and the proc grid side is 1 along
+                # this axis then it is the rank of this sub-domain. In this case we still create the
+                # remote block but the local block will not connect to it.
+                neighbour = neighbour_at(params, side)
+
+                remote_block = if has_neighbour(params, side) && neighbour != params.rank
                     # The buffer must be the same size as the side of our block which is a neighbour to...
                     buffer_size = real_face_size(local_block.size, side)
                     # ...for each variable to communicate of each ghost cell
                     buffer_size *= length(comm_vars()) * params.nghost
 
-                    neighbour = neighbour_at(params, side)  # MPI rank
                     global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
 
                     RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm, side)
@@ -164,6 +170,9 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         bottom_block = block_at(grid, bottom_idx)
         top_block    = block_at(grid, top_idx)
         this_block.neighbours = Neighbours{TaskBlock}((left_block, right_block, bottom_block, top_block))
+
+        # TODO: there might be some optimisations possible when a block is connected to itself, which
+        # allow skipping most of the block interface logic
 
         # Blocks sharing a side must share the same `BlockInterface`
         this_block.exchanges = Neighbours{BlockInterface}((
@@ -529,18 +538,48 @@ function remote_block_idx(grid::BlockGrid, idx::CartesianIndex)
 end
 
 
+mirror_idx(grid::BlockGrid, idx::CartesianIndex) = CartesianIndex(mirror_idx(grid, Tuple(idx)))
+function mirror_idx(grid::BlockGrid, idx::NTuple{2, Int})
+    return ifelse.(grid.periodic,
+        ifelse.(idx .== 0, grid.grid_size,
+            ifelse.(idx .== grid.grid_size .+ 1, 1, idx)
+        ), idx)
+end
+
+
 """
     block_at(grid::BlockGrid, idx::CartesianIndex)
 
 The [`TaskBlock`](@ref) at position `idx` in the `grid`.
 """
 function block_at(grid::BlockGrid, idx::CartesianIndex)
-    if in_grid(idx, grid.static_sized_grid)
-        return grid.blocks[block_idx(grid, idx)]
-    elseif in_grid(idx, grid.grid_size)
-        return grid.edge_blocks[edge_block_idx(grid, idx)]
-    else
-        return grid.remote_blocks[remote_block_idx(grid, idx)]
+    try
+        if in_grid(idx, grid.static_sized_grid)
+            return grid.blocks[block_idx(grid, idx)]
+        elseif in_grid(idx, grid.grid_size)
+            return grid.edge_blocks[edge_block_idx(grid, idx)]
+        else
+            periodic_axes = grid.periodic .&& (Tuple(idx) .== 0 .|| Tuple(idx) .== grid.grid_size .+ 1)
+            if any(periodic_axes)
+                # At a periodic edge of a grid, we return the local block of the other side instead
+                # of a remote block, since the local blocks shouldn't link to them.
+                return block_at(grid, mirror_idx(grid, idx))
+            else
+                return grid.remote_blocks[remote_block_idx(grid, idx)]
+            end
+        end
+    catch e
+        # TODO: very rarely, I get some UndefRefError and I don't know why
+        !(e isa UndefRefError) && rethrow(e)
+        kind_str = if in_grid(idx, grid.static_sized_grid)
+            "static"
+        elseif in_grid(idx, grid.grid_size)
+            "edge"
+        else
+            "remote"
+        end
+        println(stderr, "Error while accessing ", Tuple(idx), " as a ", kind_str, " block")
+        rethrow(e)
     end
 end
 
