@@ -4,6 +4,7 @@ using Printf
 using Polyester
 using ThreadPinning
 using KernelAbstractions
+using KernelsToolkit
 using MPI
 using MacroTools
 using NUMA
@@ -23,7 +24,6 @@ abstract type SplittingMethod end
 
 include("utils.jl")
 include("numa_utils.jl")
-include("domain_ranges.jl")
 include("parameters.jl")
 include("tests.jl")
 include("solver_state.jl")

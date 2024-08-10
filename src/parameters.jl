@@ -4,6 +4,28 @@ struct EmptyParams <: BackendParams end
 
 
 """
+    StepsRanges{D}
+
+Holds indexing information for all steps of the solver.
+
+Domains are stored as block corner offsets: blocks can have different sizes, but always the same
+amount of ghost cells, therefore the iteration domain is determined from the dimensions of the block.
+The first field is the offset from the bottom left corner to the first cell, the second is the
+offset from the top right corner to the last cell of the domain.
+"""
+mutable struct StepsRanges{D}
+    direction       :: Axis.T  # Direction along which to apply each step
+    real_domain     :: NTuple{2, Dims{D}}
+    full_domain     :: NTuple{2, Dims{D}}
+    EOS             :: NTuple{2, Dims{D}}
+    fluxes          :: NTuple{2, Dims{D}}
+    cell_update     :: NTuple{2, Dims{D}}
+    advection       :: NTuple{2, Dims{D}}
+    projection      :: NTuple{2, Dims{D}}
+end
+
+
+"""
     ArmonParameters(; options...)
 
 The parameters and current state of the solver.

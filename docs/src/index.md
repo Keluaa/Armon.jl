@@ -74,7 +74,6 @@ lin_position
 in_grid
 is_ghost
 BlockRowIterator
-DomainRange
 ```
 
 ## Block states

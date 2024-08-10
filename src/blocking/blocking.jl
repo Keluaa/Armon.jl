@@ -61,28 +61,24 @@ real_block_size(bs::DynamicBSize{G}) where {G} = bs.s .- 2*G
     block_domain_range(bsize::BlockSize, corners)
     block_domain_range(bsize::BlockSize, bottom_left::Tuple, top_right::Tuple)
 
-A [`DomainRange`](@ref) built from offsets from the corners of `bsize`.
+A [`CartesianDomain`](@ref) built from offsets from the corners of `bsize`.
 
 `block_domain_range(bsize, (0, 0), (0, 0))` is the domain of all real cells in the block.
 `block_domain_range(bsize, (-g, -g), (g, g))` would be the domain of all cells (real cells + `g`
 ghost cells) in the block.
 """
 block_domain_range(bsize::BlockSize, corners::NTuple{2, Dims}) = block_domain_range(bsize, corners...)
-function block_domain_range(bsize::BlockSize, bottom_left::Dims{2}, top_right::Dims{2})
-    ghost = ghosts(bsize)
-    row = block_size(bsize)[1]
 
-    # TODO: dimension agnostic
+function block_domain_range(bsize::BlockSize{D}, bottom_left::Dims{D}, top_right::Dims{D}) where {D}
+    first_I = CartesianIndex(bottom_left) + one(CartesianIndex{D})
+    last_I  = CartesianIndex(top_right)   + CartesianIndex(real_block_size(bsize))
 
-    block_start = row * (ghost - 1) + ghost
-    block_idx(I) = block_start + I[2] * row + I[1]
+    # The domain uses coordinates indexed from the first ghost cell of the block
+    first_I += one(CartesianIndex{D}) * ghosts(bsize)
+    last_I  += one(CartesianIndex{D}) * ghosts(bsize)
 
-    first_I = bottom_left .+ (1, 1)
-    last_I  = top_right   .+ real_block_size(bsize)
-
-    col_range = block_idx(first_I):row:block_idx(last_I)
-    row_range = Base.OneTo(length(first_I[1]:last_I[1]))
-    return DomainRange(col_range, row_range)
+    domain  = CartesianDomain(first_I:last_I, strides(bsize), KernelsToolkit.RowMajor())  # TODO: or maybe ColumnMajor ?? idk
+    return KernelsToolkit.simplify_range(domain)  # TODO: monitor allocations + performance
 end
 
 
@@ -90,6 +86,7 @@ end
     position(bsize::BlockSize, i)
 
 N-dim position of the `i`-th cell in the block, as a `Tuple`.
+`i = 1` would return the position of the first real cell.
 
 If `1 ≤ position(bsize, i)[d] ≤ block_size(bsize)[d]` then the cell is not a ghost cell along the `d`
 dimension. See [`is_ghost`](@ref).
@@ -104,62 +101,68 @@ end
 
 From `I` (e.g. returned from [`position`](@ref)), return the linear index in the block.
 `lin_position(bsize, position(bsize, i)) == i`.
+If `all(I .== 1)` then the index of the first real cell is returned.
 """
 function lin_position(bsize::BlockSize{D}, I::NTuple{D}) where {D}
     return sum((I .+ (ghosts(bsize) - 1)) .* Base.size_to_strides(1, block_size(bsize)...)) + 1
 end
 
 
+function border_domain_corners(bsize::BlockSize{D}, side::Side.T, single_strip) where {D}
+    rsize = real_block_size(bsize)
+
+    # offset to move a corner to the opposite face along the axis of side
+    side_offset = offset_to(side, D, rsize[axis_of(side)] - 1)
+    zero_offset = ntuple(Returns(0), D)
+
+    # First sides move the TR corner to them, last sides move to BL corner to them.
+    bl_corner = first_side(side) ? zero_offset : side_offset
+    tr_corner = first_side(side) ? side_offset : zero_offset
+
+    if single_strip
+        # only a single row of cells is needed
+    elseif first_side(side)
+        tr_corner = tr_corner .- offset_to(side, D, ghosts(bsize) - 1)
+    else
+        bl_corner = bl_corner .- offset_to(side, D, ghosts(bsize) - 1)
+    end
+
+    return tr_corner, bl_corner
+end
+
+
 """
     border_domain(bsize::BlockSize, side::Side.T; single_strip=true)
 
-[`DomainRange`](@ref) of the real cells along `side`.
+[`CartesianDomain`](@ref) of the real cells along `side`.
 
 If `single_strip == true`, it includes only one "strip" of cells, that is
 `length(border_domain(bsize, side)) == size_along(bsize, side)`.
 Otherwise, there are `ghosts(bsize)` strips of cells: all real cells which would be exchanged with
 another block along `side`.
 """
-function border_domain(bsize::BlockSize{D}, side::Side.T; single_strip=true) where {D}
-    rsize = real_block_size(bsize)
-
-    ax_i = Integer(axis_of(side))
-    zero_offset = ntuple(Returns(0), D)
-    side_offset = offset_to(side, D, rsize[ax_i] - 1)  # offset to move a corner to the opposite face along the axis of side
-
-    # First sides move the TR corner to them, last sides move to BL corner to them.
-    bl_corner = first_side(side) ? zero_offset : side_offset
-    tr_corner = first_side(side) ? side_offset : zero_offset
-
-    domain = block_domain_range(bsize, bl_corner, tr_corner)
-    single_strip && return domain
-    if first_side(side)
-        return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
-    else
-        return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
-    end
+function border_domain(bsize::BlockSize, side::Side.T; single_strip=true)
+    bl_corner, tr_corner = border_domain_corners(bsize, side, single_strip)
+    return block_domain_range(bsize, bl_corner, tr_corner)
 end
 
 
 """
     ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
 
-[`DomainRange`](@ref) of all ghosts cells of `side`, excluding the corners of the block.
+[`CartesianDomain`](@ref) of all ghosts cells of `side`, excluding the corners of the block.
 
 If `single_strip == true`, then the domain is only 1 cell thick, positionned at the furthest ghost
 cell from the real cells.
 Otherwise, there are `ghosts(bsize)` strips of cells: all ghost cells which would be exchanged with
 another block along `side`.
 """
-function ghost_domain(bsize::BlockSize, side::Side.T; single_strip=true)
-    domain = border_domain(bsize, side)
-    domain = shift_dir(domain, axis_of(side), first_sides(side) ? -ghosts(bsize) : ghosts(bsize))
-    single_strip && return domain
-    if first_sides(side)
-        return expand_dir(domain, axis_of(side), ghosts(bsize) - 1)
-    else
-        return prepend_dir(domain, axis_of(side), ghosts(bsize) - 1)
-    end
+function ghost_domain(bsize::BlockSize{D}, side::Side.T; single_strip=true) where {D}
+    bl_corner, tr_corner = border_domain_corners(bsize, side, single_strip)
+    offset = offset_to(side, D, ghosts(bsize))
+    bl_corner = bl_corner .+ offset
+    tr_corner = tr_corner .+ offset
+    return block_domain_range(bsize, bl_corner, tr_corner)
 end
 
 
@@ -183,7 +186,8 @@ real_face_size(bsize::BlockSize, side::Side.T) = real_face_size(bsize, axis_of(s
 
 `o` would be a "ring" index: `o == 1` excludes the first ring of ghost cells, etc.
 """
-is_ghost(bsize::BlockSize, i, o=0) = !in_grid(1 - o, position(bsize, i), real_block_size(bsize) .+ o)
+is_ghost(bsize::BlockSize, I, o=0) = !in_grid(1 - o, I, real_block_size(bsize) .+ o)
+is_ghost(bsize::BlockSize, i::Integer, o=0) = is_ghost(bsize, position(bsize, i), o)
 
 
 """
