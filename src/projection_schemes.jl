@@ -25,7 +25,7 @@ end
     uˢ::V, ρ::V, E::V, U::NTuple{D, V},
     advection_ρ::V, advection_Eρ::V, advection_uρ::NTuple{D, V}
 ) where {T, V <: AbstractArray{T}, D}
-    i = @index_2D_lin()
+    i = @kt_i()
 
     dX = dx + dt * (uˢ[i+s] - uˢ[i])
 
@@ -40,12 +40,14 @@ end
 
 
 function euler_projection!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    projection_range = block_domain_range(blk.size, state.steps_ranges.projection)
+    domain = block_domain_range(blk.size, state.steps_ranges.projection)
     s = stride_along(blk.size, state.axis)
-    blk_data = block_device_data(blk)
+    data = block_device_data(blk)
+    (; ρ, E, uˢ, work_1, work_2) = data.scalar_vars
+    (; u, work_3) = data.dim_vars.u
     euler_projection!(
-        params, blk_data, projection_range, s, state.dx, state.dt, blk_data.dim_vars.u,
-        blk_data.scalar_vars.work_1, blk_data.scalar_vars.work_2, blk_data.dim_vars.work_3
+        s, state.dx, state.dt, uˢ, ρ, E, u, work_1, work_2, work_3;
+        ctx=params.kernel_ctx, domain
     )
 end
 
@@ -62,7 +64,7 @@ end
     uˢ::V, ρ::V, E::V, U::NTuple{D, V},
     advection_ρ::V, advection_Eρ::V, advection_uρ::NTuple{D, V}
 ) where {T, V <: AbstractArray{T}, D}
-    i = @index_2D_lin()
+    i = @kt_i()
     is = i
     disp = dt * uˢ[i]
     if disp > 0
@@ -76,12 +78,14 @@ end
 
 
 function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::EulerProjection)
-    advection_range = block_domain_range(blk.size, state.steps_ranges.advection)
+    domain = block_domain_range(blk.size, state.steps_ranges.advection)
     s = stride_along(blk.size, state.axis)
-    blk_data = block_device_data(blk)
+    data = block_device_data(blk)
+    (; uˢ, ρ, E, work_1, work_2) = data.scalar_vars
+    (; u, work_3) = data.dim_vars
     advection_first_order!(
-        params, blk_data, advection_range, s, state.dt, blk_data.dim_vars.u,
-        blk_data.scalar_vars.work_1, blk_data.scalar_vars.work_2, blk_data.dim_vars.work_3
+        s, state.dt, uˢ, ρ, E, u, work_1, work_2, work_3;
+        ctx=params.kernel_ctx, domain
     )
 end
 
@@ -91,7 +95,7 @@ end
     uˢ::V, ρ::V, E::V, u::NTuple{D, V},
     advection_ρ::V, advection_Eρ::V, advection_uρ::NTuple{D, V}
 ) where {T, V <: AbstractArray{T}, D}
-    i = @index_2D_lin()
+    i = @kt_i()
     is = i
     disp = dt * uˢ[i]
     if disp > 0
@@ -120,12 +124,14 @@ end
 
 
 function advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Euler2ndProjection)
-    advection_range = block_domain_range(blk.size, state.steps_ranges.advection)
+    domain = block_domain_range(blk.size, state.steps_ranges.advection)
     s = stride_along(blk.size, state.axis)
-    blk_data = block_device_data(blk)
+    data = block_device_data(blk)
+    (; uˢ, ρ, E, work_1, work_2) = data.scalar_vars
+    (; u, work_3) = data.dim_vars
     advection_second_order!(
-        params, blk_data, advection_range, s, state.dx, state.dt, blk_data.dim_vars.u,
-        blk_data.scalar_vars.work_1, blk_data.scalar_vars.work_2, blk_data.dim_vars.work_3
+        s, state.dx, state.dt, uˢ, ρ, E, u, work_1, work_2, work_3;
+        ctx=params.kernel_ctx, domain
     )
 end
 

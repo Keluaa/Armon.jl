@@ -106,7 +106,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     inner_grid = CartesianIndices(static_sized_grid)
     device_kwargs = alloc_device_kwargs(params)
     host_kwargs = alloc_host_kwargs(params)
-    @threaded :outside_kernel for _ in 1:length(threads_workload)
+    @threaded for _ in 1:length(threads_workload)
         tid = Threads.threadid()
         for pos in threads_workload[tid]
             # Static block for the inner grid, edge block otherwise

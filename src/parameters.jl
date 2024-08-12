@@ -79,8 +79,8 @@ Lock all memory pages using `mlock` to RAM.
     use_threading = true, use_simd = true
 
 Switches for [`CPU_HP`](@ref) kernels.
-`use_threading` enables [`@threaded`](@ref) for outer loops.
-`use_simd` enables [`@simd_loop`](@ref) for inner loops.
+`use_threading` enables multithreading for outer loops.
+`use_simd` enables vectorisation for inner loops
 
 
     use_gpu = false
@@ -286,7 +286,7 @@ An error is thrown otherwise. Accepts a relative `comparison_tolerance`.
 If `return_data=true`, then in the [`SolverStats`](@ref) returned by [`armon`](@ref), the `data`
 field will contain the [`BlockGrid`](@ref) used by the solver.
 """
-mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams}
+mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams, KtContext <: KernelsToolkit.KernelContext}
     # Test problem type, riemann solver and solver scheme
     test::TestCase
     riemann_scheme::RiemannScheme
@@ -344,6 +344,7 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams}
     numa_aware::Bool
     lock_memory::Bool
     busy_wait_limit::Int
+    kernel_ctx::KtContext
 
     # MPI
     use_MPI::Bool
@@ -372,7 +373,7 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams}
         device, options = get_device(; options...)
 
         dim = length(N)
-        params = new{data_type, dim, typeof(device), Any}()
+        params = new{data_type, dim, typeof(device), Any, KernelsToolkit.KernelContext}()
         params.N = N
         params.device = device
 
@@ -402,7 +403,7 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams}
         # TODO: this is ugly, but allows to circumvent a circular dependency between `init_device`,
         # `ArmonParameters` and the Kokkos backend of `@generic_kernel`: this way we can access the
         # index type from the `@generated` function without relying on external functions.
-        complete_params = new{data_type, dim, typeof(device), typeof(params.backend_options)}()
+        complete_params = new{data_type, dim, typeof(device), typeof(params.backend_options), typeof(params.kernel_ctx)}()
         for field in fieldnames(typeof(params))
             setfield!(complete_params, field, getfield(params, field))
         end
@@ -548,6 +549,24 @@ function init_device(params::ArmonParameters;
     numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
     params.lock_memory = lock_memory
+
+    # TODO: rewrite `create_device` and `init_backend` to initialize `kernel_ctx` instead (+remove DeviceParams and Device?)
+    opts = [KernelsToolkit.Inbounds()]
+    use_fast_math && push!(opts, KernelsToolkit.FastMath())
+    params.kernel_ctx = if params.device isa CPU_HP
+        if params.use_threading && !params.use_cache_blocking
+            threading_macro = use_std_lib_threads ? Threads.var"@threads" : Polyester.var"@batch"
+            push!(opts, KernelsToolkit.MultiThreading(threading_macro))
+        end
+        params.use_simd && push!(opts, KernelsToolkit.Simd(true))
+        KernelsToolkit.context(KernelsToolkit.CPU, opts...)
+    elseif params.device isa KernelAbstractions.Backend
+        push!(opts, KernelsToolkit.KA_Device(params.device))
+        push!(opts, KernelsToolkit.KA_GroupSize(params.block_size))
+        KernelsToolkit.context(KernelsToolkit.KA_Context, opts...)
+    else
+        solver_error(:config, "cannot create kernel context from $(params.device)")
+    end
 
     return options
 end
@@ -934,7 +953,7 @@ The total and free memory the current process can store on the `params.device`.
 """
 function memory_info(params::ArmonParameters)
     mem_info = device_memory_info(params.device)
-    # TODO: MPI support
+    # TODO: MPI support (think about shared resources!)
     return mem_info
 end
 

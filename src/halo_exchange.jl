@@ -3,13 +3,13 @@
     scalars::NTuple{N, V}, u::NTuple{D, V}, u_factor::NTuple{D, T},
     bsize::BlockSize{D}, side::Side.T
 ) where {T, V <: AbstractArray{T}, N, D}
-    @kernel_init begin
+    #= TODO: @kernel_init =# begin
         # `incr` is the stride of `axis` going towards the edge along `side`
         incr = stride_along(bsize, axis_of(side))
         incr = ifelse(first_side(side), -incr, incr)
     end
 
-    i = @index_2D_lin()
+    i = @kt_i()
     ig = i + incr  # index of the ghost cell
 
     for _ in 1:ghosts(bsize)
@@ -29,15 +29,15 @@ end
 
 function boundary_conditions!(params::ArmonParameters{T, D}, state::SolverState, blk::LocalTaskBlock, side::Side.T) where {T, D}
     domain = border_domain(blk.size, side)
-    blk_data = block_data(blk; on_device=true)
+    data = block_data(blk; on_device=true)
 
     scalar_comm_vars = filter(!in(dim_vars()), comm_vars())
-    scalars = var_arrays(blk_data, scalar_comm_vars)
-    u = var_arrays(blk_data, (:u,))  # Assume the only dimensional variable is `u`
+    scalars = var_arrays(data, scalar_comm_vars)
+    u = data.dim_vars.u  # Assume the only dimensional variable is `u`
 
     u_factor = boundary_condition(state.test_case, side, Val{D}(), T)
 
-    boundary_conditions!(params, block_device_data(blk), domain, scalars, u, u_factor, blk.size, side)
+    boundary_conditions!(scalars, u, u_factor, blk.size, side; ctx=params.kernel_ctx, domain)
 end
 
 
@@ -73,7 +73,7 @@ end
     vars₂::NTuple{N, V},
     bsize::BlockSize, side₁::Side.T
 ) where {N, V}
-    @kernel_init begin
+    #= TODO: @kernel_init =# begin
         side₂ = opposite_of(side₁)
 
         # Offsets going towards the ghost cells
@@ -86,7 +86,7 @@ end
         d₂ = ifelse(first_side(side₂), -d₂, d₂)
     end
 
-    i₁ = @index_2D_lin()
+    i₁ = @kt_i()
     i₂ = i₁ + d₂
 
     # `ig` is the position of the ghost cell at the border of the block
@@ -114,9 +114,9 @@ function block_ghost_exchange(
 
     # Exchange between two blocks with the same dimensions
     domain = border_domain(blk₁.size, side)
-    block_ghost_exchange(params, domain,
-        comm_arrays(blk₁), comm_arrays(blk₂),
-        blk₁.size, side
+    block_ghost_exchange(
+        comm_arrays(blk₁), comm_arrays(blk₂), blk₁.size, side;
+        ctx=params.kernel_ctx, domain
     )
 
     return exchange_done!(blk₁, side)
@@ -128,7 +128,7 @@ end
     vars₂::NTuple{N, V}, bsize₂::BlockSize,
     side₁::Side.T
 ) where {N, V}
-    @kernel_init begin
+    #= TODO: @kernel_init =# begin
         side₂ = opposite_of(side₁)
 
         # Offsets going towards the ghost cells
@@ -139,7 +139,7 @@ end
         sg₂ = ifelse(first_side(side₂), -sg₂, sg₂)
     end
 
-    i₁ = @index_2D_lin()
+    i₁ = @kt_i()
 
     # `bsize₁` and `bsize₂` are different, therefore such is the iteration domain. We translate the
     # `i₁` index to its reciprocal `i₂` on the other side using the nD index.
@@ -176,10 +176,9 @@ function block_ghost_exchange(
 
     # Exchange between two blocks with (possibly) different dimensions, but the same length along `side`
     domain = border_domain(blk₁.size, side)
-    block_ghost_exchange(params, domain,
-        comm_arrays(blk₁), blk₁.size,
-        comm_arrays(blk₂), blk₂.size,
-        side
+    block_ghost_exchange(
+        comm_arrays(blk₁), blk₁.size, comm_arrays(blk₂), blk₂.size, side;
+        ctx=params.kernel_ctx, domain
     )
 
     return exchange_done!(blk₁, side)
@@ -189,8 +188,8 @@ end
 @generic_kernel function pack_to_array!(
     bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
 ) where {N, V}
-    idx = @index_2D_lin()
-    itr = @iter_idx()
+    idx = @kt_i()
+    itr = @kt_pos()
 
     (i, i_g) = divrem(itr - 1, ghosts(bsize))
     i_arr = (i_g * real_face_size(bsize, side) + i) * N
@@ -205,8 +204,8 @@ end
 @generic_kernel function unpack_from_array!(
     bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
 ) where {N, V}
-    idx = @index_2D_lin()
-    itr = @iter_idx()
+    idx = @kt_i()
+    itr = @kt_pos()
 
     (i, i_g) = divrem(itr - 1, ghosts(bsize))
     i_arr = (i_g * real_face_size(bsize, side) + i) * N
@@ -241,7 +240,10 @@ function start_exchange(
     send_domain = border_domain(blk.size, side; single_strip=false)
     vars = comm_arrays(blk; on_device=buffer_are_on_device)
     # TODO: run on host if `D != B`, or perform it on the device on a tmp array
-    pack_to_array!(params, send_domain, blk.size, side, other_blk.send_buf.data, vars)
+    pack_to_array!(
+        blk.size, side, other_blk.send_buf.data, vars;
+        ctx=params.ctx, domain=send_domain
+    )
 
     wait(params)  # Wait for the copy to complete
 
@@ -274,7 +276,10 @@ function finish_exchange(
     buffer_are_on_device = D == B
     vars = comm_arrays(blk; on_device=buffer_are_on_device)
     # TODO: run on host if `D != B`
-    unpack_from_array!(params, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+    unpack_from_array!(
+        blk.size, side, other_blk.recv_buf.data, vars;
+        ctx=params.kernel_ctx, domain=recv_domain
+    )
 
     if !buffer_are_on_device
         # MPI buffers are not where we want the data to be. Retreive the result of the exchange.

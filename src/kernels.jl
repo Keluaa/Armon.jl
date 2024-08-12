@@ -2,10 +2,9 @@
 # TODO: make the stride deductible at compile-time (i.e. one kernel instanciation per axis)
 
 @generic_kernel function perfect_gas_EOS!(
-    γ::T,
-    ρ::V, E::V, p::V, c::V, g::V, U::NTuple{D, V}
+    γ::T, ρ::V, E::V, p::V, c::V, g::V, U::NTuple{D, V}
 ) where {T, V <: AbstractArray{T}, D}
-    i = @index_2D_lin()
+    i = @kt_i()
     e = E[i] - 0.5 * sum(get_tuple(U, i).^2)
     p[i] = (γ - 1.) * ρ[i] * e
     c[i] = sqrt(γ * p[i] / ρ[i])
@@ -16,13 +15,13 @@ end
 @generic_kernel function bizarrium_EOS!(
     ρ::V, E::V, p::V, c::V, g::V, U::NTuple{D, V}
 ) where {T, V <: AbstractArray{T}, D}
-    i = @index_2D_lin()
+    i = @kt_i()
 
     # O. Heuzé, S. Jaouen, H. Jourdren, 
     # "Dissipative issue of high-order shock capturing schemes with non-convex equations of state"
     # JCP 2009
 
-    @kernel_init begin
+    # TODO: @kernel_init begin
         rho0::T = 10000.
         K0::T   = 1e+11
         Cv0::T  = 1000.
@@ -32,7 +31,7 @@ end
         s::T    = 1.5
         q::T    = -42080895/14941154
         r::T    = 727668333/149411540
-    end
+    # end
 
     x = ρ[i] / rho0 - 1
     G = G0 * (1-rho0 / ρ[i])
@@ -56,10 +55,10 @@ end
 
 
 @generic_kernel function cell_update!(
-    s::Int, dx::T, dt::T, 
+    s::Int, dx::T, dt::T,
     uˢ::V, pˢ::V, ρ::V, uₐ::V, E::V
 ) where {T, V <: AbstractArray{T}}
-    i = @index_2D_lin()
+    i = @kt_i()
     u = uₐ  # `u` or `v` depending on the current axis
     dm = ρ[i] * dx
     ρ[i]  = dm / (dx + dt * (uˢ[i+s] - uˢ[i]))
@@ -106,13 +105,14 @@ end
     X::NTuple{D, V}, mask::V, ρ::V, E::V, U::NTuple{D, V}, p::V, c::V, g::V, vars_to_zero::Tuple{Vararg{V}},
     test_case::Test
 ) where {T, V <: AbstractArray{T}, D, Test <: TestCase, BSize <: BlockSize{D}}
-    @kernel_init begin
+    #= TODO: @kernel_init =# begin
         if Test <: TwoStateTestCase
             test_init_params = init_test_params(test_case, T, D)
         end
     end
 
-    i = @index_2D_lin()
+    i = @kt_i()
+    # TODO: use `@kt_I` + an offset instead
     I = position(bsize, i)  # Position in the block's real cells
 
     # Index in the global grid (0-indexed)
@@ -122,7 +122,7 @@ end
     pos = set_tuple!(X, gI .* ΔX .- origin, i)
 
     # Set the domain mask to 1 if the cell is real or 0 otherwise
-    mask[i] = is_ghost(bsize, i) ? 0 : 1
+    mask[i] = is_ghost(bsize, I) ? 0 : 1
 
     # Middle point of the cell
     mid = pos .+ ΔX ./ 2
@@ -146,17 +146,21 @@ end
 #
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, tc::TestCase)
-    range = block_domain_range(blk.size, state.steps_ranges.EOS)
-    gamma = eltype(blk)(specific_heat_ratio(tc))
-    u = var_arrays(blk, (:u,))
-    return perfect_gas_EOS!(params, block_device_data(blk), range, gamma, u)
+    domain = block_domain_range(blk.size, state.steps_ranges.EOS)
+    γ = eltype(blk)(specific_heat_ratio(tc))
+    data = block_data(blk)
+    u = data.dim_vars.u
+    (; ρ, E, p, c, g) = data.scalar_vars
+    return perfect_gas_EOS!(γ, ρ, E, p, c, g, u; ctx=params.kernel_ctx, domain)
 end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Bizarrium)
-    range = block_domain_range(blk.size, state.steps_ranges.EOS)
-    u = var_arrays(blk, (:u,))
-    return bizarrium_EOS!(params, block_device_data(blk), range, u)
+    domain = block_domain_range(blk.size, state.steps_ranges.EOS)
+    data = block_data(blk)
+    u = data.dim_vars.u
+    (; ρ, E, p, c, g) = data.scalar_vars
+    return bizarrium_EOS!(ρ, E, p, c, g, u; ctx=params.kernel_ctx, domain)
 end
 
 
@@ -173,7 +177,7 @@ end
 
 
 function init_test(params::ArmonParameters, blk::LocalTaskBlock)
-    blk_domain = block_domain_range(blk.size, first(params.steps_ranges).full_domain)
+    domain = block_domain_range(blk.size, first(params.steps_ranges).full_domain)
 
     # Position of the origin of this block
     real_static_bsize = params.block_size .- 2*params.nghost
@@ -187,7 +191,14 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
     vars_names_to_zero = setdiff(block_vars(), (:x, :ρ, :E, :u, :p, :c, :g, :mask))
     vars_to_zero = var_arrays(blk, vars_names_to_zero)
 
-    init_test(params, block_device_data(blk), blk_domain, blk_global_pos, blk.size, ΔX, vars_to_zero, params.test)
+    data = block_data(blk)
+    (; u) = data.dim_vars
+    (; X, mask, ρ, E, p, c, g) = data.scalar_vars
+    init_test(
+        blk_global_pos, params.N, blk.size, params.origin, ΔX,
+        X, mask, ρ, E, u, p, c, g, vars_to_zero, params.test;
+        ctx=params.kernel_ctx, domain
+    )
 
     if params.numa_aware
         # Now is the best time to move the pages, as we know they exist physically and that they are
@@ -214,11 +225,12 @@ end
 
 
 function cell_update!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    blk_domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
-    blk_data = block_device_data(blk)
-    u = blk_data.dim_vars.u[state.axis]
+    domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
     s = stride_along(blk.size, state.axis)
-    cell_update!(params, blk_data, blk_domain, s, state.dx, state.dt, u)
+    data = block_device_data(blk)
+    uₐ = data.dim_vars.u[state.axis]
+    (; ρ, E, uˢ, pˢ) = data.scalar_vars
+    cell_update!(s, state.dx, state.dt, uˢ, pˢ, ρ, uₐ, E; ctx=params.kernel_ctx, domain)
 end
 
 

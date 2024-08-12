@@ -271,7 +271,7 @@ macro iter_blocks(expr)
 
     return esc(quote
         threads_count = params.use_threading ? Threads.nthreads() : 1
-        $Armon.@threaded :outside_kernel for _ in 1:threads_count
+        $Armon.@threaded for _ in 1:threads_count
             tid = Threads.threadid()
             thread_blocks_idx = $grid_var.threads_workload[tid]
             for blk_pos in thread_blocks_idx

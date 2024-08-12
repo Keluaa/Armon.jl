@@ -132,22 +132,7 @@ init_backend
 device_memory_info
 memory_info
 memory_required
-```
-
-## Kernels
-
-```@docs
-@generic_kernel
-@kernel_init
-@kernel_options
-@index_1D_lin
-@index_2D_lin
-@iter_idx
-@simd_loop
-@simd_threaded_iter
-@simd_threaded_loop
 @threaded
-@threads
 ```
 
 ## Logging
