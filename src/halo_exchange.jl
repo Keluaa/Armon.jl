@@ -15,10 +15,10 @@
     for _ in 1:ghosts(bsize)
         # TODO: KernelAbstractions.Extras.@unroll ??
         for n in 1:N
-            scalars[n][ig] = scalar_vars[n][i]
+            scalars[n][ig] = scalars[n][i]
         end
         for d in 1:D
-            u[d][ig] = u[d][i] * u_factor
+            u[d][ig] = u[d][i] * u_factor[d]
         end
 
         i  -= incr

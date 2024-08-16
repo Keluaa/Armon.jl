@@ -23,6 +23,9 @@ implementation is as lightweight as it can be.
 """
 struct LinearToCartesian{D} <: AbstractArray{CartesianIndex{D}, D}
     size :: Dims{D}
+
+    LinearToCartesian(I::Dims{D}) where {D} = new{D}(I)
+    LinearToCartesian(I::NTuple{D, Is}) where {D, Is <: Integer} = LinearToCartesian(Int.(I))
 end
 
 Base.size(s::LinearToCartesian) = s.size
@@ -89,9 +92,10 @@ module Axis
 end
 
 
-# Make Axis.T a valid index to any array
+# Make Axis.T a valid index to any array (or tuple)
 Base.checkindex(::Type{Bool}, inds::AbstractUnitRange, axis::Axis.T) = Base.checkindex(Bool, inds, Int(axis))
 Base.to_index(axis::Axis.T) = Int(axis)
+Base.getindex(t::Tuple, axis::Axis.T) = getindex(t, Int(axis))
 
 
 """

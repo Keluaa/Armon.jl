@@ -107,7 +107,7 @@ function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::Loc
     s = stride_along(blk.size, state.axis)
     data = block_device_data(blk)
     (; ρ, p, c, uˢ, pˢ) = data.scalar_vars
-    uₐ = blk_data.dim_vars.u[state.axis]
+    uₐ = data.dim_vars.u[state.axis]
     acoustic_GAD!(
         s, state.dt, state.dx, uˢ, pˢ, ρ, uₐ, p, c, state.riemann_limiter;
         ctx=params.kernel_ctx, domain

@@ -179,7 +179,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
             neighbour_block = this_block.neighbours[side]
             # Blocks sharing a side must share the same `BlockInterface`
             if isdefined(neighbour_block, :exchanges)
-                return neighbour_block.exchanges[side]
+                return neighbour_block.exchanges[opposite_of(side)]
             else
                 return BlockInterface()
             end
@@ -484,7 +484,7 @@ end
 
 The [`TaskBlock`](@ref) at position `idx` in the `grid`.
 """
-function block_at(grid::BlockGrid, idx::CartesianIndex)
+function block_at(grid::BlockGrid{<:Any, D}, idx::CartesianIndex{D}) where {D}
     if in_grid(idx, grid.static_sized_grid)
         return grid.blocks[block_idx(grid, idx)]
     elseif in_grid(idx, grid.grid_size)

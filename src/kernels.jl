@@ -69,7 +69,7 @@ end
 
 @kernel_function function init_vars(
     test_case::TwoStateTestCase, test_params::InitTestParamsTwoState, X::NTuple{D},
-    i, ρ::V, E::V, ::NTuple{D, V}, p::V, c::V, g::V
+    i, ρ::V, E::V, U::NTuple{D, V}, p::V, c::V, g::V
 ) where {V, D}
     if test_region_high(X, test_case)
         ρ[i] = test_params.high_ρ
@@ -192,11 +192,11 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
     vars_to_zero = var_arrays(blk, vars_names_to_zero)
 
     data = block_data(blk)
-    (; u) = data.dim_vars
-    (; X, mask, ρ, E, p, c, g) = data.scalar_vars
+    (; x, u) = data.dim_vars
+    (; mask, ρ, E, p, c, g) = data.scalar_vars
     init_test(
         blk_global_pos, params.N, blk.size, params.origin, ΔX,
-        X, mask, ρ, E, u, p, c, g, vars_to_zero, params.test;
+        x, mask, ρ, E, u, p, c, g, vars_to_zero, params.test;
         ctx=params.kernel_ctx, domain
     )
 

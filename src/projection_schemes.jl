@@ -44,7 +44,7 @@ function euler_projection!(params::ArmonParameters, state::SolverState, blk::Loc
     s = stride_along(blk.size, state.axis)
     data = block_device_data(blk)
     (; ρ, E, uˢ, work_1, work_2) = data.scalar_vars
-    (; u, work_3) = data.dim_vars.u
+    (; u, work_3) = data.dim_vars
     euler_projection!(
         s, state.dx, state.dt, uˢ, ρ, E, u, work_1, work_2, work_3;
         ctx=params.kernel_ctx, domain

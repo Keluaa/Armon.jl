@@ -106,6 +106,7 @@ If `all(I .== 1)` then the index of the first real cell is returned.
 function lin_position(bsize::BlockSize{D}, I::NTuple{D}) where {D}
     return sum((I .+ (ghosts(bsize) - 1)) .* Base.size_to_strides(1, block_size(bsize)...)) + 1
 end
+lin_position(bsize::BlockSize, I::CartesianIndex) = lin_position(bsize, Tuple(I))
 
 
 function border_domain_corners(bsize::BlockSize{D}, side::Side.T, single_strip) where {D}
@@ -127,7 +128,7 @@ function border_domain_corners(bsize::BlockSize{D}, side::Side.T, single_strip) 
         bl_corner = bl_corner .- offset_to(side, D, ghosts(bsize) - 1)
     end
 
-    return tr_corner, bl_corner
+    return bl_corner, tr_corner
 end
 
 

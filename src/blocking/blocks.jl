@@ -178,7 +178,7 @@ comm_arrays(blk::LocalTaskBlock; on_device=true)  = comm_arrays(block_data(blk; 
 
 function reset!(blk::LocalTaskBlock)
     reset!(blk.state)
-    foreach(reset!, blk.exchanges)
+    foreach(ax_exchanges  -> foreach(reset!, ax_exchanges ), blk.exchanges)
 end
 
 

@@ -22,6 +22,8 @@ abstract type RiemannScheme end
 abstract type ProjectionScheme end
 abstract type SplittingMethod end
 
+@kernels_metadata
+
 include("utils.jl")
 include("numa_utils.jl")
 include("parameters.jl")
@@ -40,5 +42,9 @@ include("halo_exchange.jl")
 include("io.jl")
 include("logging.jl")
 include("solver.jl")
+
+function __init__()
+    @register_all_kernels
+end
 
 end

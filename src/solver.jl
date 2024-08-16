@@ -365,7 +365,7 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
                 current_mass, current_energy = conservation_vars(params, grid)
                 ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
                 ΔE = abs(initial_energy - current_energy) / initial_energy * 100
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#8.6g%%, |ΔE| = %#8.6g%%\n",
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#11.6g%%, |ΔE| = %#11.6g%%\n",
                     global_dt.cycle, global_dt.current_dt, global_dt.time, ΔM, ΔE)
             end
         elseif silent <= 1

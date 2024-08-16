@@ -93,6 +93,12 @@ Enables the use of `KernelAbstractions.jl` kernels.
 Use kernels for `Kokkos.jl`.
 
 
+    use_inbounds = true
+
+Ensures that all array accesses in kernels are done without any bounds checking.
+Disabling this might prevent vectorisation and many compiler optimisations. 
+
+
     use_cache_blocking = true
 
 Separate the domain into semi-independant blocks, improving the cache-locality of memory accesses
@@ -485,6 +491,7 @@ end
 function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
+    use_inbounds = true,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
@@ -551,7 +558,8 @@ function init_device(params::ArmonParameters;
     params.lock_memory = lock_memory
 
     # TODO: rewrite `create_device` and `init_backend` to initialize `kernel_ctx` instead (+remove DeviceParams and Device?)
-    opts = [KernelsToolkit.Inbounds()]
+    opts = KernelsToolkit.ContextOption[]
+    use_inbounds  && push!(opts, KernelsToolkit.Inbounds())
     use_fast_math && push!(opts, KernelsToolkit.FastMath())
     params.kernel_ctx = if params.device isa CPU_HP
         if params.use_threading && !params.use_cache_blocking
