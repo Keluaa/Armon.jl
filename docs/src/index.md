@@ -71,6 +71,9 @@ ghost_domain
 block_domain_range
 position
 lin_position
+to_real_position
+to_raw_position
+real_lin_position
 in_grid
 is_ghost
 BlockRowIterator

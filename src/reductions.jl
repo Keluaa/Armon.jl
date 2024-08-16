@@ -4,13 +4,13 @@
     # because of some IEEE 754 non-compliance since fast math is enabled when compiling this code
     # for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
     # If the mask is 0, then: `Δx / -0.0 == -Inf`, which will then make the result incorrect.
-    return min((Δx ./ abs.(max.(abs.(u .+ c), abs.(u .- c)) .* mask))...)
+    return minimum(Δx ./ abs.(max.(abs.(u .+ c), abs.(u .- c)) .* mask))
 end
 
 
 @kernel_function function dtCFL_kernel_reduction(u::NTuple{D, T}, c::T, Δx::NTuple{D, T}) where {D, T}
     # Mask-less version
-    return min((Δx ./ abs.(max.(abs.(u .+ c), abs.(u .- c))))...)
+    return minimum(Δx ./ abs.(max.(abs.(u .+ c), abs.(u .- c))))
 end
 
 
@@ -25,7 +25,8 @@ end
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
         res = typemax(T)
-        for i in domain
+        for I in domain
+            i = real_lin_position(blk.size, I)
             cell_dt = dtCFL_kernel_reduction(get_tuple(u, i), c[i], Δx)
             res = min(res, cell_dt)
         end
@@ -40,7 +41,8 @@ end
         @threaded for j in CartesianIndices(axes(domain)[1:end-1])
             tid = Threads.threadid()
             res = threads_res[tid]
-            for i in view(domain, Tuple(j)..., :)
+            for I in view(domain, Tuple(j)..., :)
+                i = real_lin_position(blk.size, I)
                 cell_dt = dtCFL_kernel_reduction(get_tuple(u, i), c[i], Δx)
                 res = min(res, cell_dt)
             end
@@ -56,7 +58,7 @@ end
     u::NTuple{D, V}, c::V, res::V, bsize::BlockSize{D}, Δx::NTuple{D, T}
 ) where {T, V <: AbstractArray{T}, D}
     i = @kt_i()
-    I = @kt_I()
+    I = to_real_position(bsize, @kt_I())
     mask = T(!is_ghost(bsize, I))  # valid only since `I` is an index in the whole domain
     res[i] = dtCFL_kernel_reduction(get_tuple(u, i), c[i], mask, Δx)
 end
@@ -230,7 +232,8 @@ end
         # Reduction exploiting multithreading from the caller
         res_mass = zero(T)
         res_energy = zero(T)
-        for i in domain
+        for I in domain
+            i = real_lin_position(blk.size, I)
             (res_mass, res_energy) = (res_mass, res_energy) .+ conservation_vars_kernel_reduction(ρ[i], E[i])
         end
     else
@@ -244,7 +247,8 @@ end
             tid = Threads.threadid()
             thread_mass = threads_mass[tid]
             thread_energy = threads_energy[tid]
-            for i in view(domain, Tuple(j)..., :)
+            for I in view(domain, Tuple(j)..., :)
+                i = real_lin_position(blk.size, I)
                 cell_mass, cell_energy = conservation_vars_kernel_reduction(ρ[i], E[i])
                 thread_mass += cell_mass
                 thread_energy += cell_energy
@@ -268,7 +272,7 @@ end
     ρ::V, E::V, res_mass::V, res_energy::V, bsize::BlockSize
 ) where {V}
     i = @kt_i()
-    I = @kt_I()
+    I = to_real_position(bsize, @kt_I())
     mask = eltype(V)(!is_ghost(bsize, I))  # valid only since `I` is an index in the whole domain
     (res_mass[i], res_energy[i]) = conservation_vars_kernel_reduction(ρ[i], E[i], mask)
 end

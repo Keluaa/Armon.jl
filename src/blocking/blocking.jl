@@ -109,6 +109,37 @@ end
 lin_position(bsize::BlockSize, I::CartesianIndex) = lin_position(bsize, Tuple(I))
 
 
+"""
+    to_real_position(bsize::BlockSize, I::NTuple)
+    to_real_position(bsize::BlockSize, I::CartesianIndex)
+
+Converts `I` from a raw index (where `1` is the first ghost cell) to a real index (where `1`)
+is the first real cell). Opposite of [`to_raw_position`](@ref).
+"""
+to_real_position(bsize::BlockSize{D}, I::NTuple{D}) where {D} = I .- ghosts(bsize)
+to_real_position(bsize::BlockSize, I::CartesianIndex) = CartesianIndex(to_real_position(bsize, Tuple(I)))
+
+
+"""
+    to_raw_position(bsize::BlockSize, I::NTuple)
+    to_raw_position(bsize::BlockSize, I::CartesianIndex)
+
+Opposite of [`to_real_position`](@ref).
+"""
+to_raw_position(bsize::BlockSize{D}, I::NTuple{D}) where {D} = I .+ ghosts(bsize)
+to_raw_position(bsize::BlockSize, I::CartesianIndex) = CartesianIndex(to_raw_position(bsize, Tuple(I)))
+
+
+"""
+    real_lin_position(bsize::BlockSize, I::NTuple)
+    real_lin_position(bsize::BlockSize, I::CartesianIndex)
+
+Linear index of `I` in the block, with `I` being a raw index (`1` is the first ghost cell).
+See [`to_real_position`](@ref) and [`lin_position`](@ref)
+"""
+real_lin_position(bsize::BlockSize, I) = lin_position(bsize, to_real_position(bsize, I))
+
+
 function border_domain_corners(bsize::BlockSize{D}, side::Side.T, single_strip) where {D}
     rsize = real_block_size(bsize)
 
@@ -184,6 +215,8 @@ real_face_size(bsize::BlockSize, side::Side.T) = real_face_size(bsize, axis_of(s
     is_ghost(bsize::BlockSize, i, o=0)
 
 `true` if the `i`-th cell of the block is a ghost cell, `false` otherwise.
+
+`i` should be a index starting at the first real cells of the block.
 
 `o` would be a "ring" index: `o == 1` excludes the first ring of ghost cells, etc.
 """

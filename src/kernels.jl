@@ -112,8 +112,7 @@ end
     end
 
     i = @kt_i()
-    # TODO: use `@kt_I` + an offset instead
-    I = position(bsize, i)  # Position in the block's real cells
+    I = to_real_position(bsize, Tuple(@kt_I()))  # Position in the block's real cells
 
     # Index in the global grid (0-indexed)
     gI = I .+ global_pos .- 1

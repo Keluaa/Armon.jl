@@ -143,7 +143,7 @@ end
 
     # `bsize₁` and `bsize₂` are different, therefore such is the iteration domain. We translate the
     # `i₁` index to its reciprocal `i₂` on the other side using the nD index.
-    I₁ = position(bsize₁, i₁)
+    I₁ = to_real_position(bsize₁, Tuple(@kt_I()))
     I₂ = ifelse.(axis_of(side₂) .== axes_of(ndims(bsize₂)),
         ifelse(first_side(side₂), 1, real_block_size(bsize₂)),
         I₁
