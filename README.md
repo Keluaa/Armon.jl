@@ -4,7 +4,8 @@
 [![Build Status](https://github.com/Keluaa/Armon.jl/actions/workflows/CI.yml/badge.svg?branch=main)](https://github.com/Keluaa/Armon.jl/actions/workflows/CI.yml?query=branch%3Amain)
 [![Coverage](https://codecov.io/gh/Keluaa/Armon.jl/branch/main/graph/badge.svg)](https://codecov.io/gh/Keluaa/Armon.jl)
 
-Armon.jl is an experimental 2D CFD solver for compressible non-viscous fluids, using a finite volume method.
+Armon.jl is an experimental CFD solver for compressible non-viscous fluids, using a finite volume method.
+It supports domains in any dimension, although it is mainly used and tested for 1, 2 and 3D simulations.
 
 It was developed to explore Julia's capabilities in HPC and for performance portability: it should
 perform very well on any CPU (tested on Nvidia Grace CPU, AMD Milan 7763, Intel Skylake Xeon Platinum 8168...)
@@ -13,7 +14,7 @@ Domain decomposition is done using MPI, and cache-blocking is performed in a sin
 higher performance on CPU.
 
 The twin project [Armon-Kokkos](https://github.com/Keluaa/Armon-Kokkos) is a mirror of the core of
-this solver (with much less options, without MPI or cache-blocking) written in C++ using the Kokkos library.
+this solver (in 2D, with much less options, without MPI or cache-blocking) written in C++ using the Kokkos library.
 It is possible to reuse kernels from that solver in this one, using the
 [Kokkos.jl](https://github.com/Keluaa/Kokkos.jl) package.
 
