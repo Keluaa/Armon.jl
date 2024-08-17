@@ -923,4 +923,68 @@ function Base.show(io::IO, grid::BlockGrid{T, Dim, D, H, B, G, BS}) where {T, Di
     bs_str = join(block_size(BS), '×')
     print(io, "BlockGrid{$T, $Dim, $D, $H, $B}($grid_str, bs: $bs_str, ghost: $G)")
 end
+
+
+function disp_block_grid(grid::BlockGrid{T, Dim}) where {T, Dim}
+    # Displays a block grid of arbitrary dimension using unicode characters.
+    # 1D is a row of characters, 2D is a table, 3D and above are printed as successive
+    # 2D tables, lower indices first.
+    # Each block becomes a single character:
+    #   █    full static block
+    #   ▌    edge block (right side)
+    #   ▄    edge block (top side)
+    #   ▖    edge block (right & top side)
+    #   ▒    edge block (higher dimension side)
+    #   ◂▸▾▴ remote block (left, right, bottom, top)
+    #   ◈◇  remote block (front, back)
+    #   │─   global domain border (remote block, left/right, bottom/top)
+    #   ┼    global domain border (remote block, front/back)
+
+    # More characters at https://symbl.cc/en/unicode-table/#block-elements
+    all_blocks = Array{Char, Dim}(undef, grid.grid_size .+ 2)
+    all_blocks .= ' '
+
+    blocks = @view all_blocks[UnitRange.(2, grid.grid_size .+ 1)...]
+    blocks[CartesianIndices(grid.static_sized_grid)] .= '█'
+
+    for (_, region, _) in EdgeBlockRegions(grid)
+        top_border = Dim ≥ 2 && Tuple(first(region))[2] == grid.grid_size[2]
+        right_border = Tuple(first(region))[1] == grid.grid_size[1]
+        if top_border
+            c = right_border ? '▖' : '▄'
+        else
+            c = right_border ? '▌' : '▒'
+        end
+        blocks[region] .= c
+    end
+
+    remote_block_chars = ('◂', '▸', '▾', '▴', '◈', '◇', '⊗', '⊙')
+    border_block_chars = ('│', '│', '─', '─', '┼', '┼', '╳', '╳')
+    for (side, region) in RemoteBlockRegions(grid)
+        si = Int(side)
+        if si > 8
+            si = first_side(side) ? 7 : 8
+        end
+        for idx in region
+            blk = grid.remote_blocks[remote_block_idx(grid, idx)]
+            c = blk.rank == -1 ? border_block_chars[si] : remote_block_chars[si]
+            all_blocks[idx + one(CartesianIndex{Dim})] = c
+        end
+    end
+
+    if Dim ≥ 2
+        disp_axes = (0:0, reverse(axes(all_blocks)[2]), axes(all_blocks)[3:end]...)
+    else
+        disp_axes = (0:0,)
+    end
+    x_axes = (axes(all_blocks, 1), ntuple(Returns(0:0), Dim - 1)...)
+    is_first_row = true
+    for row_idx in CartesianIndices(disp_axes)
+        !is_first_row && println()
+        is_first_row = false
+        for x_idx in CartesianIndices(x_axes)
+            idx = row_idx + x_idx
+            print(all_blocks[idx])
+        end
+    end
 end
