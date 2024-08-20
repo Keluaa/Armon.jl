@@ -1,0 +1,41 @@
+
+#include "vars.h"
+#include "blocks.h"
+#include "solver.h"
+
+
+$input int in_NUM_THREADS = 4;
+$assume(0 < in_NUM_THREADS && in_NUM_THREADS <= 10);
+
+$input int in_NUM_CYCLES = 3;
+$assume(0 <= in_NUM_CYCLES && in_NUM_CYCLES <= 4);
+
+$input int in_MAX_SWEEPS = 2;
+$assume(0 <= in_MAX_SWEEPS && in_MAX_SWEEPS <= 4);
+
+$input int in_GRID_SIZE_X = 3;
+$input int in_GRID_SIZE_Y = 3;
+$assume(1 <= in_GRID_SIZE_X && in_GRID_SIZE_X <= 5);
+$assume(1 <= in_GRID_SIZE_Y && in_GRID_SIZE_Y <= 5);
+
+
+int get_num_threads()      { return in_NUM_THREADS; }
+int get_num_cycles()       { return in_NUM_CYCLES; }
+int get_max_sweeps()       { return in_MAX_SWEEPS; }
+int get_grid_size_x()      { return in_GRID_SIZE_X; }
+int get_grid_size_y()      { return in_GRID_SIZE_Y; }
+int get_total_blocks()     { return in_GRID_SIZE_X * in_GRID_SIZE_Y; }
+int get_total_interfaces() { return 2 * get_total_blocks() - in_GRID_SIZE_X - in_GRID_SIZE_Y; }
+
+
+int main()
+{
+    struct BlockGrid* block_grid = init_grid(NUM_THREADS);
+
+    $parfor(int tid: 0 .. NUM_THREADS-1) {
+        solver_thread(tid, &block_grid->threads_workload[tid], tid == 0 ? block_grid : NULL);
+    }
+
+    free_grid(block_grid);
+    return 0;
+}
