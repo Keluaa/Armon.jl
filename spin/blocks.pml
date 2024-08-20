@@ -239,7 +239,7 @@ inline mark_ready_for_exchange(interface, side, can_do_xchg, xchg_done)
         // interface_acknowledge_exchange (a CAS but also reset the flags on success)
         atomic {
             if
-            :: (interface.state == XCHG_Done && interface.flags != side_flags) -> {
+            :: (interface.state == XCHG_Done && interface.flags == side_flags) -> {
                 interface.state = XCHG_NotReady;
                 interface.flags = 0;
                 xchg_done = true;
