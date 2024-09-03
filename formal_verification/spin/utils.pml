@@ -1,4 +1,15 @@
 
+// Disabling hidden variables is only useful to allow multi-core compilation
+// When disabled, they are part of the global state and therefore must be referenced as such in C code
+#ifdef NO_HIDDEN
+#define hidden
+#define REF_HIDDEN(var) now.var
+#else
+#define hidden hidden
+#define REF_HIDDEN(var) var
+#endif
+
+
 inline atomic_cas(success, val, expected_value, new_value)
 {
     atomic {

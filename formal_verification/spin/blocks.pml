@@ -1,100 +1,42 @@
 
+#include "block_grid.pml"
+#include "communications.pml"
+
 #ifndef MAX_SWEEPS
-#define MAX_SWEEPS    2
+#define MAX_SWEEPS        2
 #endif
-
-#ifndef GRID_SIZE_X
-#define GRID_SIZE_X   3
-#endif
-#ifndef GRID_SIZE_Y
-#define GRID_SIZE_Y   3
-#endif
-
-#define TOTAL_BLOCKS         GRID_SIZE_X*GRID_SIZE_Y
-#define TOTAL_INTERFACES     2*TOTAL_BLOCKS-GRID_SIZE_X-GRID_SIZE_Y
-#define INTERFACES_Y_OFFSET  TOTAL_BLOCKS-GRID_SIZE_X-1
-#define NO_NEIGHBOUR         255
-#define NO_INTERFACE         32767
 
 #ifndef DO_TIME_STEP
 #define DO_TIME_STEP      1
 #endif
+
 #ifndef DO_HALO_EXCHANGE
 #define DO_HALO_EXCHANGE  1
 #endif
 
-#ifndef USE_MPI
-#define USE_MPI           0
-#endif
-#ifndef MPI_CHANNEL_SIZE
-#define MPI_CHANNEL_SIZE  10
-#endif
-
-
-mtype:BlockStates = { NewCycle, TimeStep, InitTimeStep, NewSweep, EOS, Exchange, Fluxes, CellUpdate, Remap, EndCycle };
-mtype:BlockXChg   = { XCHG_NotReady, XCHG_InProgress, XCHG_Done };
-
-typedef Block {
-    mtype:BlockStates state;
-    byte cycle;  // local cycle of the block
-    byte sweep_num;
-    bool must_wait;  // if the block is waiting for other blocks
-    byte pos[2];
-};
-
-typedef BlockInterface {
-    // in the Julia implementation, 'state' and 'flags' are stored in the same byte,
-    // therefore atomic operations on both values at the same time is possible.
-    mtype:BlockXChg state;
-    byte flags;
-    bool is_done[2];
-};
-
-Block block_grid[TOTAL_BLOCKS];
-BlockInterface block_interfaces[TOTAL_INTERFACES]
-
-// MPI neighbours
-chan subdomain_neighbours_dt_reduction     = [MPI_CHANNEL_SIZE] of { byte };
-chan subdomain_neighbours_halo_exchange[4] = [MPI_CHANNEL_SIZE] of { byte };
-
-// Global state
-mtype:TimeStepState = { DT_Ready, DT_AllContributed, DT_DoingMPI, DT_WaitingForMPI, DT_Done };
-mtype:TimeStepState global_dt_state = DT_Ready;
-byte dt_contributions = 0;  // number of blocks which contributed to the time step calculation for this cycle
-byte global_cycle = 0;  // the current cycle of the whole solver
-
-
-inline print_block(block)
-{
-    printf("block at (%d,%d), state=", block.pos[0], block.pos[1]);
-    printm(block.state);
-    printf(", cycle=%d, sweep=%d", block.cycle, block.sweep_num);
-}
-
 
 inline init_grid()
 {
-    byte i, j, idx;
-    assert(TOTAL_BLOCKS < NO_NEIGHBOUR);
-    assert(TOTAL_INTERFACES < NO_INTERFACE);
     d_step {
-        for (j : 0 .. (GRID_SIZE_Y-1)) {
-            for (i : 0 .. (GRID_SIZE_X-1)) {
-                idx = j * GRID_SIZE_X + i;
-                block_grid[idx].state = NewCycle;
-                block_grid[idx].cycle = 0;
-                block_grid[idx].sweep_num = 0;
-                block_grid[idx].must_wait = false;
-                block_grid[idx].pos[0] = i;
-                block_grid[idx].pos[1] = j;
-            }
+        byte idx;
+        assert(TOTAL_BLOCKS        < REMOTE_BLOCK);
+        assert(TOTAL_BLOCKS        < NULL_BLOCK);
+        assert(TOTAL_REMOTE_BLOCKS < REMOTE_BLOCK);
+        assert(TOTAL_REMOTE_BLOCKS < NULL_BLOCK);
+        assert(TOTAL_INTERFACES    < NULL_INTERFACE);
+
+        for (idx : 0 .. (TOTAL_BLOCKS-1)) {
+            block_grid[idx].state = NewCycle;
+            block_grid[idx].cycle = 0;
+            block_grid[idx].sweep_num = 0;
+            block_grid[idx].must_wait = false;
         }
 
-        for (i : 0 .. (TOTAL_INTERFACES-1)) {
-            block_interfaces[i].state = XCHG_NotReady;
-            block_interfaces[i].flags = 0;
-            block_interfaces[i].is_done[0] = false;
-            block_interfaces[i].is_done[1] = false;
+        for (idx : 0 .. (TOTAL_INTERFACES-1)) {
+            block_interfaces[idx].state = XCHG_NotReady;
+            block_interfaces[idx].flags = 0;
+            block_interfaces[idx].is_done[0] = false;
+            block_interfaces[idx].is_done[1] = false;
         }
     };
 }
@@ -121,6 +63,7 @@ inline update_dt()
     :: else -> assert(false);
     fi
 
+    assert(dt_contributions == TOTAL_BLOCKS);
     dt_contributions = 0;
     global_dt_state = DT_Done;
 
@@ -138,8 +81,8 @@ inline wait_for_dt(new_dt_state)
 #if USE_MPI
         // TODO: wait until `subdomain_neighbours_dt_reduction` has a value + make sure only one thread waits on the request
 #endif
-        update_dt()
-        new_dt_state = global_dt_state;  // TODO: is this correct? shouldn't we use a "return value" from `update_dt` instead?
+        update_dt();
+        new_dt_state = global_dt_state;
     }
     :: else -> { new_dt_state = DT_WaitingForMPI; };
     fi
@@ -191,7 +134,7 @@ retry_next_dt:
 }
 
 
-inline next_time_step(block)
+inline next_time_step(block, already_contributed)
 {
 #if DO_TIME_STEP
     mtype:TimeStepState dt_state = global_dt_state;
@@ -203,9 +146,16 @@ retry_time_step:
         goto retry_time_step;
     }
     :: (dt_state == DT_Ready) -> {
-        // local_time_step
-        contribute_to_dt(block);
-        block.must_wait = global_cycle == 0;  // The first cycle requires the time step before continuing
+        if
+        :: (already_contributed) -> skip;
+        :: else -> {
+            // compute local_time_step
+            contribute_to_dt(block);
+        }
+        fi
+        // The first cycle requires the time step before continuing. It may have been the last block,
+        // hence if DT_Done then no need to wait.
+        block.must_wait = global_cycle == 0 && global_dt_state != DT_Done;
     }
     :: (dt_state == DT_Done) -> {
         block.must_wait = false;
@@ -290,43 +240,26 @@ xchg_marked:
 }
 
 
-inline block_ghost_exchange(block)
+inline block_ghost_exchange(block, block_idx)
 {
 #if DO_HALO_EXCHANGE
     byte side;
     bool can_do_xchg, xchg_done;
     bool all_xchg_done = true;
-    short interface_idx[2];  // either a valid index into `block_interfaces` or `NO_INTERFACE`
-    byte  neighbour_idx[2];  // either a valid index into `block_grid` or `NO_NEIGHBOUR`
-    d_step {
-        if
-        :: (block.sweep_num == 0) -> {
-            // Halo exchange along the X axis
-            neighbour_idx[0] = ( (block.pos[0] > 0)             -> (block.pos[1] * GRID_SIZE_X + block.pos[0] - 1) : NO_NEIGHBOUR );
-            neighbour_idx[1] = ( (block.pos[0] < GRID_SIZE_X-1) -> (block.pos[1] * GRID_SIZE_X + block.pos[0] + 1) : NO_NEIGHBOUR );
-            interface_idx[0] = ( (block.pos[0] > 0)             -> (block.pos[1] * (GRID_SIZE_X-1) + block.pos[0] - 1) : NO_INTERFACE );
-            interface_idx[1] = ( (block.pos[0] < GRID_SIZE_X-1) -> (block.pos[1] * (GRID_SIZE_X-1) + block.pos[0] + 1) : NO_INTERFACE );
-        }
-        :: (block.sweep_num == 1) -> {
-            // Halo exchange along the Y axis
-            neighbour_idx[0] = ( (block.pos[1] > 0)             -> ((block.pos[1]-1) * GRID_SIZE_X + block.pos[0]) : NO_NEIGHBOUR );
-            neighbour_idx[1] = ( (block.pos[1] < GRID_SIZE_Y-1) -> ((block.pos[1]+1) * GRID_SIZE_X + block.pos[0]) : NO_NEIGHBOUR );
-            interface_idx[0] = ( (block.pos[1] > 0)             -> (INTERFACES_Y_OFFSET + block.pos[0] * (GRID_SIZE_Y-1) + block.pos[1] - 1) : NO_INTERFACE );
-            interface_idx[1] = ( (block.pos[1] < GRID_SIZE_Y-1) -> (INTERFACES_Y_OFFSET + block.pos[0] * (GRID_SIZE_Y-1) + block.pos[1] + 1) : NO_INTERFACE );
-        }
-        :: else -> assert(false);
-        fi
+    byte neighbour_idx[2];  // either a valid index into `block_grid` or `NULL_BLOCK`, or an index in 'remote_blocks'
+    byte interface_idx[2];  // either a valid index into `block_interfaces`, `NULL_INTERFACE` or 'REMOTE_BLOCK'
 
-        // Having no neighbour on one side must imply that there is no interface on that side
-        printf("block at (%d, %d) and sweep %d will xchg with:\n - left:  idx=%d, int=%d\n - right: idx=%d, int=%d\nthis is no int: %d and offset: %d\n",
-               block.pos[0], block.pos[1], block.sweep_num, neighbour_idx[0], interface_idx[0], neighbour_idx[1], interface_idx[1], NO_INTERFACE, INTERFACES_Y_OFFSET);
-        assert(((neighbour_idx[0] == NO_NEIGHBOUR) ^ (interface_idx[0] == NO_INTERFACE)) == 0);
-        assert(((neighbour_idx[1] == NO_NEIGHBOUR) ^ (interface_idx[1] == NO_INTERFACE)) == 0);
-    };
+    get_topology(block, block_idx);  // writes to 'neighbour_idx' and 'interface_idx'
 
     for (side : 0 .. 1) {
         if
-        :: (neighbour_idx[side] != NO_NEIGHBOUR && interface_idx[side] != NO_INTERFACE) -> {
+#if USE_MPI
+        :: (interface_idx[side] == REMOTE_BLOCK) -> {
+            // 'neighbour_idx' is instead an index in 'remote_blocks'
+            // TODO
+        }
+#endif
+        :: (neighbour_idx[side] != NULL_BLOCK && interface_idx[side] != NULL_INTERFACE) -> {
             if
             :: (block_interfaces[interface_idx[side]].is_done[side]) -> skip;  // side is already done
             :: else -> {
@@ -360,7 +293,7 @@ inline block_ghost_exchange(block)
         // Reset the interfaces
         for (side : 0 .. 1) {
             if
-            :: (interface_idx[side] != NO_INTERFACE) -> { block_interfaces[interface_idx[side]].is_done[side] = false; }
+            :: (interface_idx[side] != NULL_INTERFACE) -> { block_interfaces[interface_idx[side]].is_done[side] = false; }
             :: else -> skip;
             fi
         }
@@ -375,7 +308,7 @@ inline block_ghost_exchange(block)
 }
 
 
-inline block_state_machine(block)
+inline block_state_machine(block, block_idx)
 {
     do
     :: (block.state == NewCycle) -> {
@@ -385,7 +318,7 @@ inline block_state_machine(block)
         fi
     }
     :: (block.state == TimeStep || block.state == InitTimeStep) -> {
-        next_time_step(block);
+        next_time_step(block, block.state == InitTimeStep);
         if
         :: (block.must_wait) -> { block.state = InitTimeStep; break; }
         :: else -> { block.state = NewSweep; }
@@ -401,7 +334,7 @@ inline block_state_machine(block)
         block.state = Exchange;
     }
     :: (block.state == Exchange) -> {
-        block_ghost_exchange(block);
+        block_ghost_exchange(block, block_idx);
         if
         :: (block.must_wait) -> break;
         :: else -> { block.state = Fluxes; }

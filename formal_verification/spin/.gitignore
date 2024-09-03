@@ -1,0 +1,5 @@
+multi_core/
+swarm_check/
+pan*
+grid_definition.*
+*.trail
