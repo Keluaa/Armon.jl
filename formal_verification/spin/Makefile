@@ -8,76 +8,87 @@ SWARM_PROC ?= 128
 SWARM_TIME ?= 1.0
 SWARM_MEM ?= 1024M
 
-SOURCES = utils.pml blocks.pml block_grid.pml solver.pml
+# TODO: remove channel assertions validity checks just to be sure for now, re-enable if the performance gain is noticeable
+# XUSAFE ?= -DXUSAFE
+XUSAFE ?=
 
-./grid_definition.c ./grid_definition.h: ./gen_grid.jl
+SOURCES = utils.pml blocks.pml block_grid.pml solver.pml main.pml
+GRID_DEF = ./grid_definition.c ./grid_definition.h ./grid_definition.pml
+
+$(GRID_DEF): ./gen_grid.jl
 	@echo "use 'julia ./gen_grid.jl' to (re)generate the topology of the block grid" && false
 
-./pan.c: $(SOURCES) ./grid_definition.c ./grid_definition.h
-	spin -a $(VARS) ./solver.pml
+./pan.c: $(SOURCES) $(GRID_DEF)
+	spin -a $(VARS) ./main.pml
 
 ./pan_exhaustive: ./pan.c
-	$(CC) -DMEMLIM=65536 -O2 -DXUSAFE -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -w -o pan_exhaustive ./pan.c
+	$(CC) -O2 -DMEMLIM=65536 -DVECTORSZ=4160 $(XUSAFE) -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -w -o pan_exhaustive ./pan.c
 
 ./pan_bitstate: ./pan.c
-	$(CC) -DMEMLIM=$(MEMLIM) -O2 -DBITSTATE -DXUSAFE -DNOCLAIM -w -o pan_bitstate ./pan.c
+	$(CC) -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM -w -o pan_bitstate ./pan.c
 
 ./pan_bitstate_non_progress: ./pan.c
-	$(CC) -DMEMLIM=$(MEMLIM) -O2 -DBITSTATE -DXUSAFE -DNP -w -o pan_bitstate_non_progress ./pan.c
+	$(CC) -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNP -w -o pan_bitstate_non_progress ./pan.c
 
 ./multi_core:
 	mkdir -p ./multi_core
 
-./multi_core/pan.c: $(SOURCES) ./grid_definition.c ./grid_definition.h ./multi_core
-	 cd ./multi_core && spin -a -DNO_HIDDEN $(VARS) ../solver.pml
+./multi_core/pan.c: $(SOURCES) $(GRID_DEF) ./multi_core
+	 cd ./multi_core && spin -a -DNO_HIDDEN $(VARS) ../main.pml
 
 ./multi_core/pan_exhaustive: ./multi_core/pan.c ./multi_core
-	cd ./multi_core && $(CC) -DMEMLIM=$(MEMLIM) -O2 -DXUSAFE -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_exhaustive ./pan.c
+	cd ./multi_core && $(CC) -O2 -DMEMLIM=$(MEMLIM) -DVECTORSZ=4160 $(XUSAFE) -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_exhaustive ./pan.c
 
 ./multi_core/pan_bitstate: ./multi_core/pan.c ./multi_core
-	cd ./multi_core && $(CC) -DMEMLIM=$(MEMLIM) -O2 -DBITSTATE -DXUSAFE -DNOCLAIM -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_bitstate ./pan.c
+	cd ./multi_core && $(CC) -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_bitstate ./pan.c
 
 ./swarm_check:
 	mkdir -p ./swarm_check
 	mkdir -p ./swarm_check/trails
 
-./swarm_check/swarm_check.swarm: export CCOMMON=-O2 -DXUSAFE -DNOCLAIM
+./swarm_check/swarm_check.swarm: export CCOMMON=-O2 -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM
 ./swarm_check/swarm_check.swarm: export RCOMMON=
 ./swarm_check/swarm_check.swarm: ./swarm_check
 	# Bu default, 128 processes running for 1h on 128 cores using up to 8GB each and exploring about 500000 states per second
-	swarm -c$(SWARM_PROC) -m$(SWARM_MEM) -t$(SWARM_TIME) -s500000 -u$(SWARM_PROC) -d10000000 -f swarm_check
+	swarm -c$(SWARM_PROC) -m$(SWARM_MEM) -t$(SWARM_TIME) -s500000 -d10000000 -f swarm_check
 	mv ./swarm_check.swarm ./swarm_check/swarm_check.swarm
 
-preprocessor: ./grid_definition.h
-	spin -I ./solver.pml
+single_grid:
+	julia ./gen_grid.jl ./grids/default_grid_3x3_4threads.toml
+
+mpi_grid:
+	julia ./gen_grid.jl ./grids/proc=2x2_grid=3x3_4threads.toml
+
+preprocessor: $(GRID_DEF)
+	spin -I ./main.pml
 
 pan: ./pan.c
 
 pan_multi_core: ./multi_core/pan.c
 
 check: ./pan_exhaustive
-	./pan_exhaustive -m10000000 -c1 -I
+	./pan_exhaustive -m10000000 -c1 -q -I
 
 check_approx: ./pan_bitstate
-	./pan_bitstate -m10000000 -c1 -k1 -w34 -I
+	./pan_bitstate -m10000000 -c1 -k1 -w34 -q -I
 
 check_non_progress: ./pan_bitstate_non_progress
-	./pan_bitstate_non_progress -m10000000 -l -c1 -k1 -w34 -I
+	./pan_bitstate_non_progress -m10000000 -l -c1 -k1 -w34 -q -I
 
 check_multi_core: ./multi_core/pan_exhaustive
-	cd ./multi_core && ./pan_exhaustive -m10000000 -c1 -I
+	cd ./multi_core && ./pan_exhaustive -m10000000 -c1 -q -I
 
 approx_check_multi_core: ./multi_core/pan_bitstate
-	cd ./multi_core && ./pan_bitstate -m10000000 -c1 -w30
+	cd ./multi_core && ./pan_bitstate -m10000000 -c1 -w30 -q
 
-full_trail: ./solver.pml.trail
-	./pan_exhaustive -r ./solver.pml.trail
+full_trail: ./main.pml.trail
+	./pan_exhaustive -q -r ./main.pml.trail
 
-approx_trail: ./solver.pml.trail
-	./pan_bitstate -r ./solver.pml.trail
+approx_trail: ./main.pml.trail
+	./pan_bitstate -q -r ./main.pml.trail
 
-non_progress_trail: ./solver.pml.trail
-	./pan_bitstate_non_progress -l -r ./solver.pml.trail
+non_progress_trail: ./main.pml.trail
+	./pan_bitstate_non_progress -l -q -r ./main.pml.trail
 
 swarm: ./pan.c ./swarm_check/swarm_check.swarm
 	cp -f ./pan.* ./swarm_check/
@@ -90,7 +101,7 @@ swarm: ./pan.c ./swarm_check/swarm_check.swarm
 swarm_trail: ./pan.c ./swarm_check/swarm_check.swarm
 	cp -f ./pan.* ./swarm_check/
 	cd ./swarm_check && ./swarm_check.swarm prep
-	@echo "Use './swarm_check/pan[1-4] -r ./swarm_check/trails/solver.pml_pan[1-4]_<seed>.trail' to follow a trail"
+	@echo "Use './swarm_check/pan[1-4] -r ./swarm_check/trails/main.pml_pan[1-4]_<seed>.trail' to follow a trail"
 
 clean_swarm:
 	rm -rf ./swarm_check
@@ -98,15 +109,18 @@ clean_swarm:
 clean_multi_core:
 	rm -rf ./multi_core
 
-clean:
-	rm -f ./pan* ./*.trail ./grid_definition.c ./grid_definition.h
-	rm -rf ./swarm_check
-	rm -rf ./multi_core
+clean_pan:
+	rm -f ./pan* ./*.trail
+
+clean: clean_pan clean_swarm clean_multi_core
+	rm -f $(GRID_DEF)
 
 help:
 	@echo "Formal verification of the solver for multithreading + MPI using SPIN"
 	@echo "SPIN can be downloaded by following those instructions: https://spinroot.com/spin/Man/README.html"
 	@echo "Targets:"
+	@echo "   single_grid            Create './grid_definition.c' for a single grid of 3x3 blocks using 4 threads"
+	@echo "   mpi_grid               Create './grid_definition.c' for 4 MPI ranks each with 3x3 blocks and 4 threads"
 	@echo "   preprocessor           Output the Pomela source after the preprocessor pass"
 	@echo "   pan                    Compile the Pomela source to C"
 	@echo "   check                  Perform an exhaustive simulation of all solver states (impossibly slow)"

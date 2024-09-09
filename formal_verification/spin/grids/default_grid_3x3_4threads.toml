@@ -3,4 +3,4 @@ grid = [3, 3]              # 2D grid of 3x3 blocks
 num_threads = 4            # distributed on 4 threads per process
 periodic = [false, false]  # 'true' if an axis is periodic, false by default
 use_mpi = false            # don't use MPI by default
-processes = [1, 1]         # process grid, ignored when 'use_mpi=false'
+processes = [1, 1]         # process grid

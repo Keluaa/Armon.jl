@@ -1,7 +1,4 @@
 
-#include "block_grid.pml"
-#include "communications.pml"
-
 #ifndef MAX_SWEEPS
 #define MAX_SWEEPS        2
 #endif
@@ -38,34 +35,37 @@ inline init_grid()
             block_interfaces[idx].is_done[0] = false;
             block_interfaces[idx].is_done[1] = false;
         }
-    };
+    }
 }
 
 
 inline update_dt()
 {
-    mtype:TimeStepState prev_dt_state = global_dt_state;
+    mtype:TimeStepState prev_dt_state = SOLVER_STATE.dt_state;
     if
     :: (prev_dt_state == DT_AllContributed) -> {
 #if USE_MPI
-        // TODO: start the `MPI_Iallreduce`
-        global_dt_state = DT_DoingMPI;
+        MPI_Iallreduce(global_time_step_reduction);
+        SOLVER_STATE.dt_state = DT_DoingMPI;
         goto skip_dt_update;
 #else
-        skip;
+        assert(false);
 #endif
     }
     :: (prev_dt_state == DT_WaitingForMPI) -> {
-        // receive the MPI reduction result
-        assert(nempty(subdomain_neighbours_dt_reduction));
-        subdomain_neighbours_dt_reduction?_;
+#if USE_MPI
+        // The reduction must be done
+        MPI_Assert_Iallreduce(global_time_step_reduction);
+#else
+        assert(false);
+#endif
     }
     :: else -> assert(false);
     fi
 
-    assert(dt_contributions == TOTAL_BLOCKS);
-    dt_contributions = 0;
-    global_dt_state = DT_Done;
+    assert(SOLVER_STATE.dt_contributions == TOTAL_BLOCKS);
+    SOLVER_STATE.dt_contributions = 0;
+    SOLVER_STATE.dt_state = DT_Done;
 
 skip_dt_update:
     skip;
@@ -75,14 +75,16 @@ skip_dt_update:
 inline wait_for_dt(new_dt_state)
 {
     bool cas_ok = false;
-    atomic_cas(cas_ok, global_dt_state, DT_DoingMPI, DT_WaitingForMPI);
+    atomic_cas(cas_ok, SOLVER_STATE.dt_state, DT_DoingMPI, DT_WaitingForMPI);
     if
     :: (cas_ok) -> {
 #if USE_MPI
-        // TODO: wait until `subdomain_neighbours_dt_reduction` has a value + make sure only one thread waits on the request
+        // Wait until the reduction completes.
+        // TODO: make sure only one thread waits on the request
+        MPI_Wait_Iallreduce(global_time_step_reduction);
 #endif
         update_dt();
-        new_dt_state = global_dt_state;
+        new_dt_state = SOLVER_STATE.dt_state;
     }
     :: else -> { new_dt_state = DT_WaitingForMPI; };
     fi
@@ -94,13 +96,13 @@ inline contribute_to_dt(block)
     byte current_contributions = 0;
     bool cas_ok = false;
     atomic {
-        dt_contributions++;
-        current_contributions = dt_contributions;
+        SOLVER_STATE.dt_contributions++;
+        current_contributions = SOLVER_STATE.dt_contributions;
     };
 
     if
     :: (current_contributions == TOTAL_BLOCKS) -> {
-        atomic_cas(cas_ok, global_dt_state, DT_Ready, DT_AllContributed);
+        atomic_cas(cas_ok, SOLVER_STATE.dt_state, DT_Ready, DT_AllContributed);
         if
         :: (cas_ok) -> update_dt();
         :: else -> skip;
@@ -113,38 +115,41 @@ inline contribute_to_dt(block)
 
 inline next_cycle()
 {
-    mtype:TimeStepState current_dt_state;
+    // This function is called only by the main thread of the current rank, while all other ranks are inactive
+    assert(TID == 0);
 
 #if DO_TIME_STEP
-    current_dt_state = global_dt_state;
-retry_next_dt:
+    mtype:TimeStepState current_dt_state = SOLVER_STATE.dt_state;
     if
     :: (current_dt_state == DT_DoingMPI) -> {
         wait_for_dt(current_dt_state);
-        goto retry_next_dt;
     }
-    :: (current_dt_state == DT_Done) -> {
-        global_dt_state = DT_Ready;
-    }
-    :: else -> assert(false);  // the global time step must be done before continuing
+    :: else -> skip;
     fi
+
+    // the global time step must be done before continuing
+    current_dt_state = SOLVER_STATE.dt_state;
+    assert(current_dt_state == DT_Done);
+    SOLVER_STATE.dt_state = DT_Ready;
 #endif
 
-    global_cycle++;
+    SOLVER_STATE.cycle++;
 }
 
 
 inline next_time_step(block, already_contributed)
 {
 #if DO_TIME_STEP
-    mtype:TimeStepState dt_state = global_dt_state;
-retry_time_step:
+    mtype:TimeStepState dt_state = SOLVER_STATE.dt_state;
     if
     :: (dt_state == DT_DoingMPI) -> {
         wait_for_dt(dt_state);
         assert(dt_state != DT_DoingMPI);
-        goto retry_time_step;
     }
+    :: else -> skip;
+    fi
+
+    if
     :: (dt_state == DT_Ready) -> {
         if
         :: (already_contributed) -> skip;
@@ -155,7 +160,7 @@ retry_time_step:
         fi
         // The first cycle requires the time step before continuing. It may have been the last block,
         // hence if DT_Done then no need to wait.
-        block.must_wait = global_cycle == 0 && global_dt_state != DT_Done;
+        block.must_wait = SOLVER_STATE.cycle == 0 && SOLVER_STATE.dt_state != DT_Done;
     }
     :: (dt_state == DT_Done) -> {
         block.must_wait = false;
@@ -240,6 +245,26 @@ xchg_marked:
 }
 
 
+inline remote_block_exchange(xchg_done, block, remote_blk)
+{
+    if
+    :: (remote_blk.state == XCHG_NotReady) -> {
+        // start_exchange
+        MPI_Start(remote_blk.req);
+        xchg_done = false;
+        remote_blk.state = XCHG_InProgress;
+    }
+    :: (remote_blk.state == XCHG_InProgress) -> {
+        // finish_exchange
+        MPI_Test_Request(xchg_done, remote_blk.req);
+        remote_blk.state = (xchg_done -> XCHG_Done : XCHG_InProgress);
+    }
+    :: (remote_blk.state == XCHG_Done) -> skip;
+    :: else -> assert(false);
+    fi
+}
+
+
 inline block_ghost_exchange(block, block_idx)
 {
 #if DO_HALO_EXCHANGE
@@ -253,12 +278,15 @@ inline block_ghost_exchange(block, block_idx)
 
     for (side : 0 .. 1) {
         if
-#if USE_MPI
         :: (interface_idx[side] == REMOTE_BLOCK) -> {
+#if USE_MPI
             // 'neighbour_idx' is instead an index in 'remote_blocks'
-            // TODO
-        }
+            remote_block_exchange(xchg_done, block, remote_blocks[neighbour_idx[side]])
+            all_xchg_done = (xchg_done -> all_xchg_done : false);
+#else
+            assert(false);
 #endif
+        }
         :: (neighbour_idx[side] != NULL_BLOCK && interface_idx[side] != NULL_INTERFACE) -> {
             if
             :: (block_interfaces[interface_idx[side]].is_done[side]) -> skip;  // side is already done
@@ -293,8 +321,9 @@ inline block_ghost_exchange(block, block_idx)
         // Reset the interfaces
         for (side : 0 .. 1) {
             if
-            :: (interface_idx[side] != NULL_INTERFACE) -> { block_interfaces[interface_idx[side]].is_done[side] = false; }
-            :: else -> skip;
+            :: (interface_idx[side] == NULL_INTERFACE) -> skip;
+            :: (interface_idx[side] == REMOTE_BLOCK) -> { remote_blocks[neighbour_idx[side]].state = XCHG_NotReady; };
+            :: else -> { block_interfaces[interface_idx[side]].is_done[side] = false; }
             fi
         }
     }
@@ -313,7 +342,7 @@ inline block_state_machine(block, block_idx)
     do
     :: (block.state == NewCycle) -> {
         if
-        :: (block.cycle == global_cycle) -> { block.state = TimeStep; }
+        :: (block.cycle == SOLVER_STATE.cycle) -> { block.state = TimeStep; }
         :: else -> { break; }
         fi
     }

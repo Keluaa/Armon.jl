@@ -29,12 +29,50 @@ c_code {
         interface_idx[1] = grid_topology[block_idx].interfaces[1 + offset];
     }
 
-    uchar c_get_workload(uchar tid, uchar workload[MAX_WORKLOAD])
+    uchar c_get_workload(uchar rank, uchar tid, uchar workload[MAX_WORKLOAD])
     {
         for (uchar i = 0; i < MAX_WORKLOAD; i++) {
             workload[i] = threads_workload[tid].blocks[i];
         }
         return threads_workload[tid].num_blocks;
+    }
+
+    uchar c_get_all_blocks(uchar rank, uchar indices[255])
+    {
+        uchar count = 0;
+        for (uchar i = 0; i < TOTAL_BLOCKS; i++) {
+            if (grid_topology[i].rank != rank) continue;
+            indices[count++] = i;
+        }
+        return count;
+    }
+
+    uchar c_get_all_interfaces(uchar rank, uchar indices[255])
+    {
+        uchar count = 0;
+        for (uchar i = 0; i < TOTAL_BLOCKS; i++) {
+            if (grid_topology[i].rank != rank) continue;
+            for (uchar int_i = 0; int_i < NUM_NEIGHBOURS; int_i++) {
+                uchar interface_idx = grid_topology[i].interfaces[int_i];
+                if (interface_idx == NULL_INTERFACE || interface_idx == REMOTE_BLOCK) continue;
+                indices[count++] = interface_idx;
+            }
+        }
+        return count;
+    }
+
+    uchar c_get_all_remote_blocks(uchar rank, uchar indices[255])
+    {
+        uchar count = 0;
+        for (uchar i = 0; i < TOTAL_BLOCKS; i++) {
+            if (grid_topology[i].rank != rank) continue;
+            for (uchar int_i = 0; int_i < NUM_NEIGHBOURS; int_i++) {
+                uchar interface_idx = grid_topology[i].interfaces[int_i];
+                if (interface_idx != REMOTE_BLOCK) continue;
+                indices[count++] = grid_topology[i].neighbours[int_i];
+            }
+        }
+        return count;
     }
 }
 
@@ -59,17 +97,19 @@ inline get_topology(block, block_idx)
     };
 }
 
-hidden byte _tid;
+hidden byte _gw_rank;
+hidden byte _gw_tid;
 hidden byte _num_blocks;
 hidden byte _workload[MAX_WORKLOAD];
 hidden byte _iwl
-inline get_workload(tid, num_blocks)
+inline get_workload(num_blocks /*, workload array */)
 {
     d_step {
-        _tid = tid;
+        _gw_rank = RANK;
+        _gw_tid = TID;
 
         c_code {
-            REF_HIDDEN(_num_blocks) = c_get_workload(REF_HIDDEN(_tid), REF_HIDDEN(_workload));
+            REF_HIDDEN(_num_blocks) = c_get_workload(REF_HIDDEN(_gw_rank), REF_HIDDEN(_gw_tid), REF_HIDDEN(_workload));
         }
 
         num_blocks = _num_blocks;
@@ -79,11 +119,35 @@ inline get_workload(tid, num_blocks)
     }
 }
 
+hidden byte _all_idx[255];
+inline get_all_elements(num_blocks, kind)
+{
+    d_step {
+        _gw_rank = RANK;
+
+        if
+        :: (kind == 0) -> c_code {
+            REF_HIDDEN(_num_blocks) = c_get_all_blocks(REF_HIDDEN(_gw_rank), REF_HIDDEN(_all_idx));
+        }
+        :: (kind == 1) -> c_code {
+            REF_HIDDEN(_num_blocks) = c_get_all_interfaces(REF_HIDDEN(_gw_rank), REF_HIDDEN(_all_idx));
+        }
+        :: (kind == 2) -> c_code {
+            REF_HIDDEN(_num_blocks) = c_get_all_remote_blocks(REF_HIDDEN(_gw_rank), REF_HIDDEN(_all_idx));
+        }
+        :: else -> assert(false)
+        fi
+
+        num_blocks = _num_blocks;
+    }
+}
+
 
 // Mutable block grid data
 
-mtype:BlockStates = { NewCycle, TimeStep, InitTimeStep, NewSweep, EOS, Exchange, Fluxes, CellUpdate, Remap, EndCycle };
-mtype:BlockXChg   = { XCHG_NotReady, XCHG_InProgress, XCHG_Done };
+mtype:BlockStates   = { NewCycle, TimeStep, InitTimeStep, NewSweep, EOS, Exchange, Fluxes, CellUpdate, Remap, EndCycle };
+mtype:BlockXChg     = { XCHG_NotReady, XCHG_InProgress, XCHG_Done };
+mtype:TimeStepState = { DT_Ready, DT_AllContributed, DT_DoingMPI, DT_WaitingForMPI, DT_Done };
 
 typedef Block {
     mtype:BlockStates state;
@@ -93,11 +157,8 @@ typedef Block {
 };
 
 typedef RemoteBlock {
-    byte rank;
-#if USE_MPI
-    MPI_Request send_request;
-    MPI_Request recv_request;
-#endif
+    mtype:BlockXChg state;
+    MPI_Request req;
 };
 
 typedef BlockInterface {
@@ -108,15 +169,26 @@ typedef BlockInterface {
     bool is_done[2];
 };
 
+typedef SolverState {
+    mtype:TimeStepState dt_state;
+    byte dt_contributions;  // number of blocks which contributed to the time step calculation for this cycle
+    byte cycle;  // the current cycle of the whole solver for a MPI process
+};
+
 // The block grid state is mutable and is part of the global state vector
+// Since the whole topology indexes directly into those arrays, they store all blocks and interfaces
+// of all MPI ranks.
 Block block_grid[TOTAL_BLOCKS];
 BlockInterface block_interfaces[TOTAL_INTERFACES];
 RemoteBlock remote_blocks[TOTAL_REMOTE_BLOCKS];
 
-mtype:TimeStepState = { DT_Ready, DT_AllContributed, DT_DoingMPI, DT_WaitingForMPI, DT_Done };
-mtype:TimeStepState global_dt_state = DT_Ready;
-byte dt_contributions = 0;  // number of blocks which contributed to the time step calculation for this cycle
-byte global_cycle = 0;  // the current cycle of the whole solver
+// The solver state is separated between each MPI rank
+SolverState solver_states[NUM_PROC];
+#define SOLVER_STATE solver_states[RANK]
+
+#if USE_MPI
+MPI_Iallreduce_Data global_time_step_reduction;
+#endif
 
 
 hidden byte _block_idx_disp;

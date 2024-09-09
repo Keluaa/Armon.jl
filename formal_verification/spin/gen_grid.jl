@@ -3,7 +3,7 @@ using TOML
 
 
 const USAGE = """
-Script to generate a static specification of a 2D block grid for the SPIN specification.
+Script to generate a static specification of a N-D block grid for the SPIN specification.
 
 Usage:
     julia ./gen_grid.jl <grid_file.toml>
@@ -22,16 +22,14 @@ const DEFAULT_ARGS = Dict(
 const REMOTE_BLOCK   = 254
 const NULL_BLOCK     = 255
 const NULL_INTERFACE = 255
+const NULL_RANK      = -1
 
 
-function parse_arguments()
-    length(ARGS) != 1 && error("Expected 1 argument. Usage:\n" * USAGE)
-    ARGS[1] in ("-h", "--help") && (println(USAGE); exit())
-
+function parse_options_file(filename)
     options = try
-        open(TOML.tryparse, ARGS[1], "r")
+        open(TOML.tryparse, filename, "r")
     catch e
-        println("Could not parse '$(ARGS[1])'")
+        println("Could not parse '$filename'")
         rethrow(e)
     end
 
@@ -56,6 +54,30 @@ function parse_arguments()
 end
 
 
+function parse_arguments()
+    length(ARGS) != 1 && error("Expected 1 argument. Usage:\n" * USAGE)
+    ARGS[1] in ("-h", "--help") && (println(USAGE); exit())
+    return parse_options_file(ARGS[1])
+end
+
+
+struct P2PChannel
+    idx :: Int
+end
+
+
+mutable struct RemoteBlock{Dim}
+    idx       :: Int
+    rank      :: Int
+    pos       :: NTuple{Dim}
+    tag       :: Int
+    send_chan :: P2PChannel
+    recv_chan :: P2PChannel
+end
+
+RemoteBlock(idx, rank, pos, tag) = RemoteBlock{length(pos)}(idx, rank, pos, tag, P2PChannel(-1), P2PChannel(-1))
+
+
 mutable struct Interface
     idx :: Int
 end
@@ -64,7 +86,7 @@ end
 mutable struct Block{Dim, Neigh}
     idx        :: Int
     pos        :: NTuple{Dim, Int}
-    neighbours :: NTuple{Neigh, Block}
+    neighbours :: NTuple{Neigh, Union{Block{Dim, Neigh}, RemoteBlock{Dim}}}
     interfaces :: NTuple{Neigh, Interface}
     tid        :: Int
 
@@ -73,76 +95,107 @@ mutable struct Block{Dim, Neigh}
 end
 
 
-mutable struct RemoteBlock
-    idx       :: Int
-    rank      :: Int
-    other_idx :: Int
+mutable struct GridTopo{Dim, Neigh}
+    pos               :: NTuple{Dim, Int}
+    rank              :: Int
+    neighbours        :: NTuple{Neigh, Int}
+    threads           :: Int
+    size              :: NTuple{Dim, Int}
+    periodicity       :: NTuple{Dim, Bool}
+    blocks            :: Vector{Block{Dim, Neigh}}
+    interfaces        :: Vector{Interface}
+    remote_blocks     :: Vector{RemoteBlock{Dim}}
+    workloads_offset  :: Int
+    threads_workloads :: Vector{Vector{Int}}
+
+    function GridTopo{Dim, Neigh}(pos, rank, threads, grid_size, periodicity) where {Dim, Neigh}
+        neighbours = ntuple(Returns(NULL_RANK), Neigh)
+        threads_workloads = [Int[] for _ in 1:threads]
+        return new{Dim, Neigh}(pos, rank, neighbours, threads, grid_size, periodicity, [], [], [], 0, threads_workloads)
+    end
 end
 
 
-is_in_grid(grid_size, pos)     =  1 .≤ Tuple(pos) .≤ Tuple(grid_size)
-is_in_grid(grid_size, pos, ax) = (1 .≤ Tuple(pos) .≤ Tuple(grid_size))[ax]
+struct ProcessGridTopo{Dim, Neigh}
+    use_mpi     :: Bool
+    proc_size   :: NTuple{Dim, Int}
+    periodicity :: NTuple{Dim, Bool}
+    channels    :: Vector{P2PChannel}
+    processes   :: Vector{GridTopo{Dim, Neigh}}
+
+    ProcessGridTopo(dim, proc_size, periodicity, use_mpi) = new{dim, 2*dim}(use_mpi, proc_size, periodicity, [], [])
+end
+
+Base.ndims(::ProcessGridTopo{Dim}) where {Dim} = Dim
+
+
+is_in_grid(grid_size, pos)     = all(1 .≤ Tuple(pos) .≤ Tuple(grid_size))
+is_in_grid(grid_size, pos, ax) =    (1 .≤ Tuple(pos) .≤ Tuple(grid_size))[ax]
 
 offset_along(ax, dim) = ntuple(i -> i == ax ? 1 : 0, dim)
 
 
-function build_grid_topo(grid_size, periodicity)
-    dim = length(grid_size)
-    null_interface = Interface(0)
-    null_neighbour = Block(0, ntuple(Returns(0), dim))
+function build_grid_topo!(grid::GridTopo{dim, neigh}) where {dim, neigh}
+    null_interface = Interface(NULL_INTERFACE)
+    remote_interface = Interface(REMOTE_BLOCK)
+    null_neighbour = Block(NULL_BLOCK, ntuple(Returns(0), dim))
 
-    interfaces = Vector{Interface}()
-    blocks = Vector{Block{dim, 2*dim}}(undef, prod(grid_size))
-    for pos in CartesianIndices(grid_size)
-        idx = LinearIndices(grid_size)[pos]
-        blocks[idx] = Block(idx, pos)
+    resize!(grid.blocks, prod(grid.size))
+    for pos in CartesianIndices(grid.size)
+        idx = LinearIndices(grid.size)[pos]
+        grid.blocks[idx] = Block(idx, pos)
     end
 
-    for pos in CartesianIndices(grid_size)
-        idx = LinearIndices(grid_size)[pos]
-        blk_neighbours = Vector{Block{dim, 2*dim}}(undef, 2*dim)
-        blk_interfaces = Vector{Interface}(undef, 2*dim)
+    for pos in CartesianIndices(grid.size)
+        idx = LinearIndices(grid.size)[pos]
+        blk_neighbours = Vector{Union{Block{dim, neigh}, RemoteBlock{dim}}}(undef, neigh)
+        blk_interfaces = Vector{Interface}(undef, neigh)
         for ax in 1:dim, is_backwards in (true, false)
-            side_idx = (ax - 1) * 2 + (is_backwards ? 1 : 2)
-            other_side_idx = side_idx + (is_backwards ? 1 : -1)
+            side_idx       = (ax - 1) * 2 + (is_backwards ? 1 : 2)
+            other_side_idx = (ax - 1) * 2 + (is_backwards ? 2 : 1)
             offset = offset_along(ax, dim) .* (is_backwards ? -1 : 1)
             neighbour_pos = pos + CartesianIndex(offset)
 
-            if periodicity[ax] && !is_in_grid(grid_size, neighbour_pos, ax)
-                neighbour_pos = neighbour_pos + CartesianIndex(grid_size .* offset .* -1)
+            if grid.periodicity[ax] && !is_in_grid(grid.size, neighbour_pos, ax)
+                neighbour_pos = neighbour_pos + CartesianIndex(grid.size .* offset .* -1)
             end
 
-            if is_in_grid(grid_size, neighbour_pos, ax)
-                neighbour_idx = LinearIndices(grid_size)[neighbour_pos]
-                blk_neighbours[side_idx] = blocks[neighbour_idx]
-                if isdefined(blocks[neighbour_idx], :interfaces)
-                    blk_interfaces[side_idx] = blocks[neighbour_idx].interfaces[other_side_idx]
+            if is_in_grid(grid.size, neighbour_pos, ax)
+                neighbour_idx = LinearIndices(grid.size)[neighbour_pos]
+                blk_neighbours[side_idx] = grid.blocks[neighbour_idx]
+                if isdefined(grid.blocks[neighbour_idx], :interfaces)
+                    blk_interfaces[side_idx] = grid.blocks[neighbour_idx].interfaces[other_side_idx]
                 else
-                    interface = Interface(length(interfaces) + 1)
-                    push!(interfaces, interface)
+                    interface = Interface(length(grid.interfaces) + 1)
+                    push!(grid.interfaces, interface)
                     blk_interfaces[side_idx] = interface
                 end
+            elseif grid.neighbours[side_idx] != NULL_RANK
+                # the index along the interface between the processes uniquely identifies the remote block
+                tag = pos[mod1(ax + 1, dim)]
+                remote_block = RemoteBlock(length(grid.remote_blocks) + 1, grid.neighbours[side_idx], neighbour_pos, tag)
+                push!(grid.remote_blocks, remote_block)
+                blk_neighbours[side_idx] = remote_block
+                blk_interfaces[side_idx] = remote_interface
             else
                 blk_neighbours[side_idx] = null_neighbour
                 blk_interfaces[side_idx] = null_interface
             end
         end
-        blocks[idx].neighbours = Tuple(blk_neighbours)
-        blocks[idx].interfaces = Tuple(blk_interfaces)
+        grid.blocks[idx].neighbours = Tuple(blk_neighbours)
+        grid.blocks[idx].interfaces = Tuple(blk_interfaces)
     end
-
-    return blocks, interfaces
 end
 
 
-function assign_workloads(blocks, num_threads)
-    block_count = length(blocks)
-    blocks_per_thread = fld(block_count, num_threads)
-    remaining_blocks = block_count - num_threads * blocks_per_thread
+function assign_workloads!(grid)
+    block_count = length(grid.blocks)
+    blocks_per_thread = fld(block_count, grid.threads)
+    remaining_blocks = block_count - grid.threads * blocks_per_thread
 
     # Assign to the n-th thread the `(n:n+1) .* blocks_per_thread` blocks.
     # The first `remaining_blocks` threads have one more block to even out the extra workload.
-    threads_workload = map(1:num_threads) do tid
+    for tid in 1:grid.threads
         prev_tids_blocks = blocks_per_thread * (tid - 1)
         tid_blocks = blocks_per_thread
         if tid > remaining_blocks
@@ -154,112 +207,289 @@ function assign_workloads(blocks, num_threads)
 
         workload = [blk_idx for blk_idx in (1:tid_blocks) .+ prev_tids_blocks]
         for idx in workload
-            blocks[idx].tid = tid
+            grid.blocks[idx].tid = tid
         end
 
-        return workload
+        grid.threads_workloads[tid] = workload
     end
+end
 
-    return threads_workload
+
+function assign_channels!(proc_grid::ProcessGridTopo)
+    # Match remote blocks together and assign them unique channel indices.
+    # Between two neighbouring processes, blocks sharing the same tag will communicate with each other.
+    tot_channels = 0
+    for grid in proc_grid.processes
+        for neigh_grid_rank in Iterators.filter(!=(NULL_RANK), grid.neighbours)
+            neigh_grid = proc_grid.processes[neigh_grid_rank]
+            neigh_grid.rank != neigh_grid_rank && error("wrong rank: expected=$neigh_grid_rank, got=$(neigh_grid.rank)")
+
+            for blk in grid.remote_blocks
+                blk.rank != neigh_grid_rank && continue
+                blk.send_chan.idx != -1 && continue  # the channels are already assigned
+
+                neigh_blk_idx = findfirst(ob -> ob.tag == blk.tag, neigh_grid.remote_blocks)
+                isnothing(neigh_blk_idx) && error("could not match remote block of grid $(grid.pos) (rank $(grid.rank)) at $(blk.pos) with grid at $(neigh_grid.pos) (rank $neigh_grid_rank)")
+                neigh_blk = neigh_grid.remote_blocks[neigh_blk_idx]
+
+                blk.send_chan = neigh_blk.recv_chan = P2PChannel(tot_channels + 1)
+                blk.recv_chan = neigh_blk.send_chan = P2PChannel(tot_channels + 2)
+                tot_channels += 2
+
+                push!(proc_grid.channels, blk.send_chan, blk.recv_chan)
+            end
+        end
+
+        # Check if all remote blocks were assigned
+        for blk in grid.remote_blocks
+            blk.rank == NULL_RANK && continue
+            blk.send_chan.idx == -1 && error("unassigned remote block in $(grid.pos) at $(blk.pos) with rank $(blk.rank)")
+        end
+    end
 end
 
 
 function build_process_grid_topo(options)
-    if !options["use_mpi"]
-        blocks, interfaces = build_grid_topo(options["grid"], options["periodic"])
-        threads_workload = assign_workloads(blocks, options["num_threads"])
-        return blocks, interfaces, RemoteBlock[], threads_workload
+    use_mpi = options["use_mpi"]
+    threads = options["num_threads"]
+    grid_size = options["grid"]
+    proc_grid_size = options["processes"]
+    proc_grid_periodicity = options["periodic"] .&& proc_grid_size .>  1  # periodicity between processes
+    grid_periodicity      = options["periodic"] .&& proc_grid_size .== 1  # periodicity in each grid
+    dim = length(grid_size)
+    !use_mpi && prod(proc_grid_size) > 1 && error("'use_mpi' must be 'true' when using more than 1 MPI process")
+
+    tot_blocks        = 0
+    tot_interfaces    = 0
+    tot_remote_blocks = 0
+    proc_grid = ProcessGridTopo(dim, proc_grid_size, Tuple(proc_grid_periodicity), use_mpi)
+    for (rank, proc_pos) in enumerate(CartesianIndices(proc_grid_size))
+        # Get the ranks of neighbouring processes
+        # 1D order: left, right
+        # 2D order: left, right, bottom, top
+        neighbour_procs = ntuple(2*dim) do i
+            ax = (i - 1) ÷ 2 + 1
+            offset = offset_along(ax, dim)
+            mod1(i, 2) == 1 && (offset = offset .* -1)
+            neighbour_pos = proc_pos + CartesianIndex(offset)
+
+            if proc_grid_periodicity[ax] && !is_in_grid(proc_grid_size, neighbour_pos, ax)
+                neighbour_pos = neighbour_pos + CartesianIndex(proc_grid_size .* offset .* -1)
+            end
+
+            if is_in_grid(proc_grid_size, neighbour_pos)
+                return LinearIndices(proc_grid_size)[neighbour_pos]
+            else
+                return NULL_RANK
+            end
+        end
+
+        grid = GridTopo{dim, 2*dim}(proc_pos, rank, threads, grid_size, Tuple(grid_periodicity))
+        grid.neighbours = neighbour_procs
+        build_grid_topo!(grid)
+        assign_workloads!(grid)
+
+        # Shift all indices to make them unique among all processes
+        foreach(blk -> blk.idx += tot_blocks,        grid.blocks)
+        foreach(int -> int.idx += tot_interfaces,    grid.interfaces)
+        foreach(rmt -> rmt.idx += tot_remote_blocks, grid.remote_blocks)
+        grid.workloads_offset = tot_blocks
+        tot_blocks        += length(grid.blocks)
+        tot_interfaces    += length(grid.interfaces)
+        tot_remote_blocks += length(grid.remote_blocks)
+
+        push!(proc_grid.processes, grid)
     end
 
-    proc_grid = options["processes"]
-    proc_grid_periodicity = options["periodic"] .&& proc_grid .>  1  # periodicity between processes
-    grid_periodicity      = options["periodic"] .&& proc_grid .== 1  # periodicity in each grid
+    assign_channels!(proc_grid)
 
-    all_blocks        = Vector{Block{dim, 2*dim}}()
-    all_interfaces    = Vector{Interface}()
-    all_remote_blocks = Vector{RemoteBlock}()
-    all_workloads     = Int[][]
-
-    # TODO
-
-    return all_blocks, all_interfaces, all_remote_blocks, all_workloads
+    return proc_grid
 end
 
 
 write_c_array(io::IO, array) = (print(io, '{'); join(io, array, ", "); print(io, '}'))
-function write_idx_array(io::IO, array, neg_value)
+function write_idx_array(io::IO, array)
     print(io, '{')
-    join(io, lpad.(ifelse.(array .== -1, neg_value, array), 3), ", ")
+    join(io, lpad.(ifelse.(in.(array, Ref((NULL_BLOCK, NULL_INTERFACE, REMOTE_BLOCK))), array, array .- 1), 3), ", ")
     print(io, '}')
 end
 
 
-function write_grid_topo(io_h::IO, io_c::IO, proc_grid, grid_size, blocks, remote_blocks, interfaces)
+function write_block(io::IO, block::Block, rank)
+    # "{<idx>, <rank>, <pos>, <neighbours>, <interfaces>, <tid>},"
+    print(io, '{', lpad(block.idx - 1, 3), ", ", rank - 1, ", ")
+    write_c_array(io, block.pos .- 1)
+    print(io, ", ")
+    write_idx_array(io, getfield.(block.neighbours, :idx))
+    print(io, ", ")
+    write_idx_array(io, getfield.(block.interfaces, :idx))
+    print(io, ", ", block.tid - 1, '}')
+end
+
+
+function write_process(io::IO, grid::GridTopo)
+    proctype_prefix = "mpi_proc_$(grid.rank-1)_tid_"
+    proctype_names = String[]
+    for tid in 1:grid.threads
+        proctype_name = proctype_prefix * string(tid-1)
+        push!(proctype_names, proctype_name)
+
+        # Get all remote blocks (and their channels) this thread will interact with
+        remote_blocks_idx = Int[]
+        send_channels = String[]
+        recv_channels = String[]
+        for blk in grid.blocks[grid.threads_workloads[tid]], neigh_blk in blk.neighbours
+            !(neigh_blk isa RemoteBlock) && continue
+            push!(remote_blocks_idx, neigh_blk.idx)
+            push!(send_channels, "channel_" * string(neigh_blk.send_chan.idx-1))
+            push!(recv_channels, "channel_" * string(neigh_blk.recv_chan.idx-1))
+        end
+
+        # By defining each thread using a different proctype, we can specify exactly which channel
+        # is going to be used and how (send or receive). This way SPIN will be able to minimize the
+        # amount of states to explore.
+
+        send_asserts = if !isempty(send_channels)
+            "xs " * join(send_channels, ", ") * ";"
+        else
+            "// no send channel assertions"
+        end
+
+        recv_asserts = if !isempty(recv_channels)
+            "xr " * join(recv_channels, ", ") * ";"
+        else
+            "// no receive channel assertions"
+        end
+
+        if !isempty(remote_blocks_idx)
+            channels_inits = map(enumerate(remote_blocks_idx)) do (i, blk_idx)
+                "MPI_Request_init(remote_blocks[$(blk_idx-1)].req, $(send_channels[i]), $(recv_channels[i]));"
+            end
+            channels_inits = """
+            d_step {
+                $(join(channels_inits, "\n        "))
+            }
+            """
+        else
+            channels_inits = ""
+        end
+
+        println(io, """
+        proctype $proctype_name()
+        {
+            $send_asserts
+            $recv_asserts
+
+            byte RANK = $(grid.rank-1);
+            byte TID  = $(tid-1);
+        $channels_inits
+            solver_thread();
+        }
+        """)
+    end
+    return proctype_names
+end
+
+
+function write_all_processes(io::IO, proc_grid::ProcessGridTopo)
+    pad = floor(Int, log10(max(length(proc_grid.channels) - 1, 1))) + 1
+    for chan in proc_grid.channels
+        println(io, "chan channel_$(rpad(chan.idx-1, pad)) = [MPI_SPIN_P2P_CHAN_SIZE] of { byte };")
+    end
+    println(io)
+
+    # Defines all proctypes for SPIN, and a function to launch them all at once
+    all_proctypes = String[]
+    for grid in proc_grid.processes
+        append!(all_proctypes, write_process(io, grid))
+    end
+
+    run_all_proctypes = Ref("run ") .* all_proctypes .* Ref("();")
+    print(io, """
+    inline run_all_procs()
+    {
+        $(join(run_all_proctypes, "\n    "))
+    }
+    """)
+end
+
+
+function write_proc_grid(io_h::IO, io_c::IO, proc_grid::ProcessGridTopo)
+    max_work            = maximum(g -> maximum(length, g.threads_workloads), proc_grid.processes)
+    total_blocks        = sum(g -> length(g.blocks),        proc_grid.processes)
+    total_interfaces    = sum(g -> length(g.interfaces),    proc_grid.processes)
+    total_remote_blocks = sum(g -> length(g.remote_blocks), proc_grid.processes)
+
+    interface_idx_limit = max(NULL_INTERFACE, REMOTE_BLOCK)
+    total_blocks        ≥ NULL_BLOCK          && error("too many blocks! limit=$NULL_BLOCK, got=$total_blocks")
+    total_interfaces    ≥ interface_idx_limit && error("too many interfaces! limit=$interface_idx_limit, got=$total_interfaces")
+    total_remote_blocks ≥ NULL_BLOCK          && error("too many remote blocks! limit=$NULL_BLOCK, got=$total_remote_blocks")
+
     # The header is included "as is" in the Promela source, therefore it cannot have C definitions (a bit stupid I know)
-    println(io_h, """
-    #define PROC_GRID_STR       "$(proc_grid)"
-    #define GRID_SIZE_STR       "$(grid_size)"
-    #define DIMS                $(length(grid_size))
-    #define NUM_NEIGHBOURS      $(2*length(grid_size))
-    #define TOTAL_BLOCKS        $(max(length(blocks), 1))
-    #define TOTAL_INTERFACES    $(max(length(interfaces), 1))
-    #define TOTAL_REMOTE_BLOCKS $(max(length(remote_blocks), 1))
+    print(io_h, """
+    #define PROC_GRID_STR       "$(proc_grid.proc_size)"
+    #define GRID_SIZE_STR       "$(first(proc_grid.processes).size)"
+    #define DIMS                $(ndims(proc_grid))
+    #define NUM_NEIGHBOURS      $(2*ndims(proc_grid))
+    #define TOTAL_BLOCKS        $(max(total_blocks, 1))
+    #define TOTAL_INTERFACES    $(max(total_interfaces, 1))
+    #define TOTAL_REMOTE_BLOCKS $(max(total_remote_blocks, 1))
 
     #define REMOTE_BLOCK   $(REMOTE_BLOCK)
     #define NULL_BLOCK     $(NULL_BLOCK)
     #define NULL_INTERFACE $(NULL_INTERFACE)
+    #define NULL_RANK      $(NULL_RANK)
+
+    #define USE_MPI       $(Int(proc_grid.use_mpi))
+    #define NUM_PROC      $(prod(proc_grid.proc_size))
+    #define NUM_THREADS   $(first(proc_grid.processes).threads)
+    #define TOTAL_THREADS $(sum(g -> g.threads, proc_grid.processes))
+    #define MAX_WORKLOAD  $max_work
     """)
 
     # Note: "byte" in Promela is converted to "uchar", itself an alias to "unsigned char"
     print(io_c, """
     typedef struct BlockTopo {
+        uchar idx;                         // index in 'grid_topology'
+        uchar rank;                        // assiociated MPI rank
         uchar pos[DIMS];                   // (x,y) position in the grid
         uchar neighbours[NUM_NEIGHBOURS];  // indexes of the neighbouring blocks ($(NULL_BLOCK) if none)
-        uchar interfaces[NUM_NEIGHBOURS];  // indexes of the interfaces to the neighbouring blocks ($(NULL_INTERFACE) if none)
-        uchar tid;                         // thread associated to the block
+        uchar interfaces[NUM_NEIGHBOURS];  // indexes of the interfaces to the neighbouring blocks ($(NULL_INTERFACE) if none, $(REMOTE_BLOCK) if remote block)
+        uchar tid;                         // thread associated to the block (local to the MPI rank)
     } BlockTopo;
 
     const BlockTopo grid_topology[TOTAL_BLOCKS] = {
     """)
 
-    for block in blocks
-        # "{<pos>, <neighbours>, <interfaces>, <tid>},"
-        print(io_c, "    {")
-        write_c_array(io_c, block.pos .- 1)
-        print(io_c, ", ")
-        write_idx_array(io_c, getfield.(block.neighbours, :idx) .- 1, NULL_BLOCK)
-        print(io_c, ", ")
-        write_idx_array(io_c, getfield.(block.interfaces, :idx) .- 1, NULL_INTERFACE)
-        println(io_c, ", ", block.tid - 1, "},")
+    for grid in proc_grid.processes, blk in grid.blocks
+        print(io_c, "    ")
+        write_block(io_c, blk, grid.rank)
+        println(io_c, ',')
     end
 
-    println(io_c, "};\n")
-end
-
-
-function write_workload(io_h::IO, io_c::IO, proc_grid, threads_workload::Vector{Vector{Int}})
-    max_work = maximum(length, threads_workload)
-
-    println(io_h, """
-    #define NUM_PROC     $(prod(proc_grid))
-    #define NUM_THREADS  $(length(threads_workload))
-    #define MAX_WORKLOAD $max_work
-    """)
-
     print(io_c, """
+    };
+
     typedef struct ThreadWorkload {
+        uchar rank;
         uchar tid;
         uchar num_blocks;
         uchar blocks[MAX_WORKLOAD];  // indexes of blocks assigned to the thread
     } ThreadWorkload;
 
-    const ThreadWorkload threads_workload[NUM_THREADS] = {
+    const ThreadWorkload threads_workload[TOTAL_THREADS] = {
     """)
 
-    for (tid, workload) in enumerate(threads_workload)
-        norm_workload = map(1:max_work) do i; get(workload, i, 0) end
-        print(io_c, "    { $(tid-1), $(length(workload)), ")
-        write_idx_array(io_c, norm_workload .- 1, NULL_BLOCK)
+    for grid in proc_grid.processes, (tid, workload) in enumerate(grid.threads_workloads)
+        norm_workload = map(1:max_work) do i
+            if i ≤ length(workload)
+                workload[i] + grid.workloads_offset
+            else
+                NULL_BLOCK
+            end
+        end
+        print(io_c, "    { $(grid.rank-1), $(tid-1), $(length(workload)), ")
+        write_idx_array(io_c, norm_workload)
         println(io_c, "},")
     end
 
@@ -267,17 +497,27 @@ function write_workload(io_h::IO, io_c::IO, proc_grid, threads_workload::Vector{
 end
 
 
-function write_grid_to_file(filename, proc_grid, grid_size, blocks, interfaces, remote_blocks, threads_workload)
+function write_proc_grid(filename, proc_grid::ProcessGridTopo)
     open(filename * ".h", "w") do header_file
+        println(header_file, "#ifndef _PROC_GRID_H")
+        println(header_file, "#define _PROC_GRID_H\n")
+
         open(filename * ".c", "w") do c_file
-            write_grid_topo(header_file, c_file, proc_grid, grid_size, blocks, remote_blocks, interfaces)
-            write_workload(header_file, c_file, proc_grid, threads_workload)
+            println(c_file, "#include \"$(last(splitpath(filename)) * ".h")\"\n")
+            write_proc_grid(header_file, c_file, proc_grid)
         end
+
+        println(header_file, "\n#endif // _PROC_GRID_H")
+    end
+
+    open(filename * ".pml", "w") do promela_file
+        write_all_processes(promela_file, proc_grid)
     end
 end
 
 
 if !isinteractive()
     options = parse_arguments()
-    write_grid_to_file("grid_definition", options["processes"], options["grid"], build_process_grid_topo(options)...)
+    proc_grid = build_process_grid_topo(options)
+    write_proc_grid("grid_definition", proc_grid)
 end
