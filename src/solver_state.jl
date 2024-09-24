@@ -87,8 +87,13 @@ end
 
 
 function wait_for_dt!(params::ArmonParameters, global_dt::GlobalTimeStep)
+    if params.use_MPI && Threads.threadid() != 1
+        # Only the main thread can touch the MPI reduction request.
+        return time_step_state(global_dt)
+    end
+
     if !replace_time_step_state!(global_dt, TimeStepState.DoingMPI => TimeStepState.WaitingForMPI)
-        return TimeStepState.WaitingForMPI
+        return time_step_state(global_dt)
     end
 
     # Since this thread started working on a block without the time step for the new cycle, we
@@ -99,17 +104,37 @@ function wait_for_dt!(params::ArmonParameters, global_dt::GlobalTimeStep)
 end
 
 
+function progress_dt_reduction(params::ArmonParameters, global_dt::GlobalTimeStep)
+    # Must be called from the main thread only! `Threads.threadid() == 1`
+    if params.use_MPI && time_step_state(global_dt) == TimeStepState.AllContributed
+        # When the last thread contributed to the local time step reduction, the main thread can
+        # start the global MPI reduction. This is slower but safer for the underlying MPI implementation.
+        update_dt!(params, global_dt)
+    end
+end
+
+
 function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where {T}
+    # Suppose that only a single thread can execute this body at once
     state = time_step_state(global_dt)
     if state == TimeStepState.AllContributed
-        local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
         if params.use_MPI
+            if Threads.threadid() != 1
+                # Only the main thread can touch the reduction request. This is mainly because MPI
+                # implementations have trouble doing this correctly. This harsh constraint ensures
+                # the reduction is done correctly every time, and that outside of the multithreaded
+                # section of the solver, the main thread can use `MPI_Wait` to complete the reduction
+                # before starting a new cycle.
+                return TimeStepState.AllContributed
+            end
+            local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
             global_dt.MPI_buffer.senddata[] = local_dt
             global_dt.MPI_buffer.recvdata[] = typemax(T)
             IAllreduce!(global_dt.MPI_buffer, MPI.MIN, params.cart_comm, global_dt.MPI_reduction)
             time_step_state!(global_dt, TimeStepState.DoingMPI)
             return TimeStepState.DoingMPI
         else
+            local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
             new_dt = local_dt
         end
     elseif state == TimeStepState.WaitingForMPI
@@ -151,11 +176,16 @@ function next_cycle!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) wher
         return
     end
 
-    if time_step_state(global_dt) == TimeStepState.DoingMPI
-        wait_for_dt!(params, global_dt)
+    dt_state = time_step_state(global_dt)
+    if dt_state == TimeStepState.AllContributed
+        # Most likely, the main thread did not start the MPI reduction during the cycle
+        dt_state = update_dt!(params, global_dt)
     end
 
-    dt_state = time_step_state(global_dt)
+    if dt_state == TimeStepState.DoingMPI
+        dt_state = wait_for_dt!(params, global_dt)
+    end
+
     if dt_state != TimeStepState.Done
         error("expected time step to be done, got: $dt_state")
     end

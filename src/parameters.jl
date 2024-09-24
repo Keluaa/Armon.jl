@@ -491,7 +491,7 @@ function init_device(params::ArmonParameters;
     params.async_cycle = async_cycle
     params.busy_wait_limit = max(busy_wait_limit, 1)
 
-    if use_cache_blocking && use_threading && params.use_MPI
+    if use_cache_blocking && use_threading && Threads.nthreads() > 1 && params.use_MPI
         thread_level = MPI.Query_thread()
         if thread_level < MPI.THREAD_MULTIPLE
             solver_error(:config, "Using multithreading with cache blocking requires MPI to be \

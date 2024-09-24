@@ -220,6 +220,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
 
         tid = Threads.threadid()
         thread_blocks_idx = grid.threads_workload[tid]
+        is_main_thread = tid == 1
 
         t_start = time_ns()
         step_count = 0
@@ -227,6 +228,8 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         total_wait_time = 0
         total_mpi_waits = 0
         while step_count < max_step_count
+            is_main_thread && progress_dt_reduction(params, grid.global_dt)
+
             # Repeatedly parse through all blocks assigned to the current thread, each time advancing
             # them through the solver steps, until all of them are done with the cycle.
             all_finished_cycle = true
@@ -267,6 +270,8 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
                 total_mpi_waits += waited_for_mpi
             end
         end
+
+        is_main_thread && progress_dt_reduction(params, grid.global_dt)
 
         if params.log_blocks && !isempty(thread_blocks_idx)
             t_end = time_ns()
