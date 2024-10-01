@@ -2,40 +2,79 @@
 #include "vars.h"
 #include "blocks.h"
 #include "solver.h"
+#include "mpi_comms.h"
+#include "debug.h"
+
+#include <stdlib.h>
+#include <mpi.h>
 
 
-$input int in_NUM_THREADS = 4;
-$assume(0 < in_NUM_THREADS && in_NUM_THREADS <= 10);
+$input int _NUM_THREADS = 4;
+$assume(0 < _NUM_THREADS && _NUM_THREADS <= 10);
 
-$input int in_NUM_CYCLES = 3;
-$assume(0 <= in_NUM_CYCLES && in_NUM_CYCLES <= 4);
+$input int _NUM_CYCLES = 3;
+$assume(0 <= _NUM_CYCLES && _NUM_CYCLES <= 4);
 
-$input int in_MAX_SWEEPS = 2;
-$assume(0 <= in_MAX_SWEEPS && in_MAX_SWEEPS <= 4);
+$input int _MAX_SWEEPS = 2;
+$assume(0 <= _MAX_SWEEPS && _MAX_SWEEPS <= 4);
 
-$input int in_GRID_SIZE_X = 3;
-$input int in_GRID_SIZE_Y = 3;
-$assume(1 <= in_GRID_SIZE_X && in_GRID_SIZE_X <= 5);
-$assume(1 <= in_GRID_SIZE_Y && in_GRID_SIZE_Y <= 5);
+$input int _GRID_SIZE_X = 3;
+$input int _GRID_SIZE_Y = 3;
+$assume(1 <= _GRID_SIZE_X && _GRID_SIZE_X <= 5);
+$assume(1 <= _GRID_SIZE_Y && _GRID_SIZE_Y <= 5);
 
-
-int get_num_threads()      { return in_NUM_THREADS; }
-int get_num_cycles()       { return in_NUM_CYCLES; }
-int get_max_sweeps()       { return in_MAX_SWEEPS; }
-int get_grid_size_x()      { return in_GRID_SIZE_X; }
-int get_grid_size_y()      { return in_GRID_SIZE_Y; }
-int get_total_blocks()     { return in_GRID_SIZE_X * in_GRID_SIZE_Y; }
-int get_total_interfaces() { return 2 * get_total_blocks() - in_GRID_SIZE_X - in_GRID_SIZE_Y; }
+$input int _PROC_GRID_X = 2;
+$input int _PROC_GRID_Y = 2;
+$assume(1 <= _PROC_GRID_X && _PROC_GRID_X <= 5);
+$assume(1 <= _PROC_GRID_Y && _PROC_GRID_Y <= 5);
 
 
-int main()
+int get_num_threads(void)      { return _NUM_THREADS; }
+int get_num_cycles(void)       { return _NUM_CYCLES; }
+int get_max_sweeps(void)       { return _MAX_SWEEPS; }
+int get_grid_size_x(void)      { return _GRID_SIZE_X; }
+int get_grid_size_y(void)      { return _GRID_SIZE_Y; }
+int get_proc_grid_x(void)      { return _PROC_GRID_X; }
+int get_proc_grid_y(void)      { return _PROC_GRID_Y; }
+int get_total_blocks(void)        { return _GRID_SIZE_X * _GRID_SIZE_Y; }
+int get_total_remote_blocks(void) { return 2 * (_GRID_SIZE_X + _GRID_SIZE_Y); }
+int get_total_interfaces(void)    { return 2 * get_total_blocks() - _GRID_SIZE_X - _GRID_SIZE_Y; }
+
+
+void print_params(void)
 {
-    struct BlockGrid* block_grid = init_grid(NUM_THREADS);
+    printf("Solver parameters:\n");
+    printf(" - NUM_THREADS = %d\n", NUM_THREADS);
+    printf(" - NUM_CYCLES  = %d\n", NUM_CYCLES);
+    printf(" - MAX_SWEEPS  = %d\n", MAX_SWEEPS);
+    printf(" - GRID_SIZE   = (%d,%d)\n", GRID_SIZE_X, GRID_SIZE_Y);
+    printf(" - PROC_GRID   = (%d,%d)\n", PROC_GRID_X, PROC_GRID_Y);
+    printf("Solver options:\n");
+    printf(" - DO_TIME_STEP     = %d\n", DO_TIME_STEP);
+    printf(" - DO_HALO_EXCHANGE = %d\n", DO_HALO_EXCHANGE);
+    printf(" - SIMPLE_XCHG      = %d\n", SIMPLE_XCHG);
+}
+
+
+int main(int argc, char** argv)
+{
+    int provided;
+    MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
+    CIVL_assert(provided >= MPI_THREAD_MULTIPLE);
+
+    print_params();
+
+    int rank_pos[] = { 0, 0 };
+    int neighbour_ranks[] = { MPI_PROC_NULL, MPI_PROC_NULL, MPI_PROC_NULL, MPI_PROC_NULL };
+    struct BlockGrid* block_grid = init_grid(MPI_COMM_WORLD, rank_pos, neighbour_ranks, NUM_THREADS);
 
     $parfor(int tid: 0 .. NUM_THREADS-1) {
         solver_thread(tid, &block_grid->threads_workload[tid], tid == 0 ? block_grid : NULL);
     }
 
+//    pretty_print_solver_state(block_grid);
+    check_end_state(block_grid);
     free_grid(block_grid);
+    MPI_Finalize();
     return 0;
 }

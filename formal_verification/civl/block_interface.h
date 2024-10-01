@@ -10,7 +10,12 @@ enum BlockExchangeState {
 };
 
 struct BlockInterface {
+#if SIMPLE_XCHG
+    bool ready[2];
+    enum BlockExchangeState bint_state;
+#else
     AtomicVar byte int_state;
+#endif
     bool is_done[2];
 };
 

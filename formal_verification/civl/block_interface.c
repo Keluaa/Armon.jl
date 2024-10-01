@@ -58,6 +58,7 @@ CIVL_pure static byte two_bit_or(byte a, byte b)
 }
 
 #ifdef _CIVL
+// Works only for 2 bit values
 #define CIVL_atomic_or_fetch(val, arg, res) $atomic { (val) = two_bit_or((val), (arg)); (res) = (val); }
 #else
 #define CIVL_atomic_or_fetch(val, arg, res) \
@@ -66,49 +67,121 @@ CIVL_pure static byte two_bit_or(byte a, byte b)
 
 void block_interface_state(struct BlockInterface* bint, enum BlockExchangeState* bint_state, byte* bint_ready)
 {
+#if SIMPLE_XCHG
+    $atomic {
+        *bint_state = bint->bint_state;
+        *bint_ready = ((byte) bint->ready[0]) + ((byte) bint->ready[1]) * 2;
+    }
+#else
     byte bint_flags;
     CIVL_atomic_load(bint->int_state, bint_flags);
     *bint_state = exchange_state_from_val(last_two_bits(bint_flags));
     *bint_ready = first_two_bits(bint_flags);
+#endif
 }
 
 void interface_side_ready(struct BlockInterface* bint, byte ready_flag, enum BlockExchangeState* bint_state, byte* bint_ready)
 {
+#if SIMPLE_XCHG == 0
     byte flags = first_two_bits(ready_flag);
     byte bint_flags;
     CIVL_atomic_or_fetch(bint->int_state, flags, bint_flags);
     *bint_state = exchange_state_from_val(last_two_bits(bint_flags));
     *bint_ready = first_two_bits(bint_flags);
+#endif
 }
 
 bool interface_start_exchange(struct BlockInterface* bint, byte side_flag)
 {
+#if SIMPLE_XCHG
+    return true;
+#else
     byte other_side_flag = side_flag == 1 ? 2 : 1;  // opposite side flag (eq to 'side_flag ^ 0b11')
     byte ready_state  = ((byte) XCHG_NotReady)   * 4 + 3;
     byte target_state = ((byte) XCHG_InProgress) * 4 + other_side_flag;
     bool success;
     CIVL_atomic_cas(success, bint->int_state, ready_state, target_state);
     return success;
+#endif
 }
 
 void interface_end_exchange(struct BlockInterface* bint)
 {
+#if SIMPLE_XCHG == 0
     byte done_flag = ((byte) XCHG_Done) * 4;
     byte _;
     CIVL_atomic_or_fetch(bint->int_state, done_flag, _);
+#endif
 }
 
 bool interface_acknowledge_exchange(struct BlockInterface* bint, byte side_flag)
 {
+#if SIMPLE_XCHG
+    return true;
+#else
     byte current_state = (((byte) XCHG_Done)     * 4) + side_flag;
     byte target_state  = (((byte) XCHG_NotReady) * 4) + 0;
     bool success;
     CIVL_atomic_cas(success, bint->int_state, current_state, target_state);
     return success;
+#endif
 }
 
 bool mark_ready_for_exchange(struct BlockInterface* bint, bool is_first_side, enum BlockExchangeState* new_state)
 {
+#if SIMPLE_XCHG
+    int this_side = is_first_side;
+    int other_side = !is_first_side;
+    enum BlockExchangeState bint_state;
+    bool this_side_ready;
+    $atomic {
+        bint_state = bint->bint_state;
+        this_side_ready = bint->ready[this_side];
+    }
+
+    switch (bint_state) {
+    case XCHG_NotReady:
+    default:
+        break;
+    case XCHG_InProgress:
+        // The other block is still doing the exchange
+        *new_state = bint_state;
+        return false;
+    case XCHG_Done:
+        // One of the blocks did the exchange
+        if (this_side_ready) {
+            // It was the other one, reset the interface and continue
+            // interface_acknowledge_exchange
+            $atomic {
+                bint->bint_state = XCHG_NotReady;
+                bint->ready[0] = false;
+                bint->ready[1] = false;
+            }
+            *new_state = XCHG_Done;
+        } else {
+            // It was this one, we are waiting for the other block to acknowledge it
+            *new_state = XCHG_NotReady;
+        }
+        return false;
+    }
+
+    bool do_xchg;
+    $atomic {
+        if (bint->ready[other_side]) {
+            // skip XCHG_InProgress, directly mark the exchange as done
+            bint->bint_state = XCHG_Done;
+            *new_state = XCHG_Done;
+            do_xchg = true;
+        } else {
+            bint->ready[this_side] = true;
+            *new_state = XCHG_NotReady;
+            do_xchg = false;
+        }
+        CIVL_assert(bint->ready[0] != bint->ready[1]);
+    }
+
+    return do_xchg;
+#else
     enum BlockExchangeState bint_state;
     byte ready_flags;
     block_interface_state(bint, &bint_state, &ready_flags);
@@ -155,10 +228,15 @@ bool mark_ready_for_exchange(struct BlockInterface* bint, bool is_first_side, en
         *new_state = XCHG_NotReady;
         return false;
     }
+#endif
 }
 
 enum BlockExchangeState exchange_done(struct BlockInterface* bint)
 {
+#if SIMPLE_XCHG
+    return XCHG_Done;
+#else
     interface_end_exchange(bint);
     return XCHG_Done;
+#endif
 }

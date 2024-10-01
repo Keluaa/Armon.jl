@@ -59,7 +59,7 @@ void print_interface(struct BlockInterface* interface)
         byte flags;
         block_interface_state(interface, &bint_state, &flags);
         printf("addr=%p, left=%d, right=%d, state=%s, flags=%d",
-               interface, interface->is_done[0], interface->is_done[1], block_xchg_state_to_str(bint_state), flags);
+               (void*) interface, interface->is_done[0], interface->is_done[1], block_xchg_state_to_str(bint_state), flags);
     }
 }
 
@@ -85,7 +85,7 @@ void print_block_grid(struct BlockGrid* block_grid)
     }
 }
 
-void print_global_state()
+void print_global_state(void)
 {
     printf("Global state:\n");
     printf(" - global_dt_state  = %s\n", time_step_state_to_str(global_dt_state));
@@ -164,3 +164,30 @@ bool check_interfaces(struct BlockGrid* block_grid)
 }
 
 #endif //_CIVL
+
+void check_end_state(struct BlockGrid* block_grid)
+{
+    CIVL_assert(global_dt_state  == DT_Ready);
+    CIVL_assert(dt_contributions == 0);
+    CIVL_assert(global_cycle     == NUM_CYCLES);
+
+    // All blocks should be 'NewCycle' with 'cycle == NUM_CYCLES'
+    // All interfaces should be 'XCHG_NotReady'
+    for (int block_i = 0; block_i < TOTAL_BLOCKS; block_i++) {
+        struct Block* block = &block_grid->blocks[block_i];
+        CIVL_assert(block->state == NewCycle);
+        CIVL_assert(block->cycle == NUM_CYCLES);
+        CIVL_assert(block->sweep_num == 0);
+        for (int int_i = 0; int_i < 4; int_i++) {
+            if (block->interfaces[int_i] == NULL) {
+                continue;
+            } else {
+#if SIMPLE_XCHG
+                CIVL_assert(block->interfaces[int_i]->bint_state == XCHG_NotReady);
+#else
+                CIVL_assert(block->interfaces[int_i]->int_state == 0);
+#endif
+            }
+        }
+    }
+}

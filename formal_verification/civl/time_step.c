@@ -1,20 +1,22 @@
 
 #include "time_step.h"
 
-void update_dt()
+void update_dt(void)
 {
     enum TimeStepState prev_dt_state = global_dt_state;
 
     if (prev_dt_state == DT_AllContributed) {
-#if USE_MPI
+#if DO_TIME_STEP && DO_HALO_EXCHANGE
         global_dt_state = DT_DoingMPI;
         return;
 #endif
     } else if (prev_dt_state == DT_WaitingForMPI) {
         // receive the MPI reduction result
+#if  DO_TIME_STEP && DO_HALO_EXCHANGE
         // TODO
 //        assert(nempty(subdomain_neighbours_dt_reduction));
 //        subdomain_neighbours_dt_reduction?_;
+#endif
     } else {
         // TODO: another thread went here first? is this normal? this isn't in the Julia implementation!
         return;
@@ -24,14 +26,14 @@ void update_dt()
     global_dt_state = DT_Done;
 }
 
-enum TimeStepState wait_for_dt()
+enum TimeStepState wait_for_dt(void)
 {
     bool cas_ok = false;
     enum TimeStepState old_val = DT_DoingMPI, new_val = DT_WaitingForMPI;
     CIVL_atomic_cas(cas_ok, global_dt_state, old_val, new_val);
 
     if (cas_ok) {
-#if USE_MPI
+#if DO_TIME_STEP && DO_HALO_EXCHANGE
         // TODO: wait until `subdomain_neighbours_dt_reduction` has a value + make sure only one thread waits on the request
 #endif
         update_dt();
@@ -54,7 +56,7 @@ void contribute_to_dt(struct Block* block)
     }
 }
 
-void next_cycle()
+void next_cycle(void)
 {
     enum TimeStepState current_dt_state;
 

@@ -1,6 +1,7 @@
 #ifndef ARMON_CIVL_BLOCKS_H
 #define ARMON_CIVL_BLOCKS_H
 
+#include <mpi.h>
 #include "vars.h"
 #include "utils.h"
 #include "block_interface.h"
@@ -38,8 +39,20 @@ struct Block {
 };
 
 
+struct CommunicationData;
+
+struct RemoteBlock {
+    int rank;
+    struct CommunicationData* comm_data;
+    byte pos[2];
+    struct BlockInterface* interface;
+};
+
+
 struct BlockGrid {
+    byte global_origin[2];
     struct Block* blocks;
+    struct RemoteBlock* remote_blocks;
     struct BlockInterface* interfaces;
     int num_threads;
     struct ThreadWorkload {
@@ -63,7 +76,7 @@ extern AtomicVar byte dt_contributions;  // number of blocks which contributed t
 extern byte global_cycle;  // the current cycle of the whole solver
 
 
-struct BlockGrid* init_grid(int num_threads);
+struct BlockGrid* init_grid(MPI_Comm comm, const int* rank_pos, const int* neighbour_ranks, int num_threads);
 void free_grid(struct BlockGrid* block_grid);
 void block_ghost_exchange(struct Block* block);
 void block_state_machine(struct Block* block);
