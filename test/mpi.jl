@@ -330,7 +330,8 @@ function test_halo_exchange(P, global_comm)
 
                 # Halo exchange, but with one neighbour at a time
                 remote_blk = blk.neighbours[Int(side)]
-                @root_test length(domain) * length(Armon.comm_vars()) == length(remote_blk.send_buf.data)
+                send_buffer = only(Armon.Communications.unsafe_send_buffer(remote_blk.comm_data))
+                @root_test length(domain) * length(Armon.comm_vars()) == length(send_buffer)
                 if !Armon.start_exchange(ref_params, blk, remote_blk, side)
                     MPI.Waitall(remote_blk.requests)
                     @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
@@ -414,6 +415,47 @@ function test_conservation(test, P, N; maxcycle=10000, maxtime=10000, kwargs...)
     @root_test init_energy ≈ end_energy atol=1e-12
 
     return true
+end
+
+
+function test_communication_model(
+    comm, P, comm_model_name, comm_model_kwargs,
+    use_threading, enough_processes, proc_in_grid
+)
+    comm_model = try
+        Armon.Communications.communication_model(comm_model_name; comm_model_kwargs...)
+    catch
+        # The model cannot be created (e.g. partitioned comms unsupported)
+        @test true skip=true
+        return
+    end
+    !Armon.supports_point_to_point(comm_model) && return
+
+    if comm_model isa Armon.Communications.NoCommunicationModel
+        # Since processes cannot communicate with each other, we restrict the test to only tests
+        # whose result does not depend on communications.
+        # Here we place ourselves in the case where we have 1 process along the X axis, with the Sod
+        # tube test: the result must be constant along the Y axis, therefore with communications or
+        # not, the result must be the same.
+        P[1] != 1 && return
+        test_cases = TEST_CASES_MPI ∩ (:Sod,)
+    else
+        test_cases = TEST_CASES_MPI
+    end
+
+    use_threading &= Armon.Communications.is_thread_safe(comm_model)
+    use_cache_blocking = Armon.Communications.is_async(comm_model)
+    async_cycle = use_cache_blocking
+
+    opts = (; use_threading, use_cache_blocking, async_cycle, comm_model, global_comm=comm)
+
+    @testset "Reference" begin
+        @testset "$test with $type" for type in TEST_TYPES_MPI, test in test_cases
+            @MPI_test comm begin
+                test_reference("CPU", comm, test, type, P; opts...)
+            end skip=!enough_processes || !proc_in_grid
+        end
+    end
 end
 
 
@@ -582,6 +624,22 @@ end
                 @MPI_test comm begin
                     test_reference("kokkos", comm, test, type, P; use_threading, use_kokkos=true)
                 end skip=!TEST_KOKKOS_MPI || !enough_processes || !proc_in_grid
+            end
+        end
+
+        @testset "Communication models" begin
+            @testset "$(comm_model_name)" for (comm_model_name, comm_model_kwargs) in (
+                (:async_safe, (;)),
+                (:async, (;)),
+                (:sync, (;)),
+                (:rma, (;)),
+                (:partitioned, (; partition_size=56*4)),  # "default real cells in a block per axis" * "default number of ghost cells"
+                (:no_comms, (;)),
+            )
+                test_communication_model(
+                    comm, P, comm_model_name, comm_model_kwargs,
+                    use_threading, enough_processes, proc_in_grid
+                )
             end
         end
 

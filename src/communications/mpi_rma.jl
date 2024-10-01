@@ -16,8 +16,10 @@ struct RMACommunicationModel
     origin_is_source :: Bool  # If the origin rank is the source of the data (`MPI.Put!`, or `MPI.Get!` otherwise)
 end
 
-RMACommunicationModel(comm::MPI.Comm; homogenous::Bool=true, origin_is_source::Bool=true) =
+function RMACommunicationModel(comm::MPI.Comm; homogenous::Bool=true, origin_is_source::Bool=true)
+    error("NYI")
     RMACommunicationModel(comm, homogenous, origin_is_source)
+end
 
 buffer_type(::ObjOrType{RMACommunicationModel}, ::Type{A}) where {A} = A
 is_thread_safe(::ObjOrType{RMACommunicationModel}) = false
@@ -49,8 +51,6 @@ function init_exchange(
     model::RMACommunicationModel,
     rank, side, side_pos, array_type, buffer_size, total_side_buffer_size
 )
-    error("NYI")
-
     xchg_buffer = array_type(undef, buffer_size)
     win_buffer  = array_type(undef, buffer_size)
 
