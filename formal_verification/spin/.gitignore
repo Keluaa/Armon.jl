@@ -3,3 +3,6 @@ swarm_check/
 pan*
 grid_definition.*
 *.trail
+big_mpi_check/run/
+big_mpi_check/submit.sh
+*.swarm

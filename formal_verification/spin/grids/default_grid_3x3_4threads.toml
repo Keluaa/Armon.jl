@@ -1,6 +1,11 @@
 # Example grid parameters
 grid = [3, 3]              # 2D grid of 3x3 blocks
-num_threads = 4            # distributed on 4 threads per process
-periodic = [false, false]  # 'true' if an axis is periodic, false by default
-use_mpi = false            # don't use MPI by default
-processes = [1, 1]         # process grid
+num_threads = 4            # Distributed on 4 threads per grid
+periodic = [false, false]  # `true` if an axis is periodic, false by default
+use_mpi = false            # Don't use MPI by default
+processes = [1, 1]         # Process grid size. There will be `prod(grid)*prod(processes)*num_threads` proctypes in total.
+real_block_xchg = true     # If the real algorithm for block ghost exchange should be used. `false` for a faster approximation
+num_cycles = 3             # Number of solver cycles to do. Lower means smaller maximum simulation depth.
+max_sweeps = 2             # Number of block sweeps to do per cycle. Lower means smaller maximum simulation depth.
+do_time_step = true        # If `false`, skip the whole time step reduction done at every cycle.
+do_halo_xchg = true        # If `false`, skip all block exchanges done at every sweep.

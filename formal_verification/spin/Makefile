@@ -12,7 +12,7 @@ SWARM_MEM ?= 1024M
 # XUSAFE ?= -DXUSAFE
 XUSAFE ?=
 
-SOURCES = utils.pml blocks.pml block_grid.pml solver.pml main.pml
+SOURCES = utils.pml mpi_spin.pml blocks.pml block_grid.pml solver.pml main.pml
 GRID_DEF = ./grid_definition.c ./grid_definition.h ./grid_definition.pml
 
 $(GRID_DEF): ./gen_grid.jl
@@ -22,13 +22,14 @@ $(GRID_DEF): ./gen_grid.jl
 	spin -a $(VARS) ./main.pml
 
 ./pan_exhaustive: ./pan.c
-	$(CC) -O2 -DMEMLIM=65536 -DVECTORSZ=4160 $(XUSAFE) -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -w -o pan_exhaustive ./pan.c
+	$(CC) -g -O2 -DMEMLIM=65536 -DVECTORSZ=4160 $(XUSAFE) -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -w -o pan_exhaustive ./pan.c
 
 ./pan_bitstate: ./pan.c
-	$(CC) -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM -w -o pan_bitstate ./pan.c
+#	$(CC) -g -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM -w -o pan_bitstate ./pan.c
+	$(CC) -g -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE $(XUSAFE) -DNOCLAIM -w -o pan_bitstate ./pan.c
 
 ./pan_bitstate_non_progress: ./pan.c
-	$(CC) -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNP -w -o pan_bitstate_non_progress ./pan.c
+	$(CC) -g -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNP -w -o pan_bitstate_non_progress ./pan.c
 
 ./multi_core:
 	mkdir -p ./multi_core
@@ -37,10 +38,10 @@ $(GRID_DEF): ./gen_grid.jl
 	 cd ./multi_core && spin -a -DNO_HIDDEN $(VARS) ../main.pml
 
 ./multi_core/pan_exhaustive: ./multi_core/pan.c ./multi_core
-	cd ./multi_core && $(CC) -O2 -DMEMLIM=$(MEMLIM) -DVECTORSZ=4160 $(XUSAFE) -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_exhaustive ./pan.c
+	cd ./multi_core && $(CC) -g -O2 -DMEMLIM=$(MEMLIM) -DVECTORSZ=4160 $(XUSAFE) -DSAFETY -DNOCLAIM -DCOLLAPSE -DREACH -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_exhaustive ./pan.c
 
 ./multi_core/pan_bitstate: ./multi_core/pan.c ./multi_core
-	cd ./multi_core && $(CC) -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_bitstate ./pan.c
+	cd ./multi_core && $(CC) -g -O2 -DMEMLIM=$(MEMLIM) -DBITSTATE -DVECTORSZ=4160 $(XUSAFE) -DNOCLAIM -DNCORE=$(NCORES) -DPMAX=5 -DVMAX=344 -w -o pan_bitstate ./pan.c
 
 ./swarm_check:
 	mkdir -p ./swarm_check
@@ -73,7 +74,7 @@ check_approx: ./pan_bitstate
 	./pan_bitstate -m10000000 -c1 -k1 -w34 -q -I
 
 check_non_progress: ./pan_bitstate_non_progress
-	./pan_bitstate_non_progress -m10000000 -l -c1 -k1 -w34 -q -I
+	./pan_bitstate_non_progress -m10000000 -l -c1 -k1 -w34 -q
 
 check_multi_core: ./multi_core/pan_exhaustive
 	cd ./multi_core && ./pan_exhaustive -m10000000 -c1 -q -I
@@ -103,8 +104,37 @@ swarm_trail: ./pan.c ./swarm_check/swarm_check.swarm
 	cd ./swarm_check && ./swarm_check.swarm prep
 	@echo "Use './swarm_check/pan[1-4] -r ./swarm_check/trails/main.pml_pan[1-4]_<seed>.trail' to follow a trail"
 
+big_swarm_4nodes: ./pan.c
+	mkdir -p ./big_mpi_check/run/
+	cp -f ./pan.* ./big_mpi_check/run/
+	rm -f ./big_mpi_check/run/*.trail
+	cd ./big_mpi_check/run/ && swarm ../big_4nodes_50cores.conf && ./main.pml.swarm prep base spin_script_
+	@echo "Now do 'sbatch ./big_mpi_check/big_4nodes_50cores.sh' to run the swarm check"
+
+big_swarm_1node: ./pan.c
+	mkdir -p ./big_mpi_check/run_1node/
+	cp -f ./pan.* ./big_mpi_check/run_1node/
+	rm -f ./big_mpi_check/run_1node/*.trail
+	cd ./big_mpi_check/run_1node/ && swarm ../big_1node_40cores.conf && ./main.pml.swarm prep base spin_script_
+	@echo "Now do 'sbatch ./big_mpi_check/big_1node_40cores.sh' to run the swarm check"
+
+long_approx_check: ./pan_bitstate
+	mkdir -p ./big_mpi_check/run_long_check/
+	cp -f ./pan_bitstate ./big_mpi_check/run_long_check/
+	rm -f ./big_mpi_check/run_long_check/*.trail
+	@echo "Now do 'sbatch ./big_mpi_check/long_check_1core.sh' to run the swarm check"
+
+long_non_progress_check: ./pan_bitstate_non_progress
+	mkdir -p ./big_mpi_check/run_long_non_progress_check/
+	cp -f ./pan_bitstate_non_progress ./big_mpi_check/run_long_non_progress_check/
+	rm -f ./big_mpi_check/run_long_non_progress_check/*.trail
+	@echo "Now do 'sbatch ./big_mpi_check/long_non_progress_check_1core.sh' to run the swarm check"
+
 clean_swarm:
 	rm -rf ./swarm_check
+
+clean_big_swarm:
+	rm -rf ./big_mpi_check/run
 
 clean_multi_core:
 	rm -rf ./multi_core
@@ -119,8 +149,8 @@ help:
 	@echo "Formal verification of the solver for multithreading + MPI using SPIN"
 	@echo "SPIN can be downloaded by following those instructions: https://spinroot.com/spin/Man/README.html"
 	@echo "Targets:"
-	@echo "   single_grid            Create './grid_definition.c' for a single grid of 3x3 blocks using 4 threads"
-	@echo "   mpi_grid               Create './grid_definition.c' for 4 MPI ranks each with 3x3 blocks and 4 threads"
+	@echo "   single_grid            Create './grid_definition.[c,h,pml]' for a single grid of 3x3 blocks using 4 threads"
+	@echo "   mpi_grid               Create './grid_definition.[c,h,pml]' for 4 MPI ranks each with 3x3 blocks and 4 threads"
 	@echo "   preprocessor           Output the Pomela source after the preprocessor pass"
 	@echo "   pan                    Compile the Pomela source to C"
 	@echo "   check                  Perform an exhaustive simulation of all solver states (impossibly slow)"

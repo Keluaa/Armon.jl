@@ -12,11 +12,16 @@ See './grids/default_grid_3x3_4threads.toml' for an explaination of each option.
 """
 
 const DEFAULT_ARGS = Dict(
-    "grid"        => [3, 3],
-    "periodic"    => [false, false],
-    "num_threads" => 4,
-    "use_mpi"     => false,
-    "processes"   => [1, 1],
+    "grid"            => [3, 3],
+    "periodic"        => [false, false],
+    "num_threads"     => 4,
+    "use_mpi"         => false,
+    "processes"       => [1, 1],
+    "real_block_xchg" => false,
+    "num_cycles"      => 3,
+    "max_sweeps"      => 2,
+    "do_time_step"    => true,
+    "do_halo_xchg"    => true,
 )
 
 const REMOTE_BLOCK   = 254
@@ -38,6 +43,9 @@ function parse_options_file(filename)
         DEFAULT_ARGS["periodic"]  = map(Returns(false), 1:grid_dim)
         DEFAULT_ARGS["processes"] = map(Returns(false), 1:grid_dim)
     end
+
+    unknown_options = setdiff(keys(options), keys(DEFAULT_ARGS))
+    !isempty(unknown_options) && error("unknown options: $(join(unknown_options, ", "))")
 
     options = merge(DEFAULT_ARGS, options)
 
@@ -61,9 +69,12 @@ function parse_arguments()
 end
 
 
-struct P2PChannel
-    idx :: Int
+mutable struct P2PChannel
+    idx   :: Int
+    usage :: Int
 end
+
+P2PChannel(idx) = P2PChannel(idx, 0)
 
 
 mutable struct RemoteBlock{Dim}
@@ -117,16 +128,25 @@ end
 
 
 struct ProcessGridTopo{Dim, Neigh}
-    use_mpi     :: Bool
-    proc_size   :: NTuple{Dim, Int}
-    periodicity :: NTuple{Dim, Bool}
-    channels    :: Vector{P2PChannel}
-    processes   :: Vector{GridTopo{Dim, Neigh}}
+    use_mpi         :: Bool
+    proc_size       :: NTuple{Dim, Int}
+    periodicity     :: NTuple{Dim, Bool}
+    channels        :: Vector{P2PChannel}
+    processes       :: Vector{GridTopo{Dim, Neigh}}
 
     ProcessGridTopo(dim, proc_size, periodicity, use_mpi) = new{dim, 2*dim}(use_mpi, proc_size, periodicity, [], [])
 end
 
 Base.ndims(::ProcessGridTopo{Dim}) where {Dim} = Dim
+
+
+struct SolverOptions
+    real_block_xchg :: Bool
+    num_cycles      :: Int
+    max_sweeps      :: Int
+    do_time_step    :: Bool
+    do_halo_xchg    :: Bool
+end
 
 
 is_in_grid(grid_size, pos)     = all(1 .≤ Tuple(pos) .≤ Tuple(grid_size))
@@ -216,27 +236,35 @@ end
 
 
 function assign_channels!(proc_grid::ProcessGridTopo)
-    # Match remote blocks together and assign them unique channel indices.
-    # Between two neighbouring processes, blocks sharing the same tag will communicate with each other.
+    # Two MPI processes with P2P communications between each other will share one channel.
+    # Each channel will be big enough to handle messages from both sides.
+    # Having one channel per remote block to remote block communication creates too many channels,
+    # causing many issues, mainly having to explore depths far too large (>10^8).
     tot_channels = 0
+    channels_topo = Dict(rank => Dict{Int, P2PChannel}() for rank in 1:length(proc_grid.processes))  # rank to {other rank to channel idx}
     for grid in proc_grid.processes
         for neigh_grid_rank in Iterators.filter(!=(NULL_RANK), grid.neighbours)
             neigh_grid = proc_grid.processes[neigh_grid_rank]
             neigh_grid.rank != neigh_grid_rank && error("wrong rank: expected=$neigh_grid_rank, got=$(neigh_grid.rank)")
 
+            chan = get!(channels_topo[grid.rank], neigh_grid_rank) do
+                tot_channels += 1
+                chan = P2PChannel(tot_channels)
+                push!(proc_grid.channels, chan)
+                channels_topo[neigh_grid_rank][grid.rank] = chan
+                return chan
+            end
+
             for blk in grid.remote_blocks
                 blk.rank != neigh_grid_rank && continue
                 blk.send_chan.idx != -1 && continue  # the channels are already assigned
 
-                neigh_blk_idx = findfirst(ob -> ob.tag == blk.tag, neigh_grid.remote_blocks)
+                neigh_blk_idx = findfirst(ob -> ob.rank == grid.rank && ob.tag == blk.tag, neigh_grid.remote_blocks)
                 isnothing(neigh_blk_idx) && error("could not match remote block of grid $(grid.pos) (rank $(grid.rank)) at $(blk.pos) with grid at $(neigh_grid.pos) (rank $neigh_grid_rank)")
                 neigh_blk = neigh_grid.remote_blocks[neigh_blk_idx]
 
-                blk.send_chan = neigh_blk.recv_chan = P2PChannel(tot_channels + 1)
-                blk.recv_chan = neigh_blk.send_chan = P2PChannel(tot_channels + 2)
-                tot_channels += 2
-
-                push!(proc_grid.channels, blk.send_chan, blk.recv_chan)
+                blk.send_chan = blk.recv_chan = neigh_blk.recv_chan = neigh_blk.send_chan = chan
+                chan.usage += 2  # 1 per block
             end
         end
 
@@ -307,6 +335,16 @@ function build_process_grid_topo(options)
 end
 
 
+function get_solver_options(options)
+    real_block_xchg = options["real_block_xchg"]
+    num_cycles      = options["num_cycles"]
+    max_sweeps      = options["max_sweeps"]
+    do_time_step    = options["do_time_step"]
+    do_halo_xchg    = options["do_halo_xchg"]
+    return SolverOptions(real_block_xchg, num_cycles, max_sweeps, do_time_step, do_halo_xchg)
+end
+
+
 write_c_array(io::IO, array) = (print(io, '{'); join(io, array, ", "); print(io, '}'))
 function write_idx_array(io::IO, array)
     print(io, '{')
@@ -328,87 +366,91 @@ end
 
 
 function write_process(io::IO, grid::GridTopo)
-    proctype_prefix = "mpi_proc_$(grid.rank-1)_tid_"
-    proctype_names = String[]
-    for tid in 1:grid.threads
-        proctype_name = proctype_prefix * string(tid-1)
-        push!(proctype_names, proctype_name)
-
-        # Get all remote blocks (and their channels) this thread will interact with
-        remote_blocks_idx = Int[]
-        send_channels = String[]
-        recv_channels = String[]
-        for blk in grid.blocks[grid.threads_workloads[tid]], neigh_blk in blk.neighbours
-            !(neigh_blk isa RemoteBlock) && continue
-            push!(remote_blocks_idx, neigh_blk.idx)
-            push!(send_channels, "channel_" * string(neigh_blk.send_chan.idx-1))
-            push!(recv_channels, "channel_" * string(neigh_blk.recv_chan.idx-1))
-        end
-
-        # By defining each thread using a different proctype, we can specify exactly which channel
-        # is going to be used and how (send or receive). This way SPIN will be able to minimize the
-        # amount of states to explore.
-
-        send_asserts = if !isempty(send_channels)
-            "xs " * join(send_channels, ", ") * ";"
-        else
-            "// no send channel assertions"
-        end
-
-        recv_asserts = if !isempty(recv_channels)
-            "xr " * join(recv_channels, ", ") * ";"
-        else
-            "// no receive channel assertions"
-        end
-
-        if !isempty(remote_blocks_idx)
-            channels_inits = map(enumerate(remote_blocks_idx)) do (i, blk_idx)
-                "MPI_Request_init(remote_blocks[$(blk_idx-1)].req, $(send_channels[i]), $(recv_channels[i]));"
-            end
-            channels_inits = """
-            d_step {
-                $(join(channels_inits, "\n        "))
-            }
-            """
-        else
-            channels_inits = ""
-        end
-
-        println(io, """
-        proctype $proctype_name()
-        {
-            $send_asserts
-            $recv_asserts
-
-            byte RANK = $(grid.rank-1);
-            byte TID  = $(tid-1);
-        $channels_inits
-            solver_thread();
-        }
-        """)
+    # Get all remote blocks (and their channels) this thread will interact with
+    remote_blocks = RemoteBlock[]
+    send_channels = String[]
+    recv_channels = String[]
+    for blk in grid.blocks, neigh_blk in blk.neighbours
+        !(neigh_blk isa RemoteBlock) && continue
+        push!(remote_blocks, neigh_blk)
+        push!(send_channels, "channel_" * string(neigh_blk.send_chan.idx-1))
+        push!(recv_channels, "channel_" * string(neigh_blk.recv_chan.idx-1))
     end
-    return proctype_names
+
+    if !isempty(remote_blocks)
+        channels_inits = map(enumerate(remote_blocks)) do (i, blk)
+            "MPI_Request_init(remote_blocks[$(blk.idx-1)].req, $(send_channels[i]), $(recv_channels[i]));"
+        end
+
+        requests_inits = map(remote_blocks) do blk
+            is_low_side = grid.rank < blk.rank
+            if is_low_side
+                "remote_blocks[$(blk.idx-1)].send_tag = $(blk.tag*2); remote_blocks[$(blk.idx-1)].recv_tag = $(blk.tag*2-1);"
+            else
+                "remote_blocks[$(blk.idx-1)].send_tag = $(blk.tag*2-1); remote_blocks[$(blk.idx-1)].recv_tag = $(blk.tag*2);"
+            end
+        end
+
+        channels_inits = join(channels_inits, "\n    ") * "\n\n    " * join(requests_inits, "\n    ")
+    else
+        channels_inits = "// no channels for rank $(grid.rank-1)"
+    end
+
+    return channels_inits
 end
 
 
 function write_all_processes(io::IO, proc_grid::ProcessGridTopo)
-    pad = floor(Int, log10(max(length(proc_grid.channels) - 1, 1))) + 1
+    max_channel_usage = maximum(chan -> chan.usage, proc_grid.channels; init=0)
+    if max_channel_usage ≥ 255
+        error("Maximum channel usage ($max_channel_usage) exceeds the maximum value of a byte (255)")
+    end
+
+    num_pad   = floor(Int, log10(max(length(proc_grid.channels) - 1, 1))) + 1
+    usage_pad = floor(Int, log10(max(max_channel_usage, 1))) + 1
     for chan in proc_grid.channels
-        println(io, "chan channel_$(rpad(chan.idx-1, pad)) = [MPI_SPIN_P2P_CHAN_SIZE] of { byte };")
+        println(io, "chan channel_$(rpad(chan.idx-1, num_pad)) = [$(rpad(chan.usage, usage_pad))*MPI_SPIN_P2P_CHAN_SIZE] of { byte, byte };")
     end
     println(io)
 
-    # Defines all proctypes for SPIN, and a function to launch them all at once
-    all_proctypes = String[]
+    # Defines all proctypes for SPIN, and a function to initialize them
+    ranks_inits = String[]
     for grid in proc_grid.processes
-        append!(all_proctypes, write_process(io, grid))
+        rank_init = write_process(io, grid)
+        rank_init = ":: (RANK == $(grid.rank-1)) -> {\n    $rank_init\n}"
+        rank_init = replace(rank_init, '\n' => "\n    ")
+        push!(ranks_inits, rank_init)
     end
+    println(io, """
+    inline init_rank()
+    {
+        d_step {
+            if
+            $(replace(join(ranks_inits, "\n    "), '\n' => "\n    "))
+            :: else -> assert(false);
+            fi
+        }
+    }
+    """)
 
-    run_all_proctypes = Ref("run ") .* all_proctypes .* Ref("();")
+    # The proctype common to all processes, and a function to run all processes and threads
     print(io, """
+    proctype solver_rank_thread(byte RANK; byte TID)
+    {
+        // This proctype is the base type of all threads of all MPI ranks
+        // 'RANK' and 'TID' can be considered as alaways-defined variables in all non-init functions
+        init_rank();
+        solver_thread();
+    }
+
     inline run_all_procs()
     {
-        $(join(run_all_proctypes, "\n    "))
+        byte rank, tid;
+        for (rank : 0 .. NUM_PROC-1) {
+            for (tid : 0 .. NUM_THREADS-1) {
+                run solver_rank_thread(rank, tid);
+            }
+        }
     }
     """)
 end
@@ -497,7 +539,19 @@ function write_proc_grid(io_h::IO, io_c::IO, proc_grid::ProcessGridTopo)
 end
 
 
-function write_proc_grid(filename, proc_grid::ProcessGridTopo)
+function write_solver_options(io_h::IO, solver::SolverOptions)
+    println(io_h, """
+    // solver options
+    #define REAL_BLOCK_XCHG  $(Int(solver.real_block_xchg))
+    #define NUM_CYCLES       $(solver.num_cycles)
+    #define MAX_SWEEPS       $(solver.max_sweeps)
+    #define DO_TIME_STEP     $(Int(solver.do_time_step))
+    #define DO_HALO_EXCHANGE $(Int(solver.do_halo_xchg))
+    """)
+end
+
+
+function write_proc_grid(filename, proc_grid::ProcessGridTopo, solver_options::SolverOptions)
     open(filename * ".h", "w") do header_file
         println(header_file, "#ifndef _PROC_GRID_H")
         println(header_file, "#define _PROC_GRID_H\n")
@@ -507,7 +561,10 @@ function write_proc_grid(filename, proc_grid::ProcessGridTopo)
             write_proc_grid(header_file, c_file, proc_grid)
         end
 
-        println(header_file, "\n#endif // _PROC_GRID_H")
+        println(header_file)
+        write_solver_options(header_file, solver_options)
+
+        println(header_file, "#endif // _PROC_GRID_H")
     end
 
     open(filename * ".pml", "w") do promela_file
@@ -516,8 +573,35 @@ function write_proc_grid(filename, proc_grid::ProcessGridTopo)
 end
 
 
+print_solver_stats(proc_grid::ProcessGridTopo, solver::SolverOptions) = print_solver_stats(stdout, proc_grid, solver)
+function print_solver_stats(io::IO, proc_grid::ProcessGridTopo, solver::SolverOptions)
+    tot_blocks  = sum(g -> length(g.blocks), proc_grid.processes)
+    tot_remotes = sum(g -> length(g.remote_blocks), proc_grid.processes)
+    tot_threads = sum(g -> g.threads, proc_grid.processes)
+
+    println(io, "Grid of ", proc_grid.proc_size, " processes ($(length(proc_grid.processes)) total):")
+    println(io, " - $tot_blocks blocks")
+    println(io, " - $tot_remotes remote blocks")
+    println(io, " - $tot_threads threads (proctypes)")
+    println(io, " - $(length(proc_grid.channels)) channels for exchanges")
+
+    println(io, "Solver:")
+    println(io, " - $(solver.num_cycles) cycles of $(solver.max_sweeps) sweeps ($(solver.num_cycles*solver.max_sweeps) total)")
+    println(io, " - time step reduction: $(solver.do_time_step)")
+    print(io,   " - halo exchange: ")
+    if solver.do_halo_xchg && !solver.real_block_xchg
+        print(io, "approximative")
+    else
+        print(io, solver.real_block_xchg)
+    end
+    println(io)
+end
+
+
 if !isinteractive()
     options = parse_arguments()
     proc_grid = build_process_grid_topo(options)
-    write_proc_grid("grid_definition", proc_grid)
+    solver_options = get_solver_options(options)
+    write_proc_grid("grid_definition", proc_grid, solver_options)
+    print_solver_stats(proc_grid, solver_options)
 end

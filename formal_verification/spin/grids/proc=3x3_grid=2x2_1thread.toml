@@ -1,0 +1,4 @@
+processes = [3, 3]
+grid = [2, 2]
+num_threads = 1
+use_mpi = true

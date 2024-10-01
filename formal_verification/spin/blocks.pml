@@ -1,17 +1,4 @@
 
-#ifndef MAX_SWEEPS
-#define MAX_SWEEPS        2
-#endif
-
-#ifndef DO_TIME_STEP
-#define DO_TIME_STEP      1
-#endif
-
-#ifndef DO_HALO_EXCHANGE
-#define DO_HALO_EXCHANGE  1
-#endif
-
-
 inline init_grid()
 {
     d_step {
@@ -32,8 +19,14 @@ inline init_grid()
         for (idx : 0 .. (TOTAL_INTERFACES-1)) {
             block_interfaces[idx].state = XCHG_NotReady;
             block_interfaces[idx].flags = 0;
+#if REAL_BLOCK_XCHG
             block_interfaces[idx].is_done[0] = false;
             block_interfaces[idx].is_done[1] = false;
+#endif
+        }
+
+        for (idx : 0 .. TOTAL_REMOTE_BLOCKS-1) {
+            remote_blocks[idx].state = XCHG_NotReady;
         }
     }
 }
@@ -250,16 +243,47 @@ inline remote_block_exchange(xchg_done, block, remote_blk)
     if
     :: (remote_blk.state == XCHG_NotReady) -> {
         // start_exchange
-        MPI_Start(remote_blk.req);
+        MPI_Start(remote_blk.req, remote_blk.send_tag, block.cycle);
         xchg_done = false;
         remote_blk.state = XCHG_InProgress;
     }
     :: (remote_blk.state == XCHG_InProgress) -> {
         // finish_exchange
-        MPI_Test_Request(xchg_done, remote_blk.req);
+        MPI_Test_Request(xchg_done, remote_blk.req, remote_blk.recv_tag);
+#if MPI_SPIN_STORE_MESSAGE
+        assert(remote_blk.req.val == block.cycle);
+#endif
         remote_blk.state = (xchg_done -> XCHG_Done : XCHG_InProgress);
     }
     :: (remote_blk.state == XCHG_Done) -> skip;
+    :: else -> assert(false);
+    fi
+}
+
+
+inline simple_block_ghost_exchange(interface, side, xchg_done)
+{
+    // Replaces mark_ready_for_exchange and the whole block exchange algorithm, by a much simpler
+    // algorithm which ignores interactions between threads.
+    if
+    :: (interface.state == XCHG_NotReady) -> {
+        // Mark this side as ready. Note that we don't care if it was already done before.
+        interface.flags = interface.flags | (side == 0 -> 2 : 1);
+
+        // If the other side is also ready, then mark the exchange as done
+        if
+        :: (interface.flags == 3) -> {
+            interface.flags = 0;
+            interface.state = XCHG_Done;
+            xchg_done = true;
+        }
+        :: else -> {
+            xchg_done = false;
+        }
+        fi
+    }
+    :: (interface.state == XCHG_InProgress) -> assert(false);
+    :: (interface.state == XCHG_Done) -> skip;  // exchange already completed for this cycle
     :: else -> assert(false);
     fi
 }
@@ -269,7 +293,10 @@ inline block_ghost_exchange(block, block_idx)
 {
 #if DO_HALO_EXCHANGE
     byte side;
-    bool can_do_xchg, xchg_done;
+#if REAL_BLOCK_XCHG
+    bool can_do_xchg;
+#endif
+    bool xchg_done;
     bool all_xchg_done = true;
     byte neighbour_idx[2];  // either a valid index into `block_grid` or `NULL_BLOCK`, or an index in 'remote_blocks'
     byte interface_idx[2];  // either a valid index into `block_interfaces`, `NULL_INTERFACE` or 'REMOTE_BLOCK'
@@ -288,6 +315,7 @@ inline block_ghost_exchange(block, block_idx)
 #endif
         }
         :: (neighbour_idx[side] != NULL_BLOCK && interface_idx[side] != NULL_INTERFACE) -> {
+#if REAL_BLOCK_XCHG
             if
             :: (block_interfaces[interface_idx[side]].is_done[side]) -> skip;  // side is already done
             :: else -> {
@@ -311,26 +339,45 @@ inline block_ghost_exchange(block, block_idx)
                 fi
             }
             fi
+#else
+            skip
+            // Since it is an approximation, there is no point in allowing thread execution to overlap:
+            // do the whole algorithm in a single atomic step.
+            d_step {
+                simple_block_ghost_exchange(block_interfaces[interface_idx[side]], side, xchg_done);
+                all_xchg_done = (xchg_done -> all_xchg_done : false);
+            }
+#endif
         }
         :: else -> skip;
         fi
     }
 
-    if
-    :: (all_xchg_done) -> {
-        // Reset the interfaces
-        for (side : 0 .. 1) {
-            if
-            :: (interface_idx[side] == NULL_INTERFACE) -> skip;
-            :: (interface_idx[side] == REMOTE_BLOCK) -> { remote_blocks[neighbour_idx[side]].state = XCHG_NotReady; };
-            :: else -> { block_interfaces[interface_idx[side]].is_done[side] = false; }
-            fi
-        }
-    }
-    :: else -> skip;
-    fi
+    skip;  // placing a d_step immediately after a for loop is an error in Spin 6.5.2
 
-    block.must_wait = !all_xchg_done;
+    d_step {
+        if
+        :: (all_xchg_done) -> {
+            // Reset the interfaces
+            for (side : 0 .. 1) {
+                if
+                :: (interface_idx[side] == NULL_INTERFACE) -> skip;
+                :: (interface_idx[side] == REMOTE_BLOCK) -> { remote_blocks[neighbour_idx[side]].state = XCHG_NotReady; };
+                :: else -> {
+#if REAL_BLOCK_XCHG
+                    block_interfaces[interface_idx[side]].is_done[side] = false;
+#else
+                    skip
+#endif
+                }
+                fi
+            }
+        }
+        :: else -> skip;
+        fi
+
+        block.must_wait = !all_xchg_done;
+    }
 #else
     block.must_wait = false;
 #endif

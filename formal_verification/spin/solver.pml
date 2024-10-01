@@ -1,9 +1,4 @@
 
-#ifndef NUM_CYCLES
-#define NUM_CYCLES 3
-#endif
-
-
 bool has_progress_been_made[NUM_PROC];
 byte waiting_threads[NUM_PROC];
 byte active_threads[NUM_PROC];
@@ -26,7 +21,7 @@ inline stop_busy_waiting()
     // infinite wait to happen there.
     skip;
     // TODO: wait on active MPI requests?
-progress_thread_wait:
+progress_thread_wait:  // TODO: this cannot be right...
     (has_progress_been_made[RANK] || (active_threads[RANK] == waiting_threads[RANK])) -> {
         atomic {
             waiting_threads[RANK] = waiting_threads[RANK] - 1;

@@ -1,0 +1,8 @@
+# Parameters for verification of MPI usage
+use_mpi = true
+num_threads = 1          # Ignore the interaction between MPI and threads
+processes = [2, 2]       # 2x2 grid to catch any possible MPI deadlocks
+grid = [1, 1]            # 2D grid of 2x2 blocks to catch any possible deadlock due to blocks+MPI
+real_block_xchg = false  # Suppose that the exchange algorithm is correct for faster verification
+num_cycles = 1           # Lowest value for faster verification
+max_sweeps = 2           # Lowest value for faster verification

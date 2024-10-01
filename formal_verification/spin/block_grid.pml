@@ -158,6 +158,8 @@ typedef Block {
 
 typedef RemoteBlock {
     mtype:BlockXChg state;
+    byte send_tag;
+    byte recv_tag;
     MPI_Request req;
 };
 
@@ -166,7 +168,9 @@ typedef BlockInterface {
     // therefore atomic operations on both values at the same time is possible.
     mtype:BlockXChg state;
     byte flags;
+#if REAL_BLOCK_XCHG
     bool is_done[2];
+#endif
 };
 
 typedef SolverState {
