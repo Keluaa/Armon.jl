@@ -314,10 +314,8 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     total_mass   = sum(threads_mass)
     total_energy = sum(threads_energy)
 
-    if params.use_MPI
-        total_mass   = MPI.Allreduce(total_mass,   MPI.SUM, params.cart_comm)
-        total_energy = MPI.Allreduce(total_energy, MPI.SUM, params.cart_comm)
-    end
+    total_mass   = reduce_broadcast(params.reduc_model, +, total_mass)
+    total_energy = reduce_broadcast(params.reduc_model, +, total_energy)
 
     return total_mass, total_energy
 end

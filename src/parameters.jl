@@ -34,6 +34,21 @@ MPI config. The MPI domain will be a process grid of size `P`.
 `reorder_grid` is passed to `MPI.Cart_create`.
 
 
+    comm_model = :async_safe, comm_model_kwargs = (;)
+
+Controls which communication model is used for remote exchanges.
+[`Communications.communication_model`](@ref) is used when `comm_model` is a `Symbol`, and `comm_model_kwargs`
+are the options for the model.
+Otherwise if `comm_model` is an instance of a [`AbstractCommunicationModel`](@ref), then it is used
+as-is.
+
+
+    reduc_model = nothing, reduc_model_kwargs = (;)
+
+Same as for `comm_model` and `comm_model_kwargs`, but for global reduction operations.
+When `reduc_model` is `nothing`, `comm_model` is used instead.
+
+
     gpu_aware = true
 
 Store MPI buffers on the device. This requires to use a GPU-aware MPI implementation. Does nothing
@@ -337,6 +352,8 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     global_grid::NTuple{2, Int}  # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
+    comm_model::AbstractCommunicationModel
+    reduc_model::AbstractCommunicationModel
 
     # Tests & Comparison
     compare::Bool
@@ -407,6 +424,8 @@ end
 
 function init_MPI(params::ArmonParameters;
     use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing, gpu_aware = true,
+    comm_model = :async_safe, comm_model_kwargs = (;),
+    reduc_model = nothing, reduc_model_kwargs = (;),
     options...
 )
     global_comm = something(global_comm, MPI.COMM_WORLD)
@@ -460,6 +479,30 @@ function init_MPI(params::ArmonParameters;
         )
     end
 
+    if comm_model isa Symbol
+        comm_model = Communications.communication_model(comm_model, params.cart_comm; comm_model_kwargs...)
+    elseif !(comm_model isa AbstractCommunicationModel)
+        solver_error(:config, "'comm_model' must be either a `Symbol` or an instance of a `AbstractCommunicationModel`")
+    end
+    params.comm_model = comm_model
+
+    if !Communications.supports_point_to_point(comm_model)
+        solver_error(:config, "`comm_model` of type $(typeof(comm_model)) does not support point-to-point operations")
+    end
+
+    if isnothing(reduc_model)
+        reduc_model = comm_model  # Same model for exchanges and reductions
+    elseif reduc_model isa Symbol
+        reduc_model = Communications.communication_model(reduc_model, params.cart_comm; reduc_model_kwargs...)
+    elseif !(reduc_model isa AbstractCommunicationModel)
+        solver_error(:config, "'reduc_model' must be either `nothing`, a `Symbol` or an instance of a `AbstractCommunicationModel`")
+    end
+    params.reduc_model = reduc_model
+
+    if !Communications.supports_collectives(reduc_model)
+        solver_error(:config, "`reduc_model` of type $(typeof(reduc_model)) does not support collective operations")
+    end
+
     params.root_rank = 0
     params.is_root = params.rank == params.root_rank
 
@@ -485,12 +528,16 @@ function init_device(params::ArmonParameters;
     params.async_cycle = async_cycle
     params.busy_wait_limit = max(busy_wait_limit, 1)
 
-    if use_cache_blocking && use_threading && params.use_MPI
+    if use_cache_blocking && use_threading && params.use_MPI && Threads.nthreads() > 1
         thread_level = MPI.Query_thread()
         if thread_level < MPI.THREAD_MULTIPLE
             solver_error(:config, "Using multithreading with cache blocking requires MPI to be \
                                    initialized with `threadlevel ≥ MPI.THREAD_MULTIPLE`, \
                                    got: $thread_level")
+        end
+
+        if !Communications.is_thread_safe(params.comm_model)
+            solver_error(:config, "`comm_model` of type $(typeof(params.comm_model)) isn't thread-safe")
         end
     end
 
@@ -817,7 +864,14 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
         print(io, ", relying on first touch policy")
     end
     println(io)
-    print_parameter(io, pad, "MPI", p.use_MPI)
+    print_parameter(io, pad, "MPI", p.use_MPI, nl=false)
+    if p.use_MPI
+        println(io, ", MPI ", MPI.Get_version(), ", library:")
+        println(io, pad, pad, MPI.Get_library_version())
+    end
+    print_parameter(io, pad, "exchange model", p.comm_model)
+    reduc_model = p.reduc_model == p.comm_model ? "same as the exchange model" : p.reduc_model
+    print_parameter(io, pad, "reduction model", reduc_model)
 
     println(io, " ", "─" ^ (pad*2+2))
 

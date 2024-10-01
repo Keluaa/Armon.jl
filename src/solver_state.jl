@@ -32,16 +32,18 @@ mutable struct GlobalTimeStep{T}
     next_dt        :: Atomic{T}  # Time step accumulator
     contributions  :: Atomic{Int}
     expected_count :: Int
-    MPI_reduction  :: MPI.AbstractRequest
-    MPI_buffer     :: MPI.RBuffer
+    reduction_data :: AbstractCommunication{Vector{T}}
 
-    function GlobalTimeStep{T}() where {T}
+    function GlobalTimeStep{T}(params::ArmonParameters) where {T}
+        # TODO: wrap the model with a Communications.ThreadCollective, then remove most atomic/thread related logic
+        model = params.use_MPI ? params.reduc_model : Communications.NoCommunicationModel()
+        reduc_data = Communications.init_reduce_broadcast(model, MPI.MIN, Vector{T}, 1)
         return new{T}(
             Atomic(TimeStepState.Ready),
             0, zero(T),
             zero(T), typemax(T), Atomic(typemax(T)),
             Atomic(0), 0,
-            MPI.Request(), MPI.RBuffer(Ref{T}(), Ref{T}())
+            reduc_data
         )
     end
 end
@@ -94,7 +96,7 @@ function wait_for_dt!(params::ArmonParameters, global_dt::GlobalTimeStep)
     # Since this thread started working on a block without the time step for the new cycle, we
     # consider that all blocks of that thread are in the same state, therefore loosing no time by
     # using a blocking wait here. Only a single thread will wait.
-    params.use_MPI && wait(global_dt.MPI_reduction)
+    params.use_MPI && Communications.wait_recv_completed(global_dt.reduction_data)
     return update_dt!(params, global_dt)
 end
 
@@ -102,18 +104,22 @@ end
 function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where {T}
     state = time_step_state(global_dt)
     if state == TimeStepState.AllContributed
+        # All threads have contributed to the local time step, we can now start the global reduction
         local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
         if params.use_MPI
-            global_dt.MPI_buffer.senddata[] = local_dt
-            global_dt.MPI_buffer.recvdata[] = typemax(T)
-            IAllreduce!(global_dt.MPI_buffer, MPI.MIN, params.cart_comm, global_dt.MPI_reduction)
+            send_buf = Communications.acquire_send_buffer!(global_dt.reduction_data)
+            send_buf[1] = local_dt
+            Communications.release_send_buffer!(global_dt.reduction_data)
             time_step_state!(global_dt, TimeStepState.DoingMPI)
             return TimeStepState.DoingMPI
         else
             new_dt = local_dt
         end
     elseif state == TimeStepState.WaitingForMPI
-        new_dt = global_dt.MPI_buffer.recvdata[]
+        # `wait_for_dt!` already waited, now the communication is complete
+        recv_buf = Communications.acquire_recv_buffer!(global_dt.reduction_data)
+        new_dt = recv_buf[1]
+        Communications.release_recv_buffer!(global_dt.reduction_data)
     else
         error("unexpected time step state: $state")
     end

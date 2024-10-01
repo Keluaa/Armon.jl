@@ -121,23 +121,3 @@ disp_blk(blk, var; on_device=true) = reshape(getfield(block_data(blk; on_device)
 disp_real_blk(blk, var; on_device=true) = view(disp_blk(blk, var; on_device)', (.+).(Base.oneto.(real_block_size(blk.size)), ghosts(blk.size))...)'
 disp_grid_state(grid) = permutedims(reshape(solver_step.(solver_state.(all_blocks(grid))), grid.grid_size))
 disp_mirror_y(A) = view(A, size(A, 1):-1:1, :)  # places the bottom-left cell at the bottom-left of the display
-
-
-function IAllreduce!(rbuf::MPI.RBuffer, op::Union{MPI.Op, MPI.MPI_Op}, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request())
-    @assert MPI.isnull(req)
-    # int MPI_Allreduce(const void* sendbuf, void* recvbuf, int count,
-    #                   MPI_Datatype datatype, MPI_Op op, MPI_Comm comm,
-    #                   MPI_Request* req)
-    MPI.API.MPI_Iallreduce(rbuf.senddata, rbuf.recvdata, rbuf.count, rbuf.datatype, op, comm, req)
-    MPI.setbuffer!(req, rbuf)
-    return req
-end
-
-IAllreduce!(rbuf::MPI.RBuffer, op, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request()) =
-    IAllreduce!(rbuf, MPI.Op(op, eltype(rbuf)), comm, req)
-IAllreduce!(sendbuf, recvbuf, op, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request()) =
-    IAllreduce!(MPI.RBuffer(sendbuf, recvbuf), op, comm, req)
-
-# inplace
-IAllreduce!(rbuf, op, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request()) =
-    IAllreduce!(MPI.IN_PLACE, rbuf, op, comm, req)

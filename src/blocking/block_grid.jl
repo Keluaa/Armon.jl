@@ -69,9 +69,17 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     edge_blocks = Vector{LocalTaskBlock{device_array, host_array, DynamicBSize{ghost}, state_type}}(undef, dyn_sized_block_count)
 
     # Container for remote blocks, neighbours of blocks on the edges. Corners are excluded.
-    buffer_array = params.gpu_aware ? device_array : host_array
+    base_buffer_array = params.gpu_aware ? device_array : host_array
+    buffer_array = Communications.buffer_type(params.comm_model, base_buffer_array)
     grid_perimeter = sum(grid_size) * length(grid_size)  # (nx+ny) * 2
     remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
+
+    if !Communications.is_async(params.comm_model)
+        # TODO: enable support for sync comms when there is only a single block per grid
+        #   then the "only" thing to do is impose an order for left/right exchanges (e.g. even ranks
+        #   do the left xchg first, odd ranks do the right one first)
+        solver_error(:config, "synchronous communications are not supported")
+    end
 
     threads_workload = thread_workload_distribution(params)
 
@@ -92,6 +100,15 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
         blocks, edge_blocks, remote_blocks, threads_workload, threads_logs
     )
+
+    # Compute the total amount of cells in remote buffers for each axis. Since both sides of an axis
+    # share the same dimensions, they will have the same size.
+    total_side_buffer_sizes = map(instances(Axis.T)) do axis
+        # Total buffer size is the amount of real cells along other axes, times the number of ghost
+        # cells (for the current axis/side, which is always `nghost`).
+        side_size = ifelse.(instances(Axis.T) .== axis, params.nghost, cell_size)
+        return prod(side_size)
+    end
 
     # Allocate all local and remote blocks
     # Non-static (edge) blocks are placed on the right and top sides.
@@ -140,7 +157,12 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                     neighbour = neighbour_at(params, side)  # MPI rank
                     global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
 
-                    RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm, side)
+                    total_side_buffer_size = total_side_buffer_sizes[Integer(axis_of(side))]
+
+                    RemoteTaskBlock{buffer_array}(
+                        params.comm_model, neighbour, global_pos, remote_blk_pos,
+                        base_buffer_array, buffer_size, side, total_side_buffer_size
+                    )
                 else
                     # "Fake" remote block for non-existant neighbour at the edge of the global domain
                     RemoteTaskBlock{buffer_array}(remote_blk_pos)

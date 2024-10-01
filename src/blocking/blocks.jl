@@ -176,18 +176,13 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
     neighbour  :: LocalTaskBlock     # Remote blocks are on the edges of the sub-domain: there can only be one real neighbour
     rank       :: Int                # `-1` if the remote block has no MPI rank to communicate with
     global_pos :: CartesianIndex{2}  # Rank position in the Cartesian process grid
-    send_buf   :: MPI.Buffer{B}
-    recv_buf   :: MPI.Buffer{B}
-    requests   :: MPI.UnsafeMultiRequest
+    comm_data  :: AbstractCommunication{B}
 
-    function RemoteTaskBlock{B}(size, pos, rank, global_pos, comm, side) where {B}
+    function RemoteTaskBlock{B}(model, rank, global_pos, pos, base_array_type, size, side, total_side_buffer_size) where {B}
         # `neighbour` is set afterwards, when all blocks are created.
         block = new{B}(pos)
         block.rank = rank
         block.global_pos = global_pos
-        block.send_buf = MPI.Buffer(B(undef, size))
-        block.recv_buf = MPI.Buffer(B(undef, size))
-        block.requests = MPI.UnsafeMultiRequest(2)  # We always keep a reference to the buffers, therefore it is safe
 
         # Because two ranks may have several comms at once, we must use tags. They must match at both sides.
         # Since both ranks share the same (flat) side and block size, a unique index could be the block
@@ -196,9 +191,11 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         # TODO: this is not enough to support arbitrary block distributions (non-flat sides), there
         #   could be tag collisions in this case
         #   hashes are not a viable alternative, as `MPI.tab_ub()` is only 2^15 at min (2^23 for OpenMPI)
-        tag = pos[Integer(next_axis(axis_of(side)))]
-        MPI.Send_init(block.send_buf, comm, block.requests[1]; dest=rank, tag)
-        MPI.Recv_init(block.recv_buf, comm, block.requests[2]; source=rank, tag)
+        side_pos = pos[Integer(next_axis(axis_of(side)))]
+        block.comm_data = Communications.init_exchange(
+            model, rank, Integer(side), side_pos,
+            base_array_type, size, total_side_buffer_size
+        )
 
         return block
     end
@@ -209,9 +206,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block = new{B}(pos)
         block.rank = -1
         block.global_pos = CartesianIndex(0, 0)
-        block.send_buf = MPI.Buffer(B(undef, 0))
-        block.recv_buf = MPI.Buffer(B(undef, 0))
-        block.requests = MPI.UnsafeMultiRequest(0)
+        block.comm_data = Communications.init_exchange(Communications.NoCommunicationModel(), 0, 0, 0, Vector{Nothing}, 0, 0)
         return block
     end
 end
@@ -219,19 +214,35 @@ end
 
 function move_pages(blk::RemoteTaskBlock, target_node)
     blk.rank == -1 && return
-    # MPI communications might not have happened, therefore pages might not be placed on a NUMA node
-    # yet, so it is safer to touch them first.
-    touch_pages(array_pages(blk.send_buf.data))
-    touch_pages(array_pages(blk.recv_buf.data))
-    move_pages(blk.send_buf.data, target_node)
-    move_pages(blk.recv_buf.data, target_node)
+
+    if Communications.uses_global_buffers(blk.comm_data)
+        # Since the blocks of the same side share the same communication array, we impose that only
+        # the first block moves all pages once.
+        (; side_pos) = Communications.exchange_position(blk.comm_data)
+        side_pos != 1 && return
+    end
+
+    for buffer in Communications.unsafe_buffers(blk.comm_data)
+        # MPI communications might not have happened, therefore pages might not be placed on a NUMA node
+        # yet, so it is safer to touch them first.
+        touch_pages(array_pages(buffer))
+        move_pages(buffer, target_node)
+    end
 end
 
 
 function lock_pages(blk::RemoteTaskBlock)
     blk.rank == -1 && return
-    lock_pages(blk.send_buf.data)
-    lock_pages(blk.recv_buf.data)
+
+    if Communications.uses_global_buffers(blk.comm_data)
+        # Same logic as for `move_pages`
+        (; side_pos) = Communications.exchange_position(blk.comm_data)
+        side_pos != 1 && return
+    end
+
+    for buffer in Communications.unsafe_buffers(blk.comm_data)
+        lock_pages(buffer)
+    end
 end
 
 

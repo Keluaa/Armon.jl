@@ -22,6 +22,10 @@ abstract type ProjectionScheme end
 abstract type SplittingMethod end
 
 include("utils.jl")
+
+include("communications/communications.jl")
+using .Communications
+
 include("numa_utils.jl")
 include("domain_ranges.jl")
 include("tests.jl")

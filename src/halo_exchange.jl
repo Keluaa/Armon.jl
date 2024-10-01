@@ -185,7 +185,7 @@ end
 
 
 @generic_kernel function pack_to_array!(
-    bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
+    bsize::BlockSize, side::Side.T, array, vars::NTuple{N, V}
 ) where {N, V}
     idx = @index_2D_lin()
     itr = @iter_idx()
@@ -201,7 +201,7 @@ end
 
 
 @generic_kernel function unpack_from_array!(
-    bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
+    bsize::BlockSize, side::Side.T, array, vars::NTuple{N, V}
 ) where {N, V}
     idx = @index_2D_lin()
     itr = @iter_idx()
@@ -223,13 +223,16 @@ end
     ) where {D, H, B}
 
 Start the exchange between one local block and a remote block from another sub-domain.
-Returns `true` if the exchange is [`BlockExchangeState.Done`](@ref), `false` if
-[`BlockExchangeState.InProgress`](@ref).
+Returns `true` if the exchange is [`BlockExchangeState.InProgress`](@ref), `false` if
+[`BlockExchangeState.NotReady`](@ref).
 """
 function start_exchange(
     params::ArmonParameters,
     blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
+    send_buffer = Communications.try_acquire_send_buffer!(other_blk.comm_data)
+    isnothing(send_buffer) && return false
+
     buffer_are_on_device = D == B
     if !buffer_are_on_device
         # MPI buffers are not located where the up-to-date data is: we must to a copy first.
@@ -239,14 +242,11 @@ function start_exchange(
     send_domain = border_domain(blk.size, side; single_strip=false)
     vars = comm_vars(blk; on_device=buffer_are_on_device)
     # TODO: run on host if `D != B`, or perform it on the device on a tmp array
-    pack_to_array!(params, send_domain, blk.size, side, other_blk.send_buf.data, vars)
-
+    pack_to_array!(params, send_domain, blk.size, side, send_buffer, vars)
     wait(params)  # Wait for the copy to complete
 
-    # TODO: use RMA with processes local to the node.
-    MPI.Startall(other_blk.requests)
-
-    return false
+    Communications.release_send_buffer!(other_blk.comm_data)
+    return true
 end
 
 
@@ -266,13 +266,17 @@ function finish_exchange(
     blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
     # Finish the exchange between one local block and a remote block from another sub-domain
-    !MPI.Testall(other_blk.requests) && return false  # Still waiting
+    recv_buffer = Communications.try_acquire_recv_buffer!(other_blk.comm_data)
+    isnothing(recv_buffer) && return false
 
     recv_domain = ghost_domain(blk.size, side; single_strip=false)
     buffer_are_on_device = D == B
     vars = comm_vars(blk; on_device=buffer_are_on_device)
     # TODO: run on host if `D != B`
-    unpack_from_array!(params, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+    unpack_from_array!(params, recv_domain, blk.size, side, recv_buffer, vars)
+    wait(params)  # Wait for the copy to complete
+
+    Communications.release_recv_buffer!(other_blk.comm_data)
 
     if !buffer_are_on_device
         # MPI buffers are not where we want the data to be. Retreive the result of the exchange.
@@ -298,9 +302,16 @@ function block_ghost_exchange(
 
     # Exchange between one local block and a remote block from another sub-domain
     if bint_state == BlockExchangeState.NotReady
-        exchange_ended = start_exchange(params, blk, other_blk, side)
-        side_flag = side in first_sides() ? 0b10 : 0b01
-        !exchange_ended && interface_start_exchange!(bint, side_flag; for_MPI=true)
+        exchange_in_progress = start_exchange(params, blk, other_blk, side)
+        !exchange_in_progress && return BlockExchangeState.NotReady
+
+        exchange_ended = finish_exchange(params, blk, other_blk, side)
+        if exchange_ended
+            # skip the whole interface start/stop, as the exchange is already completed
+        else
+            side_flag = side in first_sides() ? 0b10 : 0b01
+            interface_start_exchange!(bint, side_flag; for_MPI=true)
+        end
     else
         exchange_ended = finish_exchange(params, blk, other_blk, side)
         exchange_ended && interface_end_exchange!(bint; for_MPI=true)

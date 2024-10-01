@@ -7,6 +7,7 @@ Iterator over the memory pages (aligned to `PAGE_SIZE`) used by the array `A`.
 """
 function array_pages(A::Ptr{T}, A_length) where {T}
     page_size = NUMA.numa_pagesize()
+    A_length == 0 && return Ptr{T}(1):page_size:Ptr{T}(0)
     A_end = A + (A_length - 1) * sizeof(T)
     A -= UInt(A) % page_size  # Align to the first page
     return A:page_size:A_end
