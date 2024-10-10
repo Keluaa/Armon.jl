@@ -7,6 +7,8 @@ mechanisms.
 
 Options:
  - `persistant_reduction::Bool = true`: use persistant requests for reduction operations (`MPI_Allreduce_init`)
+   It defaults to `false` as persistant collective operations are not correctly supported by most
+   MPI implementations.
 
 !!! warn
 
@@ -20,17 +22,17 @@ mutable struct MPIAsyncCommunicationModel <: AbstractCommunicationModel
     persistant_reduction::Bool
 end
 
-MPIAsyncCommunicationModel(comm::MPI.Comm; persistant_reduction::Bool=true) =
+MPIAsyncCommunicationModel(comm::MPI.Comm; persistant_reduction::Bool=false) =
     MPIAsyncCommunicationModel(comm, persistant_reduction)
 
-buffer_type(::Type{MPIAsyncCommunicationModel}, ::Type{A}) where {A} = A
+buffer_type(::ObjOrType{MPIAsyncCommunicationModel}, ::Type{A}) where {A} = A
 
 function Base.show(io::IO, model::MPIAsyncCommunicationModel)
     print(io, "MPIAsyncCommunicationModel(; persistant_reduction=", model.persistant_reduction, ")")
 end
 
 
-struct MPIAsyncP2P{A} <: AbstractCommunication{A}
+mutable struct MPIAsyncP2P{A} <: AbstractCommunication{A}
     model        :: MPIAsyncCommunicationModel
     send_buffer  :: MPI.Buffer{A}
     recv_buffer  :: MPI.Buffer{A}
@@ -42,12 +44,21 @@ struct MPIAsyncP2P{A} <: AbstractCommunication{A}
 end
 
 function MPIAsyncP2P(model, send::A, recv::A, rank, side, side_pos) where {A}
-    return new{A}(
+    c = MPIAsyncP2P{A}(
         model,
         MPI.Buffer(send), MPI.Buffer(recv),
         MPI.Request(), MPI.Request(),
         rank, side, side_pos
     )
+
+    finalizer(c) do c_obj
+        # Cancel the active receive request, as it is always active otherwise
+        if !MPI.Finalized() && !MPI.Test(c_obj.recv_request)
+            MPI.Cancel!(c_obj.recv_request)
+        end
+    end
+
+    return c
 end
 
 unsafe_send_buffer(c::MPIAsyncP2P) = (c.send_buffer.data,)
@@ -65,6 +76,8 @@ function init_exchange(
 
     MPI.Send_init(p2p_data.send_buffer, model.comm, p2p_data.send_request; dest=rank, tag=side_pos)
     MPI.Recv_init(p2p_data.recv_buffer, model.comm, p2p_data.recv_request; source=rank, tag=side_pos)
+
+    MPI.Start(p2p_data.recv_request)
 
     return p2p_data
 end
@@ -106,11 +119,15 @@ struct MPIAsyncCollective{A} <: AbstractCommunication{A}
     recv_buffer   :: MPI.Buffer{A}
     request       :: MPI.Request
     op            :: MPI.Op
-    is_persistant :: Bool
 end
 
-function MPIAsyncCollective(model, send::A, recv::A, op, is_persistant) where {A}
-    return new{A}(model, MPI.Buffer(send), MPI.Buffer(recv), MPI.Request(), MPI.Op(op), is_persistant)
+function MPIAsyncCollective(model, send::A, recv::A, op) where {A}
+    mpi_op = op isa MPI.Op ? op : MPI.Op(op, eltype(send))
+    return MPIAsyncCollective{A}(
+        model,
+        MPI.Buffer(send), MPI.Buffer(recv),
+        MPI.Request(), mpi_op
+    )
 end
 
 unsafe_send_buffer(c::MPIAsyncCollective) = (c.send_buffer.data,)
@@ -122,7 +139,11 @@ function init_reduce_broadcast(model::MPIAsyncCommunicationModel, reduction_op, 
     recv_buf = array_type(undef, count)
     comm = MPIAsyncCollective(model, send_buf, recv_buf, reduction_op, model.persistant_reduction)
     if model.persistant_reduction
-        MPI_Allreduce_init(comm.send_buf, comm.recv_buf, count, MPI.Datatype(type), comm.op, model.comm, MPI.NULL, comm.req)
+        MPI_Allreduce_init(
+            comm.send_buf, comm.recv_buf,
+            count, MPI.Datatype(eltype(array_type)), comm.op,
+            model.comm, MPI.Info(), comm.req
+        )
     end
     return comm
 end
@@ -138,10 +159,10 @@ function acquire_send_buffer!(c::MPIAsyncCollective)
 end
 
 function release_send_buffer!(c::MPIAsyncCollective)
-    if c.is_persistant
+    if c.model.persistant_reduction
         MPI.Start(c.request)
     else
-        MPI_IAllreduce!(c.send_buffer, c.recv_buffer, c.op, c.model.comm, c.request)
+        MPI_IAllreduce!(c.send_buffer.data, c.recv_buffer.data, c.op, c.model.comm, c.request)
     end
 end
 

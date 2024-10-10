@@ -276,6 +276,10 @@ function wait_send_completed end
 For thread-safe [`AbstractCommunicationModel`](@ref)s, if another thread acquired a global lock
 needed to check if `comm` is completed, `false` is returned, regardless of the actual underlying
 state of `comm`.
+
+Some models might use permanently active receive requests, which are started at initialization.
+In this case, even if no communication has been started, `false` will be returned, unlike with
+[`send_completed`](@ref).
 """
 function recv_completed end
 

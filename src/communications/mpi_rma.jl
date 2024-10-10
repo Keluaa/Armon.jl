@@ -44,7 +44,7 @@ end
 unsafe_send_buffer(owc::OneWayCommunication) = (owc.xchg_buffer.data,)
 unsafe_recv_buffer(owc::OneWayCommunication) = (owc.window_buffer.data,)
 
-exchange_position(c::MPIAsyncP2P) = (; rank=c.target_rank, side=c.side, side_pos=c.side_pos)
+exchange_position(c::OneWayCommunication) = (; rank=c.target_rank, side=c.side, side_pos=c.side_pos)
 
 
 function init_exchange(

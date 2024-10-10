@@ -305,17 +305,27 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     threads_mass   .= 0
     threads_energy .= 0
 
+    # Sum the energy and mass over all blocks of each thread
     @iter_blocks for blk in grid
         tid = mt_reduction ? Threads.threadid() : 1
         (threads_mass[tid], threads_energy[tid]) =
             (threads_mass[tid], threads_energy[tid]) .+ conservation_vars(params, blk)
     end
 
+    # Local reduction over all threads
     total_mass   = sum(threads_mass)
     total_energy = sum(threads_energy)
 
-    total_mass   = reduce_broadcast(params.reduc_model, +, total_mass)
-    total_energy = reduce_broadcast(params.reduc_model, +, total_energy)
+    # Global reduction over all MPI processes
+    global_reduction = Communications.init_reduce_broadcast(params.reduc_model, +, Vector{T}, 2)
+
+    send_buf = Communications.acquire_send_buffer!(global_reduction)
+    send_buf .= (total_mass, total_energy)
+    Communications.release_send_buffer!(global_reduction)
+
+    recv_buf = Communications.acquire_recv_buffer!(global_reduction)
+    (total_mass, total_energy) = recv_buf
+    Communications.release_recv_buffer!(global_reduction)
 
     return total_mass, total_energy
 end

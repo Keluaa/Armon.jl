@@ -206,7 +206,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block = new{B}(pos)
         block.rank = -1
         block.global_pos = CartesianIndex(0, 0)
-        block.comm_data = Communications.init_exchange(Communications.NoCommunicationModel(), 0, 0, 0, Vector{Nothing}, 0, 0)
+        block.comm_data = Communications.init_exchange(Communications.NoCommunicationModel(), 0, 0, 0, B, 0, 0)
         return block
     end
 end

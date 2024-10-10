@@ -28,7 +28,7 @@ function ThreadsCommunicationModel(ipm_model, threads)
 end
 
 
-buffer_type(::Type{ThreadsCommunicationModel{IPM}}, ::Type{A}) where {IPM, A} = buffer_type(IPM, A)
+buffer_type(::ObjOrType{ThreadsCommunicationModel{IPM}}, ::Type{A}) where {IPM, A} = buffer_type(IPM, A)
 is_thread_safe(::ObjOrType{ThreadsCommunicationModel}) = true
 supports_point_to_point(::ObjOrType{ThreadsCommunicationModel}) = false
 
@@ -54,7 +54,7 @@ end
 function ThreadCollective(model::ThreadsCommunicationModel{IPM}, IPM_collective, send::A, recv::A) where {IPM, A}
     send_contributions = copy(model.threads_mask)
     recv_contributions = copy(model.threads_mask)
-    return new{A, typeof(F), IPM, typeof(IPM_collective)}(
+    return ThreadCollective{A, typeof(F), IPM, typeof(IPM_collective)}(
         model, IPM_collective,
         send, recv,
         send_contributions, recv_contributions, Atomic{UInt8}(0b00),

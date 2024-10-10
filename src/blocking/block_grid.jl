@@ -56,7 +56,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     device_array = Core.Compiler.return_type(device_array, Tuple{UndefInitializer, Int})
     host_array = Core.Compiler.return_type(host_array, Tuple{UndefInitializer, Int})
 
-    global_dt = GlobalTimeStep{T}()
+    global_dt = GlobalTimeStep{T}(params)
     state_type = typeof(SolverState(params, global_dt))
 
     ghost = params.nghost

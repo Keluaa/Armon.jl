@@ -10,17 +10,19 @@ See [`MPIAsyncCommunicationModel`](@ref) for a thread-unsafe alternative, which 
 global locks.
 
 Options:
- - `persistant_reduction::Bool = true`: use persistant requests for reduction operations (`MPI_Allreduce_init`)
+ - `persistant_reduction::Bool = false`: use persistant requests for reduction operations (`MPI_Allreduce_init`)
+   It defaults to `false` as persistant collective operations are not correctly supported by most
+   MPI implementations.
 """
 mutable struct MPIAsyncSafeCommunicationModel <: AbstractCommunicationModel
     comm::MPI.Comm
     persistant_reduction::Bool
 end
 
-MPIAsyncSafeCommunicationModel(comm::MPI.Comm; persistant_reduction::Bool=true) =
+MPIAsyncSafeCommunicationModel(comm::MPI.Comm; persistant_reduction::Bool=false) =
     MPIAsyncSafeCommunicationModel(comm, persistant_reduction)
 
-buffer_type(::Type{MPIAsyncSafeCommunicationModel}, ::Type{A}) where {A} = A
+buffer_type(::ObjOrType{MPIAsyncSafeCommunicationModel}, ::Type{A}) where {A} = A
 is_thread_safe(::ObjOrType{MPIAsyncSafeCommunicationModel}) = true
 
 function Base.show(io::IO, model::MPIAsyncSafeCommunicationModel)
@@ -38,7 +40,7 @@ mutable struct MPIAsyncSafeP2P{A} <: AbstractCommunication{A}
     }}
     # The MPI communication ordering is guareenteed using those indexes to `requests`
     send_state   :: Int
-    recv_state   :: Int
+    recv_state   :: Int  # Note: to make sends match with recvs, `recv_state` starts as 2 and `send_state` starts at 1
     # The buffers and requests atomicity is guareenteed with those atomics, by storing the thread ID
     # using them. `0` means that they are currently not owned.
     send_lock    :: Atomic{Int}
@@ -49,16 +51,14 @@ mutable struct MPIAsyncSafeP2P{A} <: AbstractCommunication{A}
 end
 
 function MPIAsyncSafeP2P(model, send::A, recv::A, rank, side, side_pos) where {A}
-    c = new{A}(model, MPI.Buffer(send), MPI.Buffer(recv), (
+    c = MPIAsyncSafeP2P{A}(model, MPI.Buffer(send), MPI.Buffer(recv), (
         (; send=MPI.Request(), recv=MPI.Request()),
         (; send=MPI.Request(), recv=MPI.Request()),
-    ), 1, 1, Atomic{Int}(0), Atomic{Int}(0), rank, side, side_pos)
+    ), 1, 2, Atomic{Int}(0), Atomic{Int}(0), rank, side, side_pos)
 
     finalizer(c) do c_obj
         # Cancel the active receive request, as they are always active otherwise
-        # TODO: it might be perferable to make the user call a `mark_as_finalized!(c)` instead,
-        #   as small objects might require a call to `GC.gc()` in order to force their finalization
-        if !MPI.Test(c_obj.requests[c_obj.recv_state].recv)
+        if !MPI.Finalized() && !MPI.Test(c_obj.requests[c_obj.recv_state].recv)
             MPI.Cancel!(c_obj.requests[c_obj.recv_state].recv)
         end
     end
@@ -171,12 +171,16 @@ struct MPIAsyncSafeCollective{A} <: AbstractCommunication{A}
     send_lock     :: Atomic{Int}
     recv_lock     :: Atomic{Int}
     op            :: MPI.Op
-    is_persistant :: Bool
 end
 
-function MPIAsyncSafeCollective(model, send::A, recv::A, op, is_persistant) where {A}
-    return new{A}(model, MPI.Buffer(send), MPI.Buffer(recv),
-        MPI.Request(), 1, Atomic{Int}(0), Atomic{Int}(0), Atomic{Int}(0), MPI.Op(op), is_persistant
+function MPIAsyncSafeCollective(model, send::A, recv::A, op) where {A}
+    mpi_op = op isa MPI.Op ? op : MPI.Op(op, eltype(send))
+    return MPIAsyncSafeCollective{A}(
+        model,
+        MPI.Buffer(send), MPI.Buffer(recv),
+        MPI.Request(), Atomic{Int}(0),
+        Atomic{Int}(0), Atomic{Int}(0),
+        mpi_op
     )
 end
 
@@ -187,9 +191,13 @@ unsafe_recv_buffer(c::MPIAsyncSafeCollective) = (c.recv_buffer.data,)
 function init_reduce_broadcast(model::MPIAsyncSafeCommunicationModel, reduction_op, array_type, count)
     send_buf = array_type(undef, count)
     recv_buf = array_type(undef, count)
-    comm = MPIAsyncSafeCollective(model, send_buf, recv_buf, reduction_op, model.persistant_reduction)
+    comm = MPIAsyncSafeCollective(model, send_buf, recv_buf, reduction_op)
     if model.persistant_reduction
-        MPI_Allreduce_init(comm.send_buf, comm.recv_buf, count, MPI.Datatype(type), comm.op, model.comm, MPI.NULL, comm.request)
+        MPI_Allreduce_init(
+            send_buf, recv_buf,
+            count, MPI.Datatype(eltype(array_type)), comm.op,
+            model.comm, MPI.Info(), comm.request
+        )
     end
     return comm
 end
@@ -210,17 +218,17 @@ end
 
 function acquire_send_buffer!(c::MPIAsyncSafeCollective)
     wait_acquire_atomic_lock!(c.send_lock)
-    wait_acquire_atomic_lock!(c.request_lock) do
+    wait_for_atomic_lock!(c.request_lock) do
         MPI.Wait(c.request)
     end
     return c.send_buffer.data
 end
 
 function release_send_buffer!(c::MPIAsyncSafeCollective)
-    if c.is_persistant
+    if c.model.persistant_reduction
         MPI.Start(c.request)
     else
-        MPI_IAllreduce!(c.send_buffer, c.recv_buffer, c.op, c.model.comm, c.request)
+        MPI_IAllreduce!(c.send_buffer.data, c.recv_buffer.data, c.op, c.model.comm, c.request)
     end
     release_atomic_lock!(c.send_lock)
 end
@@ -232,7 +240,7 @@ function send_completed(c::MPIAsyncSafeCollective)
 end
 
 function wait_send_completed(c::MPIAsyncSafeCollective)
-    return atomic_lock!(c.request) do
+    return atomic_lock!(c.request_lock) do
         MPI.Wait(c.request)
         return true
     end
@@ -254,7 +262,7 @@ end
 
 function acquire_recv_buffer!(c::MPIAsyncSafeCollective)
     wait_acquire_atomic_lock!(c.recv_lock)
-    wait_acquire_atomic_lock!(c.request_lock) do
+    wait_for_atomic_lock!(c.request_lock) do
         MPI.Wait(c.request)
     end
     return c.recv_buffer.data

@@ -9,7 +9,7 @@ struct MPISyncCommunicationModel <: AbstractCommunicationModel
     comm::MPI.Comm
 end
 
-buffer_type(::Type{MPISyncCommunicationModel}, ::Type{A}) where {A} = A
+buffer_type(::ObjOrType{MPISyncCommunicationModel}, ::Type{A}) where {A} = A
 is_async(::ObjOrType{MPISyncCommunicationModel}) = false
 
 function Base.show(io::IO, ::MPISyncCommunicationModel)
@@ -27,7 +27,7 @@ struct MPISyncP2P{A} <: AbstractCommunication{A}
 end
 
 MPISyncP2P(m, send::A, recv::A, rank, side, tag) where {A} =
-    new{A}(m, MPI.Buffer(send), MPI.Buffer(recv), rank, side, tag)
+    MPISyncP2P{A}(m, MPI.Buffer(send), MPI.Buffer(recv), rank, side, tag)
 
 unsafe_send_buffer(c::MPISyncP2P) = (c.send_buffer.data,)
 unsafe_recv_buffer(c::MPISyncP2P) = (c.recv_buffer.data,)
@@ -56,6 +56,7 @@ end
 send_completed(::MPISyncP2P) = true
 wait_send_completed(::MPISyncP2P) = true
 
+# TODO: this is wrong, we should forbid receiving before sending. Here the `recv_buffer` is wrong until the send was completed
 try_acquire_recv_buffer!(c::MPISyncP2P) = c.recv_buffer.data
 acquire_recv_buffer!(c::MPISyncP2P) = c.recv_buffer.data
 release_recv_buffer!(::MPISyncP2P) = nothing
@@ -71,7 +72,12 @@ struct MPISyncCollective{A} <: AbstractCommunication{A}
     op          :: MPI.Op
 end
 
-MPISyncCollective(model, send::A, recv::A, op) where {A} = new{A}(model, MPI.Buffer(send), MPI.Buffer(recv), MPI.Op(op))
+function MPISyncCollective(model, send::A, recv::A, op) where {A}
+    mpi_op = op isa MPI.Op ? op : MPI.Op(op, eltype(send))
+    return MPISyncCollective{A}(
+        model, MPI.Buffer(send), MPI.Buffer(recv), mpi_op
+    )
+end
 
 unsafe_send_buffer(c::MPISyncCollective) = (c.send_buffer.data,)
 unsafe_recv_buffer(c::MPISyncCollective) = (c.recv_buffer.data,)
@@ -85,7 +91,7 @@ end
 
 try_acquire_send_buffer!(c::MPISyncCollective) = c.send_buffer.data
 acquire_send_buffer!(c::MPISyncCollective) = c.send_buffer.data
-release_send_buffer!(c::MPISyncCollective) = MPI.Allreduce!(c.send_buf, c.recv_buf, c.op, c.model.comm)
+release_send_buffer!(c::MPISyncCollective) = MPI.Allreduce!(c.send_buf.data, c.recv_buf.data, c.op, c.model.comm)
 
 send_completed(::MPISyncCollective) = true
 wait_send_completed(::MPISyncCollective) = true

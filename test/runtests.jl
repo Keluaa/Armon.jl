@@ -43,6 +43,7 @@ if isinteractive()
      - MPI            Equivalence with the single domain case and asynchronous communications.
                       If 'TEST_KOKKOS_MPI=true' or 'kokkos' is in the test list, MPI tests with
                       Kokkos will also be performed. Same for GPU backends.
+     - comms          Common communication abstraction interface tests. Requires an MPI environment.
 
     Separate multiple test sets with a comma.
 
@@ -61,7 +62,7 @@ main_options = main_options .|> Symbol |> union
 
 if :all in main_options
     expanded_options = [:quality, :stability, :domains, :blocking, :convergence, :conservation,
-                        :logging, :kokkos, :gpu, :mpi]
+                        :logging, :kokkos, :gpu, :comms, :mpi]
 elseif :short in main_options
     expanded_options = [:quality, :stability, :convergence, :conservation]
 else
@@ -87,7 +88,8 @@ function do_tests(tests_to_do)
     ts = @testset "Armon.jl" begin
         for test in tests_to_do
             if !is_root
-                if test === :mpi            run_file("mpi.jl")
+                if     test === :mpi        run_file("mpi.jl")
+                elseif test === :comms      run_file("communications.jl")
                 else
                     # the test is for a single process only
                 end
@@ -101,17 +103,25 @@ function do_tests(tests_to_do)
             elseif test === :kokkos         run_file("kokkos.jl")
             elseif test === :logging        run_file("logging.jl")
             elseif test === :numa           run_file("numa.jl")
-            elseif test === :mpi
+            elseif test in (:mpi, :comms)
                 if MPI_PROCS > 0 && world_size < MPI_PROCS
                     @info "Launching $MPI_PROCS MPI sub-processes"
                     project_dir = abspath(@__DIR__, "..")
                     mpi_cmd = `$(mpiexec()) -n $MPI_PROCS $(Base.julia_cmd()) --project=$(project_dir) --color=yes $(@__FILE__) mpi`
                     mpi_cmd = pipeline(mpi_cmd; stdout=stdout, stderr=stderr)
-                    @testset "MPI" begin
-                        @test success(mpi_cmd)
+                    if test === :mpi
+                        @testset "MPI" begin
+                            @test success(mpi_cmd)
+                        end
+                    elseif test === :comms
+                        @testset "Comms" begin
+                            @test success(mpi_cmd)
+                        end
                     end
-                else
+                elseif test === :mpi
                     run_file("mpi.jl")
+                elseif test === :comms
+                    run_file("communications.jl")
                 end
             else
                 error("Unknown test set: $test")

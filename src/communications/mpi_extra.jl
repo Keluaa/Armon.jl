@@ -2,7 +2,7 @@
 function try_acquire_atomic_lock!(lock::Atomic{Int})
     tid = Threads.threadid()
     (@atomic :monotonic lock.x) == tid && return true  # already acquired
-    locked, _ = @atomicreplace lock.x 0 => tid
+    _, locked = @atomicreplace lock.x 0 => tid
     return locked
 end
 
@@ -29,13 +29,16 @@ function atomic_lock!(f, lock::Atomic{Int})
 end
 
 
-function wait_for_atomic_lock!(f, lock::Atomic{Bool}; kwargs...)
+function wait_for_atomic_lock!(f, lock::Atomic{Int}; kwargs...)
     wait_acquire_atomic_lock!(lock; kwargs..., timeout_error=true)
     ret = f()
     release_atomic_lock!(lock)
     return ret
 end
 
+#
+# API for MPI_Iallreduce
+#
 
 function MPI_IAllreduce!(rbuf::MPI.RBuffer, op::Union{MPI.Op, MPI.MPI_Op}, comm::MPI.Comm, req::MPI.AbstractRequest=MPI.Request())
     @assert MPI.isnull(req)
@@ -67,6 +70,9 @@ function MPI_Allreduce_init(send_buf, recv_buf, count, datatype, op, comm, info,
     return req
 end
 
+#
+# API for MPI 4 partitioned communications
+#
 
 function MPI_partitioned_p2p_supported()
     try
@@ -99,9 +105,20 @@ function MPI_Parrived(req::PartitionedRequest, partition::Integer)
     # int MPI_Parrived(MPI_Request request, int partition, int *flag)
     MPI.API.@mpichk ccall(
         (:MPI_Parrived, MPI.API.libmpi),
-        Cint, (Ptr{MPI.API.MPI_Request}, Cint, Ptr{Cint}),
+        Cint, (MPI.API.MPI_Request, Cint, Ptr{Cint}),
         req, partition - 1, flag
     )
+
+    @static if MPI.MPI_LIBRARY == "OpenMPI" && MPI.MPI_LIBRARY_VERSION < v"5-"
+        # The initial implementation of partitioned communications in OpenMPI 4 didn't include a
+        # progress call in `MPI_Parrived`, leading to systematic deadlocks in receive loops.
+        # See https://github.com/open-mpi/ompi/pull/10077
+        # The fix here is the same fix as in `MPI_Parrived` in the above PR.
+        if flag[] == 0
+            ccall((:opal_progress, MPI.API.libmpi), Cint, ())
+        end
+    end
+
     return flag[] != 0
 end
 
@@ -113,7 +130,7 @@ function MPI_Pready!(req::PartitionedRequest, partition::Integer)
     # int MPI_Pready(int partitions, MPI_Request request)
     MPI.API.@mpichk ccall(
         (:MPI_Pready, MPI.API.libmpi),
-        Cint, (Cint, Ptr{MPI.API.MPI_Request}),
+        Cint, (Cint, MPI.API.MPI_Request),
         partition - 1, req
     )
     return req
@@ -125,7 +142,7 @@ function MPI_Pready!(req::PartitionedRequest, partition_range::UnitRange{<:Integ
     # int MPI_Pready_range(int partition_low, int partition_high, MPI_Request request)
     MPI.API.@mpichk ccall(
         (:MPI_Pready_range, MPI.API.libmpi),
-        Cint, (Cint, Cint, Ptr{MPI.API.MPI_Request}),
+        Cint, (Cint, Cint, MPI.API.MPI_Request),
         first(partition_range) - 1, last(partition_range) - 1, req
     )
     return req
@@ -136,7 +153,7 @@ function MPI_Pready!(req::PartitionedRequest, partition_list::Vector{<:Integer})
     # int MPI_Pready_list(int length, int partition_list[], MPI_Request request)
     MPI.API.@mpichk ccall(
         (:MPI_Pready_list, MPI.API.libmpi),
-        Cint, (Cint, Cint, Ptr{MPI.API.MPI_Request}),
+        Cint, (Cint, Cint, MPI.API.MPI_Request),
         length(partition_list), Cint.(partition_list .- 1), req
     )
     return req
@@ -153,8 +170,7 @@ function MPI_Precv_init(
 end
 
 function MPI_Precv_init(buf, partitions, count, datatype, source, tag, comm, info, req)
-    # OpenMPI ABI
-    # int MPI_Psend_init(const void* buf, int partitions, MPI_Count count,
+    # int MPI_Precv_init(void* buf, int partitions, MPI_Count count,
     #                    MPI_Datatype datatype, int source, int tag, MPI_Comm comm,
     #                    MPI_Info info, MPI_Request *request)
     MPI.API.@mpichk ccall(
@@ -176,7 +192,6 @@ function MPI_Psend_init(
 end
 
 function MPI_Psend_init(buf, partitions, count, datatype, dest, tag, comm, info, req)
-    # OpenMPI ABI
     # int MPI_Psend_init(const void* buf, int partitions, MPI_Count count,
     #                    MPI_Datatype datatype, int dest, int tag, MPI_Comm comm,
     #                    MPI_Info info, MPI_Request *req)
@@ -188,6 +203,9 @@ function MPI_Psend_init(buf, partitions, count, datatype, dest, tag, comm, info,
     )
 end
 
+#
+# API for MPI active RMA
+#
 
 window_assert_value(assert::Integer) = Cint(assert)
 
@@ -216,40 +234,40 @@ end
 
 function MPI_Win_start(group::MPI.Group, window::MPI.Win; asserts=:none)
     assert_val = window_assert_value(asserts, (:none, :no_check))
-    MPI.API.@mpichk MPI.API.MPI_Win_start(group, assert_val, window)
+    MPI.API.MPI_Win_start(group, assert_val, window)
     return nothing
 end
 
 
 function MPI_Win_post(group::MPI.Group, window::MPI.Win; asserts=:none)
     assert_val = window_assert_value(asserts, (:none, :no_check, :no_store, :no_put))
-    MPI.API.@mpichk MPI.API.MPI_Win_post(group, assert_val, window)
+    MPI.API.MPI_Win_post(group, assert_val, window)
     return nothing
 end
 
 
 function MPI_Win_complete(window::MPI.Win)
-    MPI.API.@mpichk MPI.API.MPI_Win_complete(window)
+    MPI.API.MPI_Win_complete(window)
     return nothing
 end
 
 
 function MPI_Win_test(window::MPI.Win)
     flag = Ref{Cint}(0)
-    MPI.API.@mpichk MPI.API.MPI_Win_test(window, flag)
+    MPI.API.MPI_Win_test(window, flag)
     return flag[] != 0
 end
 
 
 function MPI_Win_wait(window::MPI.Win)
-    MPI.API.@mpichk MPI.API.MPI_Win_wait(window)
+    MPI.API.MPI_Win_wait(window)
     return nothing
 end
 
 
 function MPI_Win_fence(window::MPI.Win; asserts=:none)
     assert_val = window_assert_value(asserts, (:none, :no_store, :no_put, :no_precede, :no_succeed))
-    MPI.API.@mpichk MPI.API.MPI_Win_fence(assert_val, window)
+    MPI.API.MPI_Win_fence(assert_val, window)
     return nothing
 end
 

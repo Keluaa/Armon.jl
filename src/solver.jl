@@ -200,7 +200,7 @@ function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiti
         end
     end
 
-    # Yield to the OS scheduler, incase some multithreading schenanigans are preventing us to
+    # Yield to the OS scheduler, in case some multithreading schenanigans are preventing us to
     # continue further (e.g. another process' thread is bound to the same core as this thread).
     # Wait twice as long as the previous time, starting from 2µs and up to 8ms
     µs_to_wait = 2^clamp(stop_count, 1, 13)

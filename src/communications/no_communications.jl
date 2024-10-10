@@ -6,7 +6,7 @@ Communication model without communications: the process communicates with itself
 """
 struct NoCommunicationModel <: AbstractCommunicationModel end
 
-buffer_type(::Type{NoCommunicationModel}, ::Type{A}) where {A} = A
+buffer_type(::ObjOrType{NoCommunicationModel}, ::Type{A}) where {A} = A
 is_thread_safe(::ObjOrType{NoCommunicationModel}) = true
 
 function Base.show(io::IO, ::NoCommunicationModel)
@@ -36,8 +36,8 @@ function init_exchange(
     return DummyCommunication{typeof(buffer)}(buffer)
 end
 
-function init_reduce_broadcast(::NoCommunicationModel, reduction_op, type, count)
-    buffer = array_type(undef, buffer_size)
+function init_reduce_broadcast(::NoCommunicationModel, reduction_op, array_type, count)
+    buffer = array_type(undef, count)
     return DummyCommunication{typeof(buffer)}(buffer)
 end
 

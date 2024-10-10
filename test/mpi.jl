@@ -2,9 +2,12 @@
 using Printf
 using MPI
 
-MPI.Init(; threadlevel=:multiple)
-MPI.Barrier(MPI.COMM_WORLD)
+if !MPI.Initialized()
+    MPI.Init(; threadlevel=:multiple)
+end
 
+MPI.Barrier(MPI.COMM_WORLD)
+global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
 
 TEST_CUDA_MPI = if parse(Bool, get(ENV, "TEST_CUDA_MPI", "false"))
     import CUDA
@@ -333,7 +336,8 @@ function test_halo_exchange(P, global_comm)
                 send_buffer = only(Armon.Communications.unsafe_send_buffer(remote_blk.comm_data))
                 @root_test length(domain) * length(Armon.comm_vars()) == length(send_buffer)
                 if !Armon.start_exchange(ref_params, blk, remote_blk, side)
-                    MPI.Waitall(remote_blk.requests)
+                    Armon.Communications.wait_send_completed(remote_blk.comm_data)
+                    Armon.Communications.wait_recv_completed(remote_blk.comm_data)
                     @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
                 end
 
