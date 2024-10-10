@@ -130,7 +130,7 @@ function make_simd_threaded_loop(expr::Expr; threading=:dynamic, simd=:dynamic, 
 
     return quote
         let __loop_range = $loop_range, __loop_length = length(__loop_range),
-                __total_iter = length(__loop_range), __num_threads = Threads.nthreads(),
+                __total_iter = length(__loop_range), __num_threads = params.nthreads,
                 # Equivalent to __total_iter ÷ __num_threads
                 __batch = convert(Int, cld(__total_iter, __num_threads))::Int,
                 __first_i = first(__loop_range),

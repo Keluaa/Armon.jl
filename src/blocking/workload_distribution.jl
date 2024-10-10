@@ -233,7 +233,7 @@ end
 
 
 function thread_workload_distribution(params::ArmonParameters; threads=nothing, kwargs...)
-    thread_count = @something threads (params.use_threading ? Threads.nthreads() : 1)
+    thread_count = @something threads params.nthreads
     grid_size, static_sized_grid, remainder_block_size = grid_dimensions(params)
     simple = params.workload_distribution === :simple
     scotch = params.workload_distribution in (:scotch, :sorted_scotch, :weighted_sorted_scotch)

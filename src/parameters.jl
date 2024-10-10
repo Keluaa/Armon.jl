@@ -27,6 +27,13 @@ Device to use. Supported values:
  - `:CPU`: `KernelAbstractions.jl` CPU multithreading (using the standard `Threads.jl`)
 
 
+    nthreads = Threads.nthreads()
+
+Number of threads to use (`:CPU_HP` and `:CPU` backends only).
+Only the first `nthreads` Julia threads will be used.
+Defaults to all available threads.
+
+
     use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing
 
 MPI config. The MPI domain will be a process grid of size `P`.
@@ -329,6 +336,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     use_cache_blocking::Bool
     use_two_step_reduction::Bool
     async_cycle::Bool
+    nthreads::Int
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
     block_size::NTuple{2, Int}
@@ -367,7 +375,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
         device, options = get_device(; options...)
 
         params = new{data_type, typeof(device), Any}()
-        params.N = N
+        params.N = Tuple(N)
         params.device = device
 
         # Each initialization step consumes the options it needs. At the end no option should remain.
@@ -431,6 +439,7 @@ function init_MPI(params::ArmonParameters;
     global_comm = something(global_comm, MPI.COMM_WORLD)
     params.global_comm = global_comm
 
+    P = Tuple(P)
     if length(P) != length(params.N)
         solver_error(:config, "Mismatched dimensions: expected a grid of $(length(N)) processes, got: $(length(P))")
     end
@@ -513,6 +522,7 @@ end
 function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
+    nthreads = Threads.nthreads(),
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
@@ -528,7 +538,7 @@ function init_device(params::ArmonParameters;
     params.async_cycle = async_cycle
     params.busy_wait_limit = max(busy_wait_limit, 1)
 
-    if use_cache_blocking && use_threading && params.use_MPI && Threads.nthreads() > 1
+    if use_cache_blocking && use_threading && params.use_MPI && nthreads > 1
         thread_level = MPI.Query_thread()
         if thread_level < MPI.THREAD_MULTIPLE
             solver_error(:config, "Using multithreading with cache blocking requires MPI to be \
@@ -539,6 +549,15 @@ function init_device(params::ArmonParameters;
         if !Communications.is_thread_safe(params.comm_model)
             solver_error(:config, "`comm_model` of type $(typeof(params.comm_model)) isn't thread-safe")
         end
+    end
+
+    if use_threading
+        if !(1 ≤ nthreads ≤ Threads.nthreads())
+            solver_error(:config, "`nthreads` must be between 1 and `Threads.nthreads()`, got: $nthreads")
+        end
+        params.nthreads = nthreads
+    else
+        params.nthreads = 1
     end
 
     if !use_cache_blocking
@@ -834,8 +853,8 @@ end
 function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
     print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
     if p.use_threading
-        println(io, " ($(Threads.nthreads()) $(use_std_lib_threads ? "standard " : "")thread",
-            Threads.nthreads() != 1 ? "s" : "", ")")
+        println(io, " ($(p.nthreads) $(use_std_lib_threads ? "standard " : "")thread",
+            p.nthreads != 1 ? "s" : "", ")")
     end
     print_parameter(io, pad, "use_simd", p.use_simd)
     print_parameter(io, pad, "use_gpu", false)
@@ -868,6 +887,8 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     if p.use_MPI
         println(io, ", MPI ", MPI.Get_version(), ", library:")
         println(io, pad, pad, MPI.Get_library_version())
+    else
+        println(io)
     end
     print_parameter(io, pad, "exchange model", p.comm_model)
     reduc_model = p.reduc_model == p.comm_model ? "same as the exchange model" : p.reduc_model

@@ -84,7 +84,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     threads_workload = thread_workload_distribution(params)
 
     log_size = params.log_blocks ? min(params.maxcycle, 1000) : 0
-    threads_logs = map(1:Threads.nthreads()) do _
+    threads_logs = map(1:params.nthreads) do _
         logs = Vector{ThreadLogEvent}()
         sizehint!(logs, log_size)
         return logs

@@ -35,7 +35,7 @@ end
         return res
     else
         # Reduction using explicit multithreading, since the caller isn't multithreaded
-        threads_res = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_res = Vector{T}(undef, params.nthreads)
         threads_res .= typemax(T)
 
         @threaded for j in range.col
@@ -96,7 +96,7 @@ end
 
 function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::BlockGrid) where {T}
     mt_reduction = params.use_threading && params.use_cache_blocking
-    threads_res = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
+    threads_res = Vector{T}(undef, mt_reduction ? params.nthreads : 1)
     threads_res .= typemax(T)
 
     @iter_blocks for blk in grid
@@ -230,8 +230,8 @@ end
         end
     else
         # Reduction using explicit multithreading, since the caller isn't multithreaded
-        threads_mass   = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
-        threads_energy = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_mass   = Vector{T}(undef, params.nthreads)
+        threads_energy = Vector{T}(undef, params.nthreads)
         threads_mass   .= 0
         threads_energy .= 0
 
@@ -300,8 +300,8 @@ end
 
 function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T}
     mt_reduction = params.use_threading && params.use_cache_blocking
-    threads_mass   = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
-    threads_energy = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
+    threads_mass   = Vector{T}(undef, mt_reduction ? params.nthreads : 1)
+    threads_energy = Vector{T}(undef, mt_reduction ? params.nthreads : 1)
     threads_mass   .= 0
     threads_energy .= 0
 
