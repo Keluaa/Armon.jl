@@ -255,7 +255,7 @@ end
     thread_workload_distribution(params::ArmonParameters; threads=nothing)
     thread_workload_distribution(
         threads::Int, grid_size::Tuple;
-        scotch=true, simple=false, perimeter_first=false, kwargs...
+        scotch=true, simple=false, perimeter_first=false, check=true, kwargs...
     )
 
 Distribute each block in `grid_size` among the `threads`, as evenly as possible.
@@ -269,23 +269,44 @@ is used to better split the grid.
 If `perimeter_first == true`, the resulting distribution will have blocks sorted in way that will
 place neighbours of other threads' blocks first in the list.
 By doing so, communications between threads may be overlapped more frequently.
+
+If `check == true`, the resulting distribution is checked to ensure that all blocks are assigned to
+a thread exactly once.
 """
 function thread_workload_distribution(
     threads::Int, grid_size::Tuple;
-    scotch=true, simple=false, perimeter_first=false, kwargs...
+    scotch=true, simple=false, perimeter_first=false, check=true, kwargs...
 )
     if simple
         threads_workload = simple_workload_distribution(threads, grid_size)
     elseif scotch
         threads_workload = scotch_grid_partition(threads, grid_size; kwargs...)
-        if perimeter_first
-            blk_grid = block_grid_from_workload(grid_size, threads_workload)
-            sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
-        end
     else
         error("unknown workload distribution, expected `simple == true` or `scotch == true`")
     end
+
+    if check || perimeter_first
+        blk_grid = block_grid_from_workload(grid_size, threads_workload)
+    end
+    perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
+    check && check_workload(threads_workload, blk_grid)
     return threads_workload
+end
+
+
+function check_workload(threads_workload, blk_grid)
+    unassigned_blocks = count(==(0), blk_grid)
+    if unassigned_blocks > 0
+        plurial = unassigned_blocks > 0 ? "blocks are" : "block is"
+        error("invalid block distribution: $unassigned_blocks $plurial not assigned to a thread")
+    end
+
+    for (tid, workload) in enumerate(threads_workload), blk_pos in workload
+        blk_grid[blk_pos] == tid && continue
+        error("invalid block distribution: block $(Tuple(blk_pos)) is assigned to threads $(blk_grid[blk_pos]) and $tid")
+    end
+
+    return true
 end
 
 
