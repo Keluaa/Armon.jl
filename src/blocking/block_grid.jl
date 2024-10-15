@@ -70,11 +70,12 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
     # Container for remote blocks, neighbours of blocks on the edges. Corners are excluded.
     base_buffer_array = params.gpu_aware ? device_array : host_array
-    buffer_array = Communications.buffer_type(params.comm_model, base_buffer_array)
+    # TODO: what if we have different models per thread, with different buffer types?
+    buffer_array = Communications.buffer_type(first(params.comm_models), base_buffer_array)
     grid_perimeter = sum(grid_size) * length(grid_size)  # (nx+ny) * 2
     remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
 
-    if !Communications.is_async(params.comm_model)
+    if !Communications.is_async(first(params.comm_models))
         # TODO: enable support for sync comms when there is only a single block per grid
         #   then the "only" thing to do is impose an order for left/right exchanges (e.g. even ranks
         #   do the left xchg first, odd ranks do the right one first)
@@ -115,7 +116,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     # Remote blocks are placed on the edge of the grid.
     # Multithreading is necessary here in order to guarentee that no array is shared between two
     # NUMA node (when we move the pages afterward), which can happen when allocations are done
-    # sequentially.
+    # sequentially, as well as for properly initializing MPI communications.
     inner_grid = CartesianIndices(static_sized_grid)
     device_kwargs = alloc_device_kwargs(params)
     host_kwargs = alloc_host_kwargs(params)
@@ -159,8 +160,9 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
 
                     total_side_buffer_size = total_side_buffer_sizes[Integer(axis_of(side))]
 
+                    comm_model = params.comm_models[tid]
                     RemoteTaskBlock{buffer_array}(
-                        params.comm_model, neighbour, global_pos, remote_blk_pos,
+                        comm_model, neighbour, global_pos, remote_blk_pos,
                         base_buffer_array, buffer_size, side, total_side_buffer_size
                     )
                 else

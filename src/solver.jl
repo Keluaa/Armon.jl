@@ -17,6 +17,9 @@ struct SolverStats
     solve_time::Float64  # in seconds
     cell_count::Int
     giga_cells_per_sec::Float64
+    cycle_time::Float64
+    fastest_cycle::Float64
+    slowest_cycle::Float64
     data::Union{Nothing, BlockGrid}
     timer::Union{Nothing, TimerOutput}
     grid_log::Union{Nothing, BlockGridLog}
@@ -205,6 +208,9 @@ function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiti
     # Wait twice as long as the previous time, starting from 2µs and up to 8ms
     µs_to_wait = 2^clamp(stop_count, 1, 13)
     Libc.systemsleep(µs_to_wait * 1e-6)  # this is `usleep` on Linux btw
+    # if stop_count > 30 && params.is_root && Threads.threadid() == 1
+        # println("thread 1 of root was sleeping ($stop_count in a row)")
+    # end
     return time_ns() - wait_start, false
 end
 
@@ -327,6 +333,8 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
     reset!(grid, params)
     (; global_dt) = grid
 
+    cycles_time = zeros(Float64, params.maxcycle)
+
     total_cycles_time = 0.
     t1 = time_ns()
 
@@ -355,7 +363,9 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
 
         next_cycle!(params, global_dt)
 
-        total_cycles_time += time_ns() - cycle_start
+        cycle_time = time_ns() - cycle_start
+        total_cycles_time += cycle_time
+        cycles_time[global_dt.cycle] = cycle_time
 
         if is_root
             if silent <= 1
@@ -400,7 +410,13 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
         end
     end
 
-    return global_dt.time, global_dt.current_dt, global_dt.cycle, 1 / grind_time, solve_time
+    if isempty(cycles_time)
+        fastest_cycle = slowest_cycle = zero(Float64)
+    else 
+        fastest_cycle, slowest_cycle = extrema(cycles_time)
+    end
+
+    return global_dt.time, global_dt.current_dt, global_dt.cycle, 1 / grind_time, solve_time, total_cycles_time, fastest_cycle, slowest_cycle
 end
 
 
@@ -463,7 +479,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    final_time, dt, cycles, cells_per_sec, solve_time = time_loop(params, data)
+    final_time, dt, cycles, cells_per_sec, solve_time, cycle_time, fastest_cycle, slowest_cycle = time_loop(params, data)
 
     if params.check_result && is_conservative(params.test)
         @section "Conservation variables" begin
@@ -495,7 +511,8 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     stats = SolverStats(
-        final_time, dt, cycles, solve_time / 1e9, prod(params.N), cells_per_sec,
+        final_time, dt, cycles, solve_time / 1e9, prod(params.N), cells_per_sec, cycle_time,
+        fastest_cycle, slowest_cycle,
         params.return_data ? data : nothing,
         params.measure_time ? flatten_sections(timer, ("Inner blocks", "Edge blocks")) : nothing,
         params.log_blocks ? collect_logs(data) : nothing

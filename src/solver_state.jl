@@ -107,6 +107,14 @@ function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where
         # All threads have contributed to the local time step, we can now start the global reduction
         local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
         if params.use_MPI
+            if Threads.threadid() != 1
+                # Only the main thread can touch the reduction request. This is mainly because MPI
+                # implementations have trouble doing this correctly. This harsh constraint ensures
+                # the reduction is done correctly every time, and that outside of the multithreaded
+                # section of the solver, the main thread can use `MPI_Wait` to complete the reduction
+                # before starting a new cycle.
+                return TimeStepState.AllContributed
+            end
             send_buf = Communications.acquire_send_buffer!(global_dt.reduction_data)
             send_buf[1] = local_dt
             Communications.release_send_buffer!(global_dt.reduction_data)

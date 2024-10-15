@@ -46,14 +46,23 @@ MPI config. The MPI domain will be a process grid of size `P`.
 Controls which communication model is used for remote exchanges.
 [`Communications.communication_model`](@ref) is used when `comm_model` is a `Symbol`, and `comm_model_kwargs`
 are the options for the model.
-Otherwise if `comm_model` is an instance of a [`AbstractCommunicationModel`](@ref), then it is used
-as-is.
 
 
     reduc_model = nothing, reduc_model_kwargs = (;)
 
 Same as for `comm_model` and `comm_model_kwargs`, but for global reduction operations.
 When `reduc_model` is `nothing`, `comm_model` is used instead.
+
+
+    thread_split_comm = false
+
+Duplicates (with `MPI_Comm_dup`) the cartesian communicator for each thread, so that each use separate
+communicators, which can help with performance and reliability (MPI implementations will always have
+some trouble with `MPI_THREADS_MULTIPLE`...).
+It can also improve the usage of NICs if there is multiple of them per node.
+Furthermore, enabling this makes the solver compliant with Intel MPI's `MPI_THREAD_SPLIT`, which can
+improve performance even further if it is enabled by setting the env var `I_MPI_THREAD_SPLIT` to `1`.
+If `false`, all threads use the same communicator.
 
 
     gpu_aware = true
@@ -349,19 +358,22 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     # MPI
     use_MPI::Bool
     is_root::Bool
-    rank::Int
-    root_rank::Int
-    proc_size::Int
-    proc_dims::NTuple{2, Int}
-    global_comm::MPI.Comm
-    cart_comm::MPI.Comm
-    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
+    rank::Int                      # Rank of the current process in `cart_comm`
+    root_rank::Int                 # Rank of the root process in `cart_comm`
+    proc_size::Int                 # Number of processes (size of `global_comm` and `cart_comm`)
+    proc_dims::NTuple{2, Int}      # Dimensions of the cartesian grid of processes
+    cart_coords::NTuple{2, Int}    # Coordinates of this process in the cartesian grid (0-indexed)
     neighbours::Dict{Side.T, Int}  # Ranks of the neighbours of this process
-    global_grid::NTuple{2, Int}  # Dimensions of the global grid
+    global_grid::NTuple{2, Int}    # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
-    comm_model::AbstractCommunicationModel
-    reduc_model::AbstractCommunicationModel
+    # MPI Communicators
+    global_comm::MPI.Comm          # Process world of the whole solver
+    cart_comm::MPI.Comm            # Cartesian topology on top of the process world, use `thread_comms` instead
+    thread_split_comm::Bool        # If all communicators in `thread_comms` are duplicates or copies (idem for `comm_models`)
+    thread_comms::Vector{MPI.Comm} # Duplicates (or copies) of `cart_comm`, see `thread_split_comm`
+    comm_models::Vector{AbstractCommunicationModel}  # Communication model for each thread (associated with `thread_comms[i]`)
+    reduc_model::AbstractCommunicationModel  # Reduction model associated with `thread_comms[1]`, to be used only by the main thread (tid 1)
 
     # Tests & Comparison
     compare::Bool
@@ -434,6 +446,7 @@ function init_MPI(params::ArmonParameters;
     use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing, gpu_aware = true,
     comm_model = :async_safe, comm_model_kwargs = (;),
     reduc_model = nothing, reduc_model_kwargs = (;),
+    thread_split_comm = false,
     options...
 )
     global_comm = something(global_comm, MPI.COMM_WORLD)
@@ -488,28 +501,67 @@ function init_MPI(params::ArmonParameters;
         )
     end
 
-    if comm_model isa Symbol
-        comm_model = Communications.communication_model(comm_model, params.cart_comm; comm_model_kwargs...)
-    elseif !(comm_model isa AbstractCommunicationModel)
-        solver_error(:config, "'comm_model' must be either a `Symbol` or an instance of a `AbstractCommunicationModel`")
-    end
-    params.comm_model = comm_model
+    params.thread_split_comm = thread_split_comm
+    if thread_split_comm
+        # Each thread use a separate communicator. This allows the underlying MPI implementation to
+        # avoid any global locks for many operations, if it is aware of it that is.
+        # Currently the whole solver should be MPI_THREADS_MULTIPLE compliant, but we can go further,
+        # as all threads create, test and wait on their own requests: they are never shared by multiple
+        # threads. Some optimization experiments showed that sharing requests causes more problems
+        # than what performance gains are worth for.
+        # Intel MPI introduces a thread-level stronger than MPI_THREADS_MULTIPLE: MPI_THREAD_SPLIT.
+        # The solver can be made MPI_THREAD_SPLIT compliant by using a single communicator per thread,
+        # and setting the env var `I_MPI_THREAD_SPLIT` to `1`.
+        # See https://www.intel.com/content/www/us/en/docs/mpi-library/developer-guide-linux/2021-13/mpi-thread-split-programming-model.html
+        # for more.
+        # Note: there is also the condition that the same threads communicate with each other, which
+        # affects deeply how we distribute blocks among threads. See `workload_distribution.jl` for more.
+        params.thread_comms = map(1:Threads.nthreads()) do tid
+            # Note: MPI_Comm_dup is a blocking collective operation
+            thread_comm = MPI.Comm_dup(params.cart_comm)
 
-    if !Communications.supports_point_to_point(comm_model)
-        solver_error(:config, "`comm_model` of type $(typeof(comm_model)) does not support point-to-point operations")
+            # The `thread_id=tid-1` is only useful for Intel MPI's MPI_THREAD_SPLIT feature, as
+            # otherwise it cannot detect which thread is which (explicit model).
+            thread_info = MPI.Info(:thread_id => string(tid-1))
+            MPI.API.MPI_Comm_set_info(thread_comm, thread_info)
+            # Note: no need to keep `thread_info` alive, as its data is copied to `thread_comm` by MPI
+
+            return thread_comm
+        end
+    else
+        # All threads use the same communicator
+        params.thread_comms = fill(params.cart_comm, Threads.nthreads())
+    end
+
+    # Communication model initialisation
+    # Use the communicator of the main thread for the reduction model and basic error checking.
+    main_comm_model = Communications.communication_model(comm_model, params.thread_comms[1]; comm_model_kwargs...)
+    if !Communications.supports_point_to_point(main_comm_model)
+        solver_error(:config, "`comm_model` of type $(typeof(main_comm_model)) does not support point-to-point operations")
     end
 
     if isnothing(reduc_model)
-        reduc_model = comm_model  # Same model for exchanges and reductions
-    elseif reduc_model isa Symbol
-        reduc_model = Communications.communication_model(reduc_model, params.cart_comm; reduc_model_kwargs...)
-    elseif !(reduc_model isa AbstractCommunicationModel)
-        solver_error(:config, "'reduc_model' must be either `nothing`, a `Symbol` or an instance of a `AbstractCommunicationModel`")
+        reduc_model = main_comm_model  # Same model for exchanges and reductions
+    else
+        reduc_model = Communications.communication_model(reduc_model, params.thread_comms[1]; reduc_model_kwargs...)
     end
-    params.reduc_model = reduc_model
 
     if !Communications.supports_collectives(reduc_model)
         solver_error(:config, "`reduc_model` of type $(typeof(reduc_model)) does not support collective operations")
+    end
+    params.reduc_model = reduc_model
+
+    # Repeat the communicator model for each thread if needed.
+    # TODO: it is possible to have different communication models for each threads, e.g. one for
+    #   processes on the local node, another for remote processes. Is it interesting performance-wise?
+    #   How to initialize this properly?
+    if thread_split_comm
+        params.comm_models = map(1:Threads.nthreads()) do tid
+            tid == 1 && return main_comm_model
+            return Communications.communication_model(comm_model, params.thread_comms[tid]; comm_model_kwargs...)
+        end
+    else
+        params.comm_models = fill(main_comm_model, Threads.nthreads())
     end
 
     params.root_rank = 0
@@ -546,8 +598,8 @@ function init_device(params::ArmonParameters;
                                    got: $thread_level")
         end
 
-        if !Communications.is_thread_safe(params.comm_model)
-            solver_error(:config, "`comm_model` of type $(typeof(params.comm_model)) isn't thread-safe")
+        if !params.thread_split_comm && !Communications.is_thread_safe(first(params.comm_models))
+            solver_error(:config, "`comm_model` of type $(typeof(first(params.comm_models))) isn't thread-safe")
         end
     end
 
@@ -890,8 +942,13 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     else
         println(io)
     end
-    print_parameter(io, pad, "exchange model", p.comm_model)
-    reduc_model = p.reduc_model == p.comm_model ? "same as the exchange model" : p.reduc_model
+    print_parameter(io, pad, "exchange model", first(p.comm_models), nl=false)
+    if p.thread_split_comm
+        println(io, ", one communicator per thread")
+    else
+        println(io, ", one communicator for all threads")
+    end
+    reduc_model = p.reduc_model == first(p.comm_models) ? "same as the exchange model" : p.reduc_model
     print_parameter(io, pad, "reduction model", reduc_model)
 
     println(io, " ", "─" ^ (pad*2+2))

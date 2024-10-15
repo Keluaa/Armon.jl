@@ -317,6 +317,9 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     total_energy = sum(threads_energy)
 
     # Global reduction over all MPI processes
+    # TODO: this is wrong! we MUST ensure that the right thread associated with the communicator
+    #  of `params.reduc_model` is doing the reduction
+    #  => how do we run a task on a specific thread in Julia ?
     global_reduction = Communications.init_reduce_broadcast(params.reduc_model, +, Vector{T}, 2)
 
     send_buf = Communications.acquire_send_buffer!(global_reduction)
