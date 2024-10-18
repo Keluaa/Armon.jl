@@ -91,7 +91,7 @@ end
 
 try_acquire_send_buffer!(c::MPISyncCollective) = c.send_buffer.data
 acquire_send_buffer!(c::MPISyncCollective) = c.send_buffer.data
-release_send_buffer!(c::MPISyncCollective) = MPI.Allreduce!(c.send_buf.data, c.recv_buf.data, c.op, c.model.comm)
+release_send_buffer!(c::MPISyncCollective) = MPI.Allreduce!(c.send_buffer.data, c.recv_buffer.data, c.op, c.model.comm)
 
 send_completed(::MPISyncCollective) = true
 wait_send_completed(::MPISyncCollective) = true

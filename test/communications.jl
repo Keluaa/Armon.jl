@@ -2,6 +2,8 @@
 using MPI
 using ThreadPinning
 
+DEADLOCK_CHECK = parse(Bool, get(ENV, "DEADLOCK_CHECK", "true"))
+
 if !MPI.Initialized()
     MPI.Init(; threadlevel=:multiple)
 end
@@ -76,8 +78,12 @@ function detect_deadlock(f; label=nothing, timeout=2)
     # `f` can use multiple Julia threads, but must leave 1 (or 2?) available. `timeout` is in seconds.
     # TODO: for some very obscure reason, I get deadlocks with `timedwait` (and IO like `println`)
     #   when I only have 2 threads. 3 threads seems to be the minimum for this to work.
-    if Threads.nthreads() < 3
-        is_root && @warn "cannot detect deadlocks: 3 Julia threads or more are required" maxlog=1
+    if Threads.nthreads() < 3 || !DEADLOCK_CHECK
+        is_root && if DEADLOCK_CHECK
+            @warn "cannot detect deadlocks: 3 Julia threads or more are required" maxlog=1
+        else
+            @warn "deadlock detection disabled" maxlog=1
+        end
         f()
         return
     end
@@ -218,13 +224,11 @@ function test_point_to_point(model, test_name)
     end
 
     detect_deadlock(; label="receive from next rank $next_rank for $test_name") do
-        buf = Comms.acquire_recv_buffer!(xchg_next)
+        while (buf = Comms.try_acquire_recv_buffer!(xchg_next); isnothing(buf)) end
         tmp_buf_next .= buf
         Comms.release_recv_buffer!(xchg_next)
     end
 
-    # TODO: try_acquire_send_buffer!
-    # TODO: try_acquire_recv_buffer!
     # TODO: wait_recv_completed (but NOT for the test before the last recv_completed, as receive request might be permanent)
 
     expected_buf_prev = zeros(Int, size(tmp_buf_prev))
@@ -271,7 +275,85 @@ end
 
 
 function test_collective(model, test_name)
-    # TODO
+    # Basic global reduction. Should work with any number of ranks.
+    reduction_op = max
+    array_type = Vector{Int}
+    buffer_size = global_size
+    tmp_buf = Vector{Int}(undef, buffer_size)
+    tmp_buf .= -1
+
+    reduc = nothing
+    detect_deadlock(; label="exchange init of $test_name") do
+        reduc = Comms.init_reduce_broadcast(model, reduction_op, array_type, buffer_size)
+    end
+    @test !isnothing(reduc)
+
+    @test all(length.(Comms.unsafe_send_buffer(reduc)) .== buffer_size)
+    @test all(length.(Comms.unsafe_recv_buffer(reduc)) .== buffer_size)
+
+    @test Comms.send_completed(reduc)
+    @test Comms.send_completed(reduc)
+    if !Comms.is_async(model)
+        # `recv_completed` is expected to work the same as `send_completed` only for synchronous communications
+        @test Comms.recv_completed(reduc)
+        @test Comms.recv_completed(reduc)
+    end
+
+    # Note: it is expected that receives are always preceded by a send.
+    detect_deadlock(; label="collective send for $test_name") do
+        buf = Comms.acquire_send_buffer!(reduc)
+        buf .= 0
+        buf[global_rank + 1] = global_rank
+        Comms.release_send_buffer!(reduc)
+    end
+
+    detect_deadlock(; label="collective recv for $test_name") do
+        buf = Comms.acquire_recv_buffer!(reduc)
+        tmp_buf .= buf
+        Comms.release_recv_buffer!(reduc)
+    end
+
+    expected_buf = zeros(Int, size(tmp_buf))
+    if model isa Comms.NoCommunicationModel
+        # Here we receive the data we sent
+        expected_buf[global_rank + 1] = global_rank
+    else
+        expected_buf .= 0:global_size-1
+    end
+
+    @test tmp_buf == expected_buf
+
+    detect_deadlock(; label="collective (try) send for $test_name") do
+        while (buf = Comms.try_acquire_send_buffer!(reduc); isnothing(buf)) end
+        buf .= 0
+        buf[global_rank + 1] = global_rank
+        Comms.release_send_buffer!(reduc)
+    end
+
+    detect_deadlock(; label="collective (try) recv for $test_name") do
+        while (buf = Comms.try_acquire_recv_buffer!(reduc); isnothing(buf)) end
+        tmp_buf .= buf
+        Comms.release_recv_buffer!(reduc)
+    end
+
+    @test tmp_buf == expected_buf
+
+    # TODO: wait_recv_completed (but NOT for the test before the last recv_completed, as receive request might be permanent)
+
+    detect_deadlock(; label="collective wait send completed") do
+        Comms.wait_send_completed(reduc)
+    end
+    @test Comms.send_completed(reduc)
+
+    if !Comms.is_async(model)
+        # Trivial for synchronous models, so no deadlock detection needed
+        @test Comms.recv_completed(reduc)
+    end
+
+    # Important: since we keep the same tags for each exchange, the next MPI exchange might collide
+    # with this one if it uses permanently active receive requests (or similar).
+    # By finalizing the object, any active request will be cancelled.
+    finalize(reduc)
 end
 
 
@@ -322,6 +404,7 @@ end
             Comms.communication_model(comm_model_name, MPI.COMM_WORLD; comm_model_kwargs...)
         catch e
             # The model cannot be created (e.g. partitioned comms unsupported)
+            is_root && @warn "Model $comm_model_name cannot be tested" maxlog=1
             @test true skip=true
             continue
         end

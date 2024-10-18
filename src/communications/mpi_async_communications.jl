@@ -137,7 +137,7 @@ unsafe_recv_buffer(c::MPIAsyncCollective) = (c.recv_buffer.data,)
 function init_reduce_broadcast(model::MPIAsyncCommunicationModel, reduction_op, array_type, count)
     send_buf = array_type(undef, count)
     recv_buf = array_type(undef, count)
-    comm = MPIAsyncCollective(model, send_buf, recv_buf, reduction_op, model.persistant_reduction)
+    comm = MPIAsyncCollective(model, send_buf, recv_buf, reduction_op)
     if model.persistant_reduction
         MPI_Allreduce_init(
             comm.send_buf, comm.recv_buf,
@@ -148,15 +148,11 @@ function init_reduce_broadcast(model::MPIAsyncCommunicationModel, reduction_op, 
     return comm
 end
 
+send_completed(c::MPIAsyncCollective) = MPI.Test(c.request)
+wait_send_completed(c::MPIAsyncCollective) = (MPI.Wait(c.request); true)
 
-try_acquire_send_buffer!(c::MPIAsyncCollective) = MPI.Test(c.request) ? c.send_buffer.data : nothing
-
-function acquire_send_buffer!(c::MPIAsyncCollective)
-    buf = try_acquire_send_buffer!(c)
-    !isnothing(buf) && return buf
-    MPI.Wait(c.request)
-    return c.send_buffer.data
-end
+try_acquire_send_buffer!(c::MPIAsyncCollective) = send_completed(c) ? c.send_buffer.data : nothing
+acquire_send_buffer!(c::MPIAsyncCollective) = (wait_send_completed(c); c.send_buffer.data)
 
 function release_send_buffer!(c::MPIAsyncCollective)
     if c.model.persistant_reduction
@@ -166,13 +162,9 @@ function release_send_buffer!(c::MPIAsyncCollective)
     end
 end
 
-send_completed(c::MPIAsyncCollective) = MPI.Test(c.request)
-wait_send_completed(c::MPIAsyncCollective) = (MPI.Wait(c.request); true)
-
-
-try_acquire_recv_buffer!(c::MPIAsyncCollective) = c.recv_buffer.data
-acquire_recv_buffer!(c::MPIAsyncCollective) = c.recv_buffer.data
-release_recv_buffer!(::MPIAsyncCollective) = nothing
-
 recv_completed(c::MPIAsyncCollective) = send_completed(c)
-wait_recv_completed(c::MPIAsyncCollective) = wait_recv_completed(c)
+wait_recv_completed(c::MPIAsyncCollective) = wait_send_completed(c)
+
+try_acquire_recv_buffer!(c::MPIAsyncCollective) = recv_completed(c) ? c.recv_buffer.data : nothing
+acquire_recv_buffer!(c::MPIAsyncCollective) = (wait_recv_completed(c); c.recv_buffer.data)
+release_recv_buffer!(::MPIAsyncCollective) = nothing
