@@ -143,6 +143,55 @@ function partition_cost(parts, grid_size, partition)
 end
 
 
+function scotch_graph_part_fixed(graph, parts, initial_partition, args...; repart=false)
+    # There is a bug/weird behaviour with `SCOTCH_graphPartFixed` (and others) where fixed vertices
+    # are treated as if they didn't exist, yet SCOTCH still checks that their values are between `0`
+    # and `parts`. Therefore only the subgraph of non-fixed vertices is partitioned into `parts`.
+    # To work around this, we suppose that the parts in fixed vertices are complete, and do the
+    # partitioning for `parts - "fixed parts"` instead.
+    # Because of the constraint that fixed vertices should be between `0` and `parts`, we fix them
+    # all to `0` and correct their value afterward.
+    initial_partition_parts = Set{Scotch.SCOTCH_Num}()
+    partition::Vector{Scotch.SCOTCH_Num} = map(initial_partition) do part
+        part == -1 && return part
+        push!(initial_partition_parts, part)
+        return 0
+    end
+
+    actual_parts = parts - length(initial_partition_parts)
+    if actual_parts == 0
+        # No partititoning to do: avoid calling SCOTCH since I don't know if it would work
+    elseif repart
+        partition = Scotch.graph_repart(graph, actual_parts, partition, args...; partition, fixed=true)
+    else
+        partition = Scotch.graph_part(graph, actual_parts, args...; partition, fixed=true)
+    end
+
+    # Map from `sub_graph part index` to `whole graph part index`
+    # Since part numbers of the fixed vertices can be any value from `0` to `parts`, we need to
+    # transform the newly mapped vertices to a part index which isn't used by the fixed vertices.
+    part_mapping = Vector{Scotch.SCOTCH_Num}(undef, actual_parts)
+    next_part = 0
+    for i in 1:actual_parts
+        while next_part in initial_partition_parts
+            next_part += 1
+        end
+        part_mapping[i] = next_part
+        next_part += 1
+    end
+
+    for (i, (p, init_p)) in enumerate(zip(partition, initial_partition))
+        if init_p == -1
+            partition[i] = part_mapping[p + 1]
+        else
+            partition[i] = initial_partition[i]
+        end
+    end
+
+    return partition
+end
+
+
 """
     scotch_grid_partition(
         threads, grid_size;
@@ -175,7 +224,7 @@ function scotch_grid_partition(
     if isnothing(initial_partition)
         partition = Scotch.graph_part(graph, threads, strat)
     else
-        partition = Scotch.graph_part(graph, threads, strat; partition=copy(initial_partition), fixed=true)
+        partition = scotch_graph_part_fixed(graph, threads, initial_partition, strat)
     end
 
     if repart
@@ -184,9 +233,7 @@ function scotch_grid_partition(
         if isnothing(initial_partition)
             partition = Scotch.graph_repart(graph, threads, partition, cost_factor, costs, strat)
         else
-            partition = Scotch.graph_repart(graph, threads, partition, cost_factor, costs, strat;
-                partition=copy(initial_partition), fixed=true
-            )
+            partition = scotch_graph_part_fixed(graph, threads, initial_partition, cost_factor, costs, strat; repart=true)
         end
     end
 
@@ -225,6 +272,166 @@ function scotch_grid_partition(
 end
 
 
+function side_workload_constraints(partition, side, grid_size::NTuple{N, Int}) where {N}
+    # Build the constraints for the sub-domain along `side`
+
+    # Build an iterator for all elements along `side`
+    # The iterator should behave the same as the one on the receive side.
+    # TODO: better dimension agnosticity?
+    axis = Int(axis_of(side))
+    ax_pos = side in first_sides() ? 1 : grid_size[axis]
+    side_iter = CartesianIndices(Tuple(
+        ifelse.(1:N .== axis, Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))
+    ))
+    side_root = first(side_iter)  # transferred block positions are relative to this corner
+
+    side_constraints = Vector{Tuple{CartesianIndex{N}, Scotch.SCOTCH_Num}}()
+    side_size = prod(grid_size) ÷ grid_size[axis]
+    sizehint!(side_constraints, side_size)
+
+    for (tid, workload) in enumerate(partition)
+        isdisjoint(workload, side_iter) && continue
+        # This thread has blocks on the side of the grid: add all blocks to the constraints.
+        # While we could only transfer those on the edge, passing whole groups gives make things
+        # easier for SCOTCH, which will not have to handle incomplete groups.
+        # From what I could see, having incomplete groups in constraints gives low quality output,
+        # with some disjoint groups and uneven workloads, no matter the amount of retries.
+        for blk_pos in workload
+            rel_blk_pos = blk_pos - side_root
+            if rel_blk_pos[axis] != 0
+                # Since we are sending relative block positions to the other side, we need to mirror
+                # the axis of the side (X for left and right, etc...): this way the other side can
+                # use all positions directly.
+                rel_blk_pos = CartesianIndex(Tuple(ifelse.(1:N .== axis, Tuple(-rel_blk_pos), Tuple(rel_blk_pos))))
+            end
+            push!(side_constraints, (rel_blk_pos, tid - 1))  # tid-1 as SCOTCH uses 0-indices
+        end
+    end
+
+    return side_constraints
+end
+
+
+function side_workload_constraints!(
+    initial_partition, side, grid_size::NTuple{N, Int},
+    side_constraints::Vector{Tuple{CartesianIndex{N}, Scotch.SCOTCH_Num}}
+) where {N}
+    # Update the `initial_partition` with the constraints from the sub-domain along `side`.
+    # Return the new partition and the fixed groups added to it.
+
+    # Build an iterator for all elements along `side`
+    # TODO: better dimension agnosticity?
+    axis = Int(axis_of(side))
+    ax_pos = side in first_sides() ? 1 : grid_size[axis]
+    side_iter = CartesianIndices(Tuple(
+        ifelse.(1:length(grid_size) .== axis, Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))
+    ))
+    side_root = first(side_iter)  # transferred block positions are relative to this corner
+
+    fixed_groups = Set{Scotch.SCOTCH_Num}()
+    for (rel_blk_pos, tid) in side_constraints
+        blk_pos = rel_blk_pos + side_root
+
+        # The neighbouring sub-domain has no information about the dimensions of our block grid.
+        # This means it can send block positions which aren't part of our grid (this shouldn't
+        # concern blocks along the exact side).
+        !(blk_pos in CartesianIndices(grid_size)) && continue
+
+        initial_partition[LinearIndices(grid_size)[blk_pos]] = tid
+        push!(fixed_groups, tid)
+    end
+
+    return initial_partition, fixed_groups
+end
+
+
+function scotch_grid_matched_partition(grid_graph, strat, threads, grid_size, comm::MPI.Comm; kwargs...)
+    # The partitioning is global among the processes of the communicator.
+    # Neighbour processes will need the same threads associated with the blocks along sides they share.
+
+    # The sub-domain at the center of the grid is the one which initiates the partitioning.
+    # We could also start from anywhere else, but the center is the most optimal one, as it is
+    # the barycenter of the grid: it minimizes the number of waits required to complete the
+    # whole partitioning.
+    cart_size, _, coords = MPI.Cart_get(comm)
+    center_pos = fld.(cart_size .- 1, 2)
+    is_center = all(center_pos .== coords)
+    dim = length(grid_size)
+
+    # Get the neighbours which we will communicate with
+    # TODO: dimension agnostic
+    neighbours = [
+        Side.Left   => MPI.Cart_shift(comm, 0, -1)[2],
+        Side.Right  => MPI.Cart_shift(comm, 0,  1)[2],
+        Side.Bottom => MPI.Cart_shift(comm, 1, -1)[2],
+        Side.Top    => MPI.Cart_shift(comm, 1,  1)[2]
+    ]
+
+    center_offset = coords .- center_pos
+    center_dist = sum(abs.(center_offset))
+    recv_neighbours = filter(neighbours) do (side, rank)
+        rank_dist = sum(abs.(center_offset .+ offset_to(side)))
+        return rank != MPI.PROC_NULL && rank_dist ≤ center_dist
+    end
+    send_neighbours = filter(neighbours) do (side, rank)
+        rank_dist = sum(abs.(center_offset .+ offset_to(side)))
+        return rank != MPI.PROC_NULL && rank_dist > center_dist
+    end
+
+    if is_center
+        # The center domain has no constraints
+        partition = scotch_grid_partition(grid_graph, strat, threads, grid_size; kwargs...)
+    else
+        # Wait for the neighbours closer (Manhattan distance) to the center to communicate their
+        # edge partitions
+
+        # Get the number of constrained blocks each neighbour wants to send
+        reqs = MPI.MultiRequest(length(recv_neighbours))
+        side_constraints_sizes = Vector{Ref{Int}}(undef, 2*dim)
+        for (req, (side, rank)) in zip(reqs, recv_neighbours)
+            side_constraints_sizes[Int(side)] = Ref(-1)
+            MPI.Irecv!(side_constraints_sizes[Int(side)], comm, req; source=rank, tag=0)
+        end
+        MPI.Waitall(reqs)
+
+        # Receive all constrained blocks
+        constraints = Dict{Side.T, Vector{Tuple{CartesianIndex{dim}, Scotch.SCOTCH_Num}}}()
+        for (req, (side, rank)) in zip(reqs, recv_neighbours)
+            side_size = side_constraints_sizes[Int(side)][]
+            constraints[side] = valtype(constraints)(undef, side_size)
+            MPI.Irecv!(constraints[side], comm, req; source=rank, tag=1)
+        end
+        MPI.Waitall(reqs)
+
+        # Build the initial partition with the constraints of each neighbour
+        initial_partition = Vector{Scotch.SCOTCH_Num}(undef, prod(grid_size))
+        initial_partition .= -1  # all vertices have no constraints by default
+        fixed_groups = Set{Scotch.SCOTCH_Num}()
+        for (side, side_cstr) in constraints
+            _, side_groups = side_workload_constraints!(initial_partition, side, grid_size, side_cstr)
+            union!(fixed_groups, side_groups)
+        end
+
+        partition = scotch_grid_partition(grid_graph, strat, threads, grid_size; initial_partition, kwargs...)
+    end
+
+    # Send our edge partitions to the neighbours farther from the center
+    reqs = MPI.MultiRequest(2*length(send_neighbours))
+    for (i, (side, rank)) in enumerate(send_neighbours)
+        constraint = side_workload_constraints(partition, side, grid_size)
+
+        # Send the length and the data at once, but with a different tag to not anger the MPI gods
+        MPI.Isend(length(constraint), comm, reqs[2*i-1]; dest=rank, tag=0)
+        MPI.Isend(constraint, comm, reqs[2*i]; dest=rank, tag=1)
+    end
+
+    MPI.Waitall(reqs)  # Don't leave any requests incomplete
+    MPI.Barrier(comm)  # Just to be safe, maybe unneeded
+
+    return partition
+end
+
+
 function scotch_grid_partition(
     threads, grid_size;
     strategy=:default, workload_tolerance=0, weighted=false,
@@ -247,108 +454,9 @@ function scotch_grid_partition(
 
     if match_neighbour_domains == false
         return scotch_grid_partition(graph, strat, threads, grid_size; weighted, kwargs...)
-    end
-
-    # The partitioning is global among the processes of the communicator in `match_neighbour_domains`
-    # Neighbour processes will need the same threads associated with the blocks sides they share.
-    match_neighbour_domains::MPI.Comm
-
-    # The sub-domain at the center of the grid is the one which initiates the partitioning.
-    # We could also start from anywhere else, but the center is the most optimal one, as it is
-    # the barycenter of the grid: it minimizes the number of waits required to complete the
-    # whole partitioning.
-    cart_size, _, coords = MPI.Cart_get(match_neighbour_domains)
-    center_pos = fld.(cart_size .- 1, 2)
-    is_center = all(center_pos .== coords)
-
-    # Get the neighbours which we will communicate with
-    neighbours = [
-        (-1,  0) => MPI.Cart_shift(match_neighbour_domains, 0, -1)[2],
-        ( 1,  0) => MPI.Cart_shift(match_neighbour_domains, 0,  1)[2],
-        ( 0, -1) => MPI.Cart_shift(match_neighbour_domains, 1, -1)[2],
-        ( 0,  1) => MPI.Cart_shift(match_neighbour_domains, 1,  1)[2]
-    ]
-
-    if is_center
-        partition = scotch_grid_partition(graph, strat, threads, grid_size; weighted, kwargs...)
     else
-        # Wait for the neighbours closer (Manhattan distance) to the center to communicate their
-        # edge partitions
-        center_offset = coords .- center_pos
-        center_dist = sum(abs.(center_offset))
-        reqs = Vector{MPI.Request}()
-        side_constraints = Dict{Side.T, Vector{Scotch.SCOTCH_Num}}()
-        for (offset, rank) in neighbours
-            rank_dist = sum(abs.(center_offset .+ offset))
-            rank_dist > center_dist && continue
-            rank == MPI.PROC_NULL && continue
-
-            side = side_from_offset(offset)
-            side_size = prod(grid_size) ÷ grid_size[Int(axis_of(side))]
-            side_constraints[side] = Vector{Scotch.SCOTCH_Num}(undef, side_size)
-
-            req = MPI.Irecv!(side_constraints[side], match_neighbour_domains; source=rank, tag=0)
-            push!(reqs, req)
-        end
-
-        MPI.Waitall(reqs)
-
-        # Build the initial partition with the constraints of each neighbour
-        initial_partition = Vector{Scotch.SCOTCH_Num}(undef, prod(grid_size))
-        initial_partition .= -1  # all vertices have no constraint by default
-        for (side, constraint) in side_constraints
-            # TODO: better dimension agnosticity
-            # Build an iterator for all elements along `side`
-            axis = Int(axis_of(side))
-            ax_pos = side in first_sides() ? 1 : grid_size[axis]
-            side_iter = CartesianIndices(Tuple(ifelse.(1:length(grid_size) .== axis, Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))))
-            side_offset = first(side_iter) - one(eltype(side_iter))
-
-            for I in side_iter
-                initial_partition[LinearIndices(grid_size)[I]] = constraint[LinearIndices(side_iter)[I - side_offset]]
-            end
-        end
-
-        partition = scotch_grid_partition(graph, strat, threads, grid_size; weighted, initial_partition, kwargs...)
+        return scotch_grid_matched_partition(graph, strat, threads, grid_size, match_neighbour_domains; weighted, kwargs...)
     end
-
-    # Send our edge partitions to the neighbours farther from the center
-    center_offset = coords .- center_pos
-    center_dist = sum(abs.(center_offset))
-    reqs = Vector{MPI.Request}()
-    for (offset, rank) in neighbours
-        rank_dist = sum(abs.(center_offset .+ offset))
-        rank_dist ≤ center_dist && continue
-        rank == MPI.PROC_NULL && continue
-
-        # Build an iterator for all elements along `side`
-        # The iterator should behave the same as the one on the receive side.
-        side = side_from_offset(offset)
-        axis = Int(axis_of(side))
-        ax_pos = side in first_sides() ? 1 : grid_size[axis]
-        side_iter = CartesianIndices(Tuple(ifelse.(1:length(grid_size) .== axis, Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))))
-
-        side_size = prod(grid_size) ÷ grid_size[axis]
-        side_constraint = Vector{Scotch.SCOTCH_Num}(undef, side_size)
-
-        # `LinearIndices` doesn't support `CartesianIndices` which do not start at `1`. The offset
-        # changes nothing as to how we iterate and order the elements.
-        side_offset = first(side_iter) - one(eltype(side_iter))
-
-        # copy our edge partitioning to the side constraints
-        for (tid, workload) in enumerate(partition), block_pos in workload
-            !(block_pos in side_iter) && continue
-            side_constraint[LinearIndices(side_iter)[block_pos - side_offset]] = tid - 1  # -1 as SCOTCH uses 0-indices
-        end
-
-        req = MPI.Isend(side_constraint, match_neighbour_domains; dest=rank, tag=0)
-        push!(reqs, req)
-    end
-
-    MPI.Waitall(reqs)  # Don't leave any requests incomplete
-    MPI.Barrier(match_neighbour_domains)  # TODO: needed? maybe, just to be safe
-
-    return partition
 end
 
 
