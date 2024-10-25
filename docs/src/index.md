@@ -89,11 +89,11 @@ block_state_machine
 ```@docs
 next_time_step
 GlobalTimeStep
-TimeStepState.WaitingForMPI
-TimeStepState.Done
-TimeStepState.Ready
-TimeStepState.DoingMPI
-TimeStepState.AllContributed
+TimeStepState.LocalReady
+TimeStepState.GlobalStart
+TimeStepState.GlobalInProgress
+TimeStepState.GlobalDone
+TimeStepState.AllDone
 ```
 
 ### Block exchanges

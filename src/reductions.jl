@@ -127,56 +127,40 @@ initial cycle.
 
 If `blk` is given, its contribution is only added to the `state.global_dt` (the [`GlobalTimeStep`](@ref)).
 Passing the whole block `grid` will block until the new time step is computed.
+
+Return if the time step for the next cycle cannot be computed, and we must wait before doing so.
 """
-function next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock; already_contributed=false)
-    if params.cst_dt
-        state.dt = params.Dt
-        return false
-    elseif params.dt_on_even_cycles && !iseven(state.global_dt.cycle) && state.dt != 0
-        return false  # No time step to compute
-    end
+function next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    !need_to_update_time_step(params, state) && return false
 
-    dt_state = time_step_state(state.global_dt)
-    if dt_state == TimeStepState.DoingMPI
-        dt_state = wait_for_dt!(params, state.global_dt)
-    end
+    # We may need to wait for other blocks/sub-domains beforehand
+    !can_contribute_to_local_time_step(params, state.global_dt, state.cycle) && return true
 
-    if dt_state == TimeStepState.Done
-        already_contributed = true
-    elseif dt_state != TimeStepState.Ready
-        return true
-    end
+    # Compute this block's contribution to the next cycle's time step
+    local_dt = local_time_step(params, state, blk)
+    contribute_to_local_time_step!(params, state.global_dt, local_dt)
 
-    if !already_contributed
-        # Compute this block's contribution to the next cycle's time step
-        local_dt = local_time_step(params, state, blk)
-        contribute_to_dt!(params, state.global_dt, local_dt)
-    end
-
-    # Update the time step for this cycle
+    # Update the time step for the current cycle
     state.dt = state.global_dt.current_dt
 
-    # If the time step is 0, we must wait for a new global time step (happens at initialization)
-    return state.dt == 0
+    return false
+end
+
+
+function fetch_time_step(params::ArmonParameters, state::SolverState, ::LocalTaskBlock)
+    # The block already contributed, and we were waiting for a new time step. Is it available?
+    !need_to_update_time_step(params, state) && return true
+    if (@atomic state.global_dt.state.x) == TimeStepState.AllDone
+        state.dt = state.global_dt.current_dt
+        return true
+    else
+        return false
+    end
 end
 
 
 function next_time_step(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    if params.cst_dt
-        state.dt = params.Dt
-        return false
-    elseif params.dt_on_even_cycles && !iseven(state.global_dt.cycle) && state.dt != 0
-        return false  # No time step to compute
-    end
-
-    dt_state = time_step_state(state.global_dt)
-    if dt_state == TimeStepState.DoingMPI
-        dt_state = wait_for_dt!(params, state.global_dt)
-    end
-
-    if dt_state != TimeStepState.Ready
-        return true
-    end
+    !need_to_update_time_step(params, state) && return false
 
     # Compute the contribution of all blocks to the next cycle's time step
     @section "local_time_step" begin
@@ -184,16 +168,16 @@ function next_time_step(params::ArmonParameters, state::SolverState, grid::Block
     end
 
     @section "time_step_reduction" begin
-        contribute_to_dt!(params, state.global_dt, local_dt; all_blocks=true)
+        contribute_to_local_time_step!(params, state.global_dt, local_dt; all_blocks=true)
     end
 
     if state.dt == 0
-        wait_for_dt!(params, state.global_dt)
-        state.dt = state.global_dt.current_dt = state.global_dt.next_cycle_dt
-    else
-        # Update the time step for this cycle
-        state.dt = state.global_dt.current_dt
+        # Force a blocking wait for the first cycle's time step
+        wait_for_time_step!(params, state.global_dt)
     end
+
+    # Update the time step for this cycle
+    state.dt = state.global_dt.current_dt
 
     return false
 end
@@ -320,15 +304,17 @@ function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T
     # TODO: this is wrong! we MUST ensure that the right thread associated with the communicator
     #  of `params.reduc_model` is doing the reduction
     #  => how do we run a task on a specific thread in Julia ?
-    global_reduction = Communications.init_reduce_broadcast(params.reduc_model, +, Vector{T}, 2)
+    if params.use_MPI
+        global_reduction = Communications.init_reduce_broadcast(params.reduc_model, +, Vector{T}, 2)
 
-    send_buf = Communications.acquire_send_buffer!(global_reduction)
-    send_buf .= (total_mass, total_energy)
-    Communications.release_send_buffer!(global_reduction)
+        send_buf = Communications.acquire_send_buffer!(global_reduction)
+        send_buf .= (total_mass, total_energy)
+        Communications.release_send_buffer!(global_reduction)
 
-    recv_buf = Communications.acquire_recv_buffer!(global_reduction)
-    (total_mass, total_energy) = recv_buf
-    Communications.release_recv_buffer!(global_reduction)
+        recv_buf = Communications.acquire_recv_buffer!(global_reduction)
+        (total_mass, total_energy) = recv_buf
+        Communications.release_recv_buffer!(global_reduction)
+    end
 
     return total_mass, total_energy
 end

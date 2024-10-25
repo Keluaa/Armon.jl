@@ -444,7 +444,7 @@ end
 
 function init_MPI(params::ArmonParameters;
     use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing, gpu_aware = true,
-    comm_model = :async_safe, comm_model_kwargs = (;),
+    comm_model = :async, comm_model_kwargs = (;),
     reduc_model = nothing, reduc_model_kwargs = (;),
     thread_split_comm = false,
     options...
@@ -501,8 +501,8 @@ function init_MPI(params::ArmonParameters;
         )
     end
 
-    params.thread_split_comm = thread_split_comm
-    if thread_split_comm
+    params.thread_split_comm = thread_split_comm && use_MPI
+    if params.thread_split_comm
         # Each thread use a separate communicator. This allows the underlying MPI implementation to
         # avoid any global locks for many operations, if it is aware of it that is.
         # Currently the whole solver should be MPI_THREADS_MULTIPLE compliant, but we can go further,
@@ -555,7 +555,7 @@ function init_MPI(params::ArmonParameters;
     # TODO: it is possible to have different communication models for each threads, e.g. one for
     #   processes on the local node, another for remote processes. Is it interesting performance-wise?
     #   How to initialize this properly?
-    if thread_split_comm
+    if params.thread_split_comm
         params.comm_models = map(1:Threads.nthreads()) do tid
             tid == 1 && return main_comm_model
             return Communications.communication_model(comm_model, params.thread_comms[tid]; comm_model_kwargs...)
@@ -596,10 +596,6 @@ function init_device(params::ArmonParameters;
             solver_error(:config, "Using multithreading with cache blocking requires MPI to be \
                                    initialized with `threadlevel ≥ MPI.THREAD_MULTIPLE`, \
                                    got: $thread_level")
-        end
-
-        if !params.thread_split_comm && !Communications.is_thread_safe(first(params.comm_models))
-            solver_error(:config, "`comm_model` of type $(typeof(first(params.comm_models))) isn't thread-safe")
         end
     end
 

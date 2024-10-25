@@ -100,19 +100,29 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
             new_state = SolverStep.NewCycle
         end
 
-    elseif blk_state in (SolverStep.TimeStep, SolverStep.InitTimeStep)
+    elseif blk_state == SolverStep.TimeStep
         # If not given at config-time, the time step of the first cycle will be the same as the
         # second cycle, requiring all blocks to finish computing the time step before starting the
         # first cycle, hence the `InitTimeStep` state.
-        already_contributed = blk_state == SolverStep.InitTimeStep
-        must_wait = next_time_step(params, state, blk; already_contributed)
+        must_wait = next_time_step(params, state, blk)
         if must_wait
             stop_processing = true
-            if state.dt == 0
-                new_state = SolverStep.InitTimeStep
-            end
         else
+            # At initialization, if the time step is 0, we must wait for next cycle's time step, which
+            # we use for the first cycle (then the 1st and 2nd cycles will have the same time step).
+            if state.dt == 0
+                stop_processing = true
+                new_state = SolverStep.InitTimeStep
+            else
+                new_state = SolverStep.NewSweep
+            end
+        end
+
+    elseif blk_state == SolverStep.InitTimeStep
+        if fetch_time_step(params, state, blk)
             new_state = SolverStep.NewSweep
+        else
+            stop_processing = true
         end
 
     elseif blk_state == SolverStep.NewSweep
@@ -226,6 +236,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
 
         tid = Threads.threadid()
         thread_blocks_idx = grid.threads_workload[tid]
+        can_advance_time_step = can_touch_global_mpi_time_step(params)
 
         t_start = time_ns()
         step_count = 0
@@ -260,6 +271,15 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
             all_finished_cycle && break
             no_progress_count += no_progress
 
+            if can_advance_time_step
+                # If `params.thread_split_comm`, then only the main thread can touch the MPI reduction
+                # for the time step. This means that the last thread to contribute to the local time
+                # step isn't always the one which will start the global reduction, hence this extra
+                # call to the time step state machine to start things early if possible. Otherwise
+                # it happens in `next_cycle!`.
+                advance_time_step_state!(params, grid.global_dt)
+            end
+
             if no_progress_count % params.busy_wait_limit == 0
                 # No block did any progress for more than `params.busy_wait_limit` calls to
                 # `block_state_machine`, to prevent deadlocks (caused by MPI or multithreading),
@@ -281,6 +301,14 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
                 grid, tid, step_count, no_progress_count, stop_count,
                 total_mpi_waits, total_wait_time, t_end - t_start
             ))
+        end
+
+        if can_advance_time_step && (tid == 1) && isempty(thread_blocks_idx)
+            # Unlike other threads, the main thread is always in charge of advancing the time step
+            # state and cycle count. In the rare case where the main thread has no blocks, we may get
+            # some deadlocks if we don't manually advance the state when other blocks must wait for
+            # the time step to be available in order to finish their work (e.g. at the first cycle).
+            loop_until_time_step_available(params, grid.global_dt)
         end
     end
 
@@ -373,7 +401,7 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
                 current_mass, current_energy = conservation_vars(params, grid)
                 ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
                 ΔE = abs(initial_energy - current_energy) / initial_energy * 100
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#8.6g%%, |ΔE| = %#8.6g%%\n",
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#11.6g%%, |ΔE| = %#11.6g%%\n",
                     global_dt.cycle, global_dt.current_dt, global_dt.time, ΔM, ΔE)
             end
         elseif silent <= 1

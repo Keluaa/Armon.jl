@@ -2,8 +2,8 @@
 function try_acquire_atomic_lock!(lock::Atomic{Int})
     tid = Threads.threadid()
     (@atomic :monotonic lock.x) == tid && return true  # already acquired
-    _, locked = @atomicreplace lock.x 0 => tid
-    return locked
+    old_tid, locked = @atomicreplace lock.x 0 => tid
+    return old_tid == tid || locked
 end
 
 @noinline wait_lock_timeout(timeout) = error("could not acquire the lock after $timeout seconds")
