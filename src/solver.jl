@@ -192,36 +192,19 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
 end
 
 
-function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiting_block::CartesianIndex, stop_count)
+function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, stop_count)
     wait_start = time_ns()
 
     # A safepoint might be needed in some cases as threads waiting for other threads
     # would never allocate and therefore might prevent the GC to run.
     GC.safepoint()
 
-    if params.use_MPI && !iszero(first_waiting_block)
-        # MPI_Wait on the `first_waiting_block`'s remote neighbour
-        blk = block_at(grid, first_waiting_block)
-        for neighbour in blk.neighbours
-            !(neighbour isa RemoteTaskBlock) && continue
-
-            Communications.recv_completed(neighbour.comm_data) && continue
-            # Only wait for a single side, expecting that once one is done, there is more work to do.
-            Communications.wait_recv_completed(neighbour.comm_data)
-
-            return time_ns() - wait_start, true
-        end
-    end
-
     # Yield to the OS scheduler, in case some multithreading schenanigans are preventing us to
     # continue further (e.g. another process' thread is bound to the same core as this thread).
     # Wait twice as long as the previous time, starting from 2µs and up to 8ms
     µs_to_wait = 2^clamp(stop_count, 1, 13)
     Libc.systemsleep(µs_to_wait * 1e-6)  # this is `usleep` on Linux btw
-    # if stop_count > 30 && params.is_root && Threads.threadid() == 1
-        # println("thread 1 of root was sleeping ($stop_count in a row)")
-    # end
-    return time_ns() - wait_start, false
+    return time_ns() - wait_start
 end
 
 
@@ -242,13 +225,11 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         step_count = 0
         no_progress_count = 0
         total_wait_time = 0
-        total_mpi_waits = 0
         while step_count < max_step_count
             # Repeatedly parse through all blocks assigned to the current thread, each time advancing
             # them through the solver steps, until all of them are done with the cycle.
             all_finished_cycle = true
             no_progress = true
-            first_waiting_block = zero(eltype(thread_blocks_idx))
             for blk_pos in thread_blocks_idx
                 # One path for each type of block to avoid runtime dispatch
                 if in_grid(blk_pos, grid.static_sized_grid)
@@ -263,9 +244,6 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
 
                 all_finished_cycle &= new_state == SolverStep.NewCycle
                 no_progress &= prev_state == new_state
-                if prev_state == new_state && iszero(first_waiting_block)
-                    first_waiting_block = blk_pos
-                end
             end
             step_count += 1
             all_finished_cycle && break
@@ -282,15 +260,14 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
 
             if no_progress_count % params.busy_wait_limit == 0
                 # No block did any progress for more than `params.busy_wait_limit` calls to
-                # `block_state_machine`, to prevent deadlocks (caused by MPI or multithreading),
-                # we should stop busy waiting.
+                # `block_state_machine`, to identify deadlocks (caused by MPI or multithreading),
+                # we should limit how much busy waiting we can do.
                 if time_ns() - t_start > timeout
                     solver_error(:timeout, "cycle took too long in thread $tid")
                 end
                 stop_count = no_progress_count ÷ params.busy_wait_limit
-                wait_time, waited_for_mpi = stop_busy_waiting(params, grid, first_waiting_block, stop_count)
+                wait_time = stop_busy_waiting(params, grid, stop_count)
                 total_wait_time += wait_time
-                total_mpi_waits += waited_for_mpi
             end
         end
 
@@ -299,7 +276,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
             stop_count = no_progress_count ÷ params.busy_wait_limit
             push_log!(grid, tid, ThreadLogEvent(
                 grid, tid, step_count, no_progress_count, stop_count,
-                total_mpi_waits, total_wait_time, t_end - t_start
+                0, total_wait_time, t_end - t_start
             ))
         end
 
