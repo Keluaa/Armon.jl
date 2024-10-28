@@ -454,7 +454,7 @@ function init_MPI(params::ArmonParameters;
 
     P = Tuple(P)
     if length(P) != length(params.N)
-        solver_error(:config, "Mismatched dimensions: expected a grid of $(length(N)) processes, got: $(length(P))")
+        solver_error(:config, "Mismatched dimensions: expected a grid of $(length(params.N))-D processes, got: $(length(P))")
     end
 
     params.use_MPI = use_MPI

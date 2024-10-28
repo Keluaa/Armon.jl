@@ -846,6 +846,10 @@ function block_origin(grid::BlockGrid, pos, include_ghosts=false)
 end
 
 
+write_workload_distribution(filename, params::ArmonParameters, grid::BlockGrid; kwargs...) =
+    write_workload_distribution(filename, params, grid.grid_size, grid.threads_workload; kwargs...)
+
+
 function print_grid_dimensions(
     io::IO, grid_size::Tuple, static_grid::Tuple, static_block_size::Tuple,
     cell_size::Tuple, ghost; pad=20

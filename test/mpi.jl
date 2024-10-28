@@ -367,7 +367,7 @@ function test_halo_exchange(P, global_comm; opts...)
 end
 
 
-function test_distribution(P, global_comm, parts, grid_size)
+function test_matched_distribution(P, global_comm, parts, grid_size)
     ref_params = ref_params_for_sub_domain(:Sod, Float64, P; global_comm)
     comm = ref_params.cart_comm
 
@@ -378,46 +378,20 @@ function test_distribution(P, global_comm, parts, grid_size)
     )
     blk_grid = Armon.block_grid_from_workload(grid_size, workload)
 
-    # Basic distribution tests
     distrib_count = length.(workload)
     @MPI_test comm sum(distrib_count) == prod(grid_size)
 
     blk_grid = Armon.block_grid_from_workload(grid_size, workload)
     @MPI_test comm count(==(0), blk_grid) == 0  # All blocks are assigned to a thread
 
-    for axis in instances(Armon.Axis.T)  # TODO: dimension agnostic
-        # To avoid deadlocks the side checks must be correctly ordered
-        rank_dist = sum(ref_params.cart_coords)
-        side_order = (Armon.first_side(axis), Armon.last_side(axis))
-        isodd(rank_dist) && (side_order = reverse(side_order))
-        for side in side_order
-            if !Armon.has_neighbour(ref_params, side) || Armon.neighbour_at(ref_params, side) === ref_params.rank
-                # MPI tests are global to the communicator, and since this rank has no neighbours on
-                # that side there is nothing to test. In case of periodic domains, there is also the
-                # edge case where we are a neighbour to ourselves.
-                @MPI_test comm true
-                continue
-            end
+    distrib_ok = Armon.check_matched_distribution(blk_grid, comm; throw_error=false)
+    @MPI_test comm distrib_ok
 
-            # Get all elements along `side`
-            ax_pos = side in Armon.first_sides() ? 1 : grid_size[Int(axis)]
-            side_iter = CartesianIndices(Tuple(
-                ifelse.(1:length(grid_size) .== Int(axis), Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))
-            ))
-
-            side_workload = vec(blk_grid[side_iter])
-            other_side_workload = similar(side_workload)
-
-            # Exchange the side's distribution with the neighbour
-            other_rank = Armon.neighbour_at(ref_params, side)
-            MPI.Sendrecv!(side_workload, other_side_workload, comm;
-                dest=other_rank, sendtag=0, source=other_rank, recvtag=0
-            )
-
-            # For the distribution to be correct, the threads assigned to the blocks on the side must
-            # match.
-            @MPI_test comm side_workload == other_side_workload
-        end
+    if WRITE_FAILED && !distrib_ok
+        p_str = join(P, '×')
+        gs_str = join(grid_size, '×')
+        file = "matched_distrib_P=$(p_str)_parts=$(parts)_gs=$(gs_str).grid"
+        Armon.write_workload_distribution(file, ref_params, blk_grid)
     end
 end
 
@@ -637,7 +611,7 @@ end
         (4, 4),
         (5, 2),
         (2, 5),
-        (5, 5)
+        (5, 5),
     )
         enough_processes = prod(P) ≤ total_proc_count
         if enough_processes
@@ -678,7 +652,7 @@ end
         @testset "Match neighbours" begin
             @testset "$threads - $grid_size" for threads in (1, 3, 8, 37), grid_size in ((4, 4), (8, 1), (16, 15))
                 (!enough_processes || !proc_in_grid) && continue
-                test_distribution(P, comm, threads, grid_size)
+                test_matched_distribution(P, comm, threads, grid_size)
             end
         end
 

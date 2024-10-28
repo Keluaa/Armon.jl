@@ -359,23 +359,22 @@ function scotch_grid_matched_partition(grid_graph, strat, threads, grid_size, co
     dim = length(grid_size)
 
     # Get the neighbours which we will communicate with
-    # TODO: dimension agnostic
-    neighbours = [
-        Side.Left   => MPI.Cart_shift(comm, 0, -1)[2],
-        Side.Right  => MPI.Cart_shift(comm, 0,  1)[2],
-        Side.Bottom => MPI.Cart_shift(comm, 1, -1)[2],
-        Side.Top    => MPI.Cart_shift(comm, 1,  1)[2]
-    ]
-
+    our_rank = MPI.Comm_rank(comm)
     center_offset = coords .- center_pos
     center_dist = sum(abs.(center_offset))
-    recv_neighbours = filter(neighbours) do (side, rank)
+    recv_neighbours = Pair{Side.T, Int}[]
+    send_neighbours = Pair{Side.T, Int}[]
+    for axis in 1:dim, (side, offset) in zip(sides_along(Axis.T(axis)), (-1, +1))
+        neighbour_rank = MPI.Cart_shift(comm, axis-1, offset)[2]
+        neighbour_rank == MPI.PROC_NULL && continue
+        neighbour_rank == our_rank && continue  # ignore communications with ourselves
+        # Send to ranks father to the center, receive from ranks closer to the center
         rank_dist = sum(abs.(center_offset .+ offset_to(side)))
-        return rank != MPI.PROC_NULL && rank_dist ≤ center_dist
-    end
-    send_neighbours = filter(neighbours) do (side, rank)
-        rank_dist = sum(abs.(center_offset .+ offset_to(side)))
-        return rank != MPI.PROC_NULL && rank_dist > center_dist
+        if rank_dist > center_dist
+            push!(send_neighbours, side => neighbour_rank)
+        else
+            push!(recv_neighbours, side => neighbour_rank)
+        end
     end
 
     if is_center
@@ -534,7 +533,12 @@ function thread_workload_distribution(
         blk_grid = block_grid_from_workload(grid_size, threads_workload)
     end
     perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
-    check && check_workload(threads_workload, blk_grid)
+    if check
+        check_workload(threads_workload, blk_grid)
+        if match_neighbour_domains isa MPI.Comm
+            check_matched_distribution(blk_grid, match_neighbour_domains)
+        end
+    end
     return threads_workload
 end
 
@@ -598,4 +602,148 @@ function workload_eveness(threads_workload, block_weights, grid_size)
         uneveness += sum((block_weights[blk_indexes] .- mean_weight).^2)
     end
     return uneveness
+end
+
+
+function check_matched_distribution(workload_grid, comm::MPI.Comm; throw_error=false)
+    rank = MPI.Comm_rank(comm)
+    coords = MPI.Cart_coords(comm)
+    distrib_ok = true
+    total_errors = 0
+    for axis in 1:ndims(workload_grid)
+        # To avoid deadlocks the side checks must be correctly ordered
+        rank_dist = sum(coords)
+        side_order = sides_along(Axis.T(axis))
+        isodd(rank_dist) && (side_order = reverse(side_order))
+        for side in side_order
+            # TODO: better dimension agnostic with `first_side(side)`
+            other_rank = MPI.Cart_shift(comm, axis - 1, side in first_sides() ? -1 : +1)[2]
+
+            # Ignore periodic topologies when we are a neighbour to ourselves as we don't use MPI
+            # for communication in those cases.
+            other_rank ∈ (rank, MPI.PROC_NULL) && continue
+
+            # Get all elements along `side`
+            ax_pos = side in first_sides() ? 1 : size(workload_grid, axis)
+            side_iter = CartesianIndices(Tuple(
+                ifelse.(1:ndims(workload_grid) .== axis, Ref(ax_pos:ax_pos), axes(workload_grid))
+            ))
+
+            side_workload = vec(workload_grid[side_iter])
+            other_side_workload = similar(side_workload)
+
+            # Exchange the side's distribution with the neighbour
+            MPI.Sendrecv!(side_workload, other_side_workload, comm;
+                dest=other_rank, sendtag=0, source=other_rank, recvtag=0
+            )
+
+            # For the distribution to be correct, the threads assigned to the blocks on the side of
+            # both sub-domains must match.
+            diffs = count(((x, y),) -> x != y, zip(side_workload, other_side_workload))
+            total_errors += diffs
+            distrib_ok &= diffs == 0
+        end
+    end
+
+    distrib_ok = MPI.Allreduce(distrib_ok, &, comm)
+
+    if throw_error && !distrib_ok
+        error("mismatched distribution: $total_errors blocks are assigned different threads with the neighbouring ranks")
+    end
+
+    return distrib_ok
+end
+
+
+function write_workload_distribution(io::IO, workload_grid::Array{Int, N}, offset=zero(CartesianIndex{N})) where {N}
+    for (pos, tid) in pairs(IndexCartesian(), workload_grid)
+        # `x y thread_id`
+        join(io, Tuple(pos + offset), ' ')
+        println(io, ' ', tid)
+    end
+end
+
+
+"""
+    write_workload_distribution(
+        filename, params::ArmonParameters, workload_grid::Array{Int};
+        all_sub_domains=true, sub_domain_spacing=1, write_grid_size=true, with_comments=true
+    )
+    write_workload_distribution(filename, params, grid_size, threads_workload; kwargs...)
+    write_workload_distribution(filename, params, grid::BlockGrid; kwargs...)
+
+Write the assigned thread of each block of `grid` to `filename`.
+The format is `block_x block_y thread_id` per line.
+
+If `write_grid_size == true` the first line is the dimensions of the grid, including any spacing
+between sub-domains.
+
+If `all_sub_domains == true` then all MPI ranks write to the file, one at a time.
+This allows to store the whole block distribution of all blocks in the same file.
+
+Gnuplot (>= v6.0) can display the file using those commands (only for 2D grids):
+```gnuplot
+stats 'file.grid' u (mx=strcol(1),my=strcol(2)) every ::0:0:0:0 nooutput
+plot 'file.grid' skip 1 sparse matrix=(mx,my) origin=(1,1) with image
+```
+The first one reads the dimensions of the sparse grid from the first line of the file, the second
+does the display.
+
+Exactly `sub_domain_spacing` row/column are left blank to clearly separate sub-domains when
+viewing the file.
+"""
+function write_workload_distribution(
+    filename, params::ArmonParameters, workload_grid::Array{Int, N};
+    all_sub_domains=true, sub_domain_spacing=1, write_grid_size=true, with_comments=true
+) where {N}
+    grid_size = size(workload_grid)
+
+    # All ranks write their file in `write_dir`, then the root rank concatenates them all into `filename`
+    write_dir = params.is_root ? mktempdir() : nothing
+    write_dir = MPI.bcast(write_dir, params.cart_comm; root=params.root_rank)
+
+    # Format the temp file names so that they are concatenated in the right order each time.
+    padded_rank = lpad(string(params.rank), ndigits(params.proc_size), '0')
+    temp_file = joinpath(write_dir, padded_rank * ".grid")
+
+    open(temp_file, "w") do file
+        if params.is_root && write_grid_size
+            total_grid_size = grid_size .* params.proc_dims
+            total_grid_size = total_grid_size .+ (sub_domain_spacing .* (params.proc_dims .- 1))
+            join(file, total_grid_size, ' ')
+            println(file)
+        end
+
+        if all_sub_domains && params.use_MPI
+            if with_comments
+                params.is_root && println(file, "# Process grid: ", params.proc_dims)
+                println(file, "# Rank: ", params.cart_coords)
+            end
+
+            spacing = CartesianIndex(params.cart_coords) * sub_domain_spacing
+            offset = CartesianIndex(grid_size .* params.cart_coords)
+            offset = offset + spacing
+        else
+            offset = zero(CartesianIndex{N})
+        end
+
+        with_comments && println(file, "# Grid: ", grid_size)
+
+        write_workload_distribution(file, workload_grid, offset)
+    end
+
+    MPI.Barrier(params.cart_comm)
+
+    if params.is_root
+        cat_cmd = "cat $write_dir/*.grid > $filename"
+        run(`bash -c $cat_cmd`)
+    end
+
+    return
+end
+
+
+function write_workload_distribution(filename, params::ArmonParameters, grid_size, threads_workload; kwargs...)
+    workload_grid = block_grid_from_workload(grid_size, threads_workload)
+    return write_workload_distribution(filename, params, workload_grid; kwargs...)
 end
