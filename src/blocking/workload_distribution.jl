@@ -1,10 +1,10 @@
 
-function sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
+function sort_blocks_by_perimeter_first!(threads_workload, workload_grid, grid_size)
     function is_block_at_thread_perimeter(blk_pos, tid)
         for side in instances(Side.T)  # TODO: replace by `sides_of(length(blk_pos))`
             neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
             !in_grid(neighbour_pos, grid_size) && return true
-            blk_grid[neighbour_pos] != tid && return true
+            workload_grid[neighbour_pos] != tid && return true
         end
         return false
     end
@@ -51,19 +51,22 @@ end
 
 
 """
-    block_grid_from_workload(grid_size, threads_workload)
+    thread_workload_to_grid(grid_size, threads_workload)
 
 Convenience function to convert a `threads_workload` (result of [`thread_workload_distribution`](@ref))
-into an `Array` of `grid_size`, with each element assigned to the `tid` given by the distribution.
+into an `Array{Int}` of `grid_size`, with each element assigned to the `tid` given by the distribution.
 
+Then from the position of a block, `workload_grid[blk_pos]` would be the thread assigned to the block.
 This makes it easy to visualize the efficiency of the distribution.
+
+Unassigned blocks have their respective element set to `0`.
 """
-function block_grid_from_workload(grid_size, threads_workload)
-    blk_grid = zeros(Int, grid_size)
+function thread_workload_to_grid(grid_size, threads_workload)
+    workload_grid = zeros(Int, grid_size)
     for (tid, thread_workload) in enumerate(threads_workload)
-        blk_grid[thread_workload] .= tid
+        workload_grid[thread_workload] .= tid
     end
-    return blk_grid
+    return workload_grid
 end
 
 
@@ -530,29 +533,29 @@ function thread_workload_distribution(
     end
 
     if check || perimeter_first
-        blk_grid = block_grid_from_workload(grid_size, threads_workload)
+        workload_grid = thread_workload_to_grid(grid_size, threads_workload)
     end
-    perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
+    perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, workload_grid, grid_size)
     if check
-        check_workload(threads_workload, blk_grid)
+        check_workload(threads_workload, workload_grid)
         if match_neighbour_domains isa MPI.Comm
-            check_matched_distribution(blk_grid, match_neighbour_domains)
+            check_matched_distribution(workload_grid, match_neighbour_domains)
         end
     end
     return threads_workload
 end
 
 
-function check_workload(threads_workload, blk_grid)
-    unassigned_blocks = count(==(0), blk_grid)
+function check_workload(threads_workload, workload_grid)
+    unassigned_blocks = count(==(0), workload_grid)
     if unassigned_blocks > 0
         plurial = unassigned_blocks > 0 ? "blocks are" : "block is"
         error("invalid block distribution: $unassigned_blocks $plurial not assigned to a thread")
     end
 
     for (tid, workload) in enumerate(threads_workload), blk_pos in workload
-        blk_grid[blk_pos] == tid && continue
-        error("invalid block distribution: block $(Tuple(blk_pos)) is assigned to threads $(blk_grid[blk_pos]) and $tid")
+        workload_grid[blk_pos] == tid && continue
+        error("invalid block distribution: block $(Tuple(blk_pos)) is assigned to threads $(workload_grid[blk_pos]) and $tid")
     end
 
     return true
@@ -744,6 +747,6 @@ end
 
 
 function write_workload_distribution(filename, params::ArmonParameters, grid_size, threads_workload; kwargs...)
-    workload_grid = block_grid_from_workload(grid_size, threads_workload)
+    workload_grid = thread_workload_to_grid(grid_size, threads_workload)
     return write_workload_distribution(filename, params, workload_grid; kwargs...)
 end

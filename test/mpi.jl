@@ -376,22 +376,22 @@ function test_matched_distribution(P, global_comm, parts, grid_size)
         scotch=true, simple=false, perimeter_first=false, check=true,
         match_neighbour_domains=comm,
     )
-    blk_grid = Armon.block_grid_from_workload(grid_size, workload)
+    workload_grid = Armon.thread_workload_to_grid(grid_size, workload)
 
     distrib_count = length.(workload)
     @MPI_test comm sum(distrib_count) == prod(grid_size)
 
-    blk_grid = Armon.block_grid_from_workload(grid_size, workload)
-    @MPI_test comm count(==(0), blk_grid) == 0  # All blocks are assigned to a thread
+    workload_grid = Armon.thread_workload_to_grid(grid_size, workload)
+    @MPI_test comm count(==(0), workload_grid) == 0  # All blocks are assigned to a thread
 
-    distrib_ok = Armon.check_matched_distribution(blk_grid, comm; throw_error=false)
+    distrib_ok = Armon.check_matched_distribution(workload_grid, comm; throw_error=false)
     @MPI_test comm distrib_ok
 
     if WRITE_FAILED && !distrib_ok
         p_str = join(P, '×')
         gs_str = join(grid_size, '×')
         file = "matched_distrib_P=$(p_str)_parts=$(parts)_gs=$(gs_str).grid"
-        Armon.write_workload_distribution(file, ref_params, blk_grid)
+        Armon.write_workload_distribution(file, ref_params, workload_grid)
     end
 end
 
