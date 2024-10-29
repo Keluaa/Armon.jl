@@ -70,6 +70,13 @@ function thread_workload_to_grid(grid_size, threads_workload)
 end
 
 
+function thread_workload_from_grid(thread_count, workload_grid)
+    return map(1:thread_count) do tid
+        return findall(==(tid), workload_grid)
+    end
+end
+
+
 function grid_to_scotch_graph(grid_size; weighted=false,
     static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0
 )
@@ -352,6 +359,19 @@ function scotch_grid_matched_partition(grid_graph, strat, threads, grid_size, co
     # The partitioning is global among the processes of the communicator.
     # Neighbour processes will need the same threads associated with the blocks along sides they share.
 
+    # The first sub-domain does its partitioning as usual, and transmits all partitions of blocks on
+    # its sides to the neighbouring sub-domains. The transmitted block groups are taken as is by the
+    # neighbours, which only have to partition the blocks which aren't in those groups. Once done
+    # they transmit their new groups to the other neighbours, and the process repeats.
+    # This method is bad, and a better alternative would be to transmit only the blocks exactly on
+    # the edge of each sub-domain, and build the partitions using them as constraints. However, this
+    # isn't possible with SCOTCH, hence the variation of sending all groups who touch the edges.
+    # In very specific situations, it can lead to invalid matched partitions. Most of the time the
+    # partitions are of poor quality. However, this algorithm can handle sub-domains of different
+    # sizes.
+    # TODO: fix this by transmitting only the blocks on the edge, if there is a SCOTCH function to
+    # do what I want.
+
     # The sub-domain at the center of the grid is the one which initiates the partitioning.
     # We could also start from anywhere else, but the center is the most optimal one, as it is
     # the barycenter of the grid: it minimizes the number of waits required to complete the
@@ -434,11 +454,50 @@ function scotch_grid_matched_partition(grid_graph, strat, threads, grid_size, co
 end
 
 
+function scotch_grid_matched_partition_mirror(grid_graph, strat, threads, grid_size, comm::MPI.Comm; kwargs...)
+    # The partitioning is global among the processes of the communicator.
+    # Neighbour processes will need the same threads associated with the blocks along sides they share.
+
+    # The sub-domain at the center of the grid is the one which initiates the partitioning.
+    # Once it partitioned its blocks, it broadcasts the whole partitioning to all sub-domains.
+    # Then the other-subdomains will mirror this partitioning so that its sides matches those of its
+    # neighbours.
+    # Sub-domains at an odd distance of the center along an axis will mirror the partitioning along
+    # the next axis.
+    # This requires all sub-domains to have the same size.
+    # This method is less general than the other one, but it is 100% reliable, faster, and doesn't
+    # have any problems with the quality of the resulting partitioning.
+
+    # We could also start from anywhere else, but I chose the center of the Cartesian topology.
+    cart_size, _, coords = MPI.Cart_get(comm)
+    center_pos = fld.(cart_size .- 1, 2)
+    center_rank = MPI.Cart_rank(comm, center_pos)
+    is_center = center_rank == MPI.Comm_rank(comm)
+
+    if is_center
+        partition = scotch_grid_partition(grid_graph, strat, threads, grid_size; kwargs...)
+        workload_grid = thread_workload_to_grid(grid_size, partition)
+        MPI.Bcast!(workload_grid, comm; root=center_rank)
+    else
+        workload_grid = zeros(Int, grid_size)
+        MPI.Bcast!(workload_grid, comm; root=center_rank)
+
+        # Reverse each axis if the offset is odd
+        center_offset = coords .- center_pos
+        mirrored_axes = ifelse.(isodd.(center_offset), reverse.(axes(workload_grid)), axes(workload_grid))
+
+        partition = thread_workload_from_grid(threads, @view workload_grid[mirrored_axes...])
+    end
+
+    return partition
+end
+
+
 function scotch_grid_partition(
     threads, grid_size;
     strategy=:default, workload_tolerance=0, weighted=false,
     static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0,
-    match_neighbour_domains::Union{Bool, MPI.Comm}=false,
+    match_neighbour_domains::Union{Bool, MPI.Comm}=false, matching_method=:mirror,
     kwargs...
 )
     # TODO: for larger grids, using graph coarsening might be necessary (+ it may help the solver to reach better solutions)
@@ -456,6 +515,8 @@ function scotch_grid_partition(
 
     if match_neighbour_domains == false
         return scotch_grid_partition(graph, strat, threads, grid_size; weighted, kwargs...)
+    elseif matching_method === :mirror
+        return scotch_grid_matched_partition_mirror(graph, strat, threads, grid_size, match_neighbour_domains; weighted, kwargs...)
     else
         return scotch_grid_matched_partition(graph, strat, threads, grid_size, match_neighbour_domains; weighted, kwargs...)
     end
@@ -537,7 +598,7 @@ function thread_workload_distribution(
     end
     perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, workload_grid, grid_size)
     if check
-        check_workload(threads_workload, workload_grid)
+        check_workload(threads, threads_workload, workload_grid)
         if match_neighbour_domains isa MPI.Comm
             check_matched_distribution(workload_grid, match_neighbour_domains)
         end
@@ -546,7 +607,11 @@ function thread_workload_distribution(
 end
 
 
-function check_workload(threads_workload, workload_grid)
+function check_workload(threads, threads_workload, workload_grid)
+    if length(threads_workload) != threads
+        error("invalid block distribution: expected $threads parts, got $(length(threads_workload))")
+    end
+
     unassigned_blocks = count(==(0), workload_grid)
     if unassigned_blocks > 0
         plurial = unassigned_blocks > 0 ? "blocks are" : "block is"
@@ -608,7 +673,7 @@ function workload_eveness(threads_workload, block_weights, grid_size)
 end
 
 
-function check_matched_distribution(workload_grid, comm::MPI.Comm; throw_error=false)
+function check_matched_distribution(workload_grid, comm::MPI.Comm; throw_error=true)
     rank = MPI.Comm_rank(comm)
     coords = MPI.Cart_coords(comm)
     distrib_ok = true
@@ -738,7 +803,7 @@ function write_workload_distribution(
     MPI.Barrier(params.cart_comm)
 
     if params.is_root
-        cat_cmd = "cat $write_dir/*.grid > $filename"
+        cat_cmd = "cat $write_dir/*.grid > \"$filename\""
         run(`bash -c $cat_cmd`)
     end
 
