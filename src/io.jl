@@ -1,5 +1,85 @@
 
-# TODO: use hdf5 for much more efficient read/write
+"""
+    AbstractSolverIO
+
+Base type for file input/output formats.
+"""
+abstract type AbstractSolverIO end
+
+
+"""
+    supports_mpi(::AbstractSolverIO)
+
+If the file format supports MPI, then all sub-domains will write to the same file at the
+same time.
+Otherwise, one file is written per sub-domain, with `"_\$(join(params.proc_dims))"` appended
+to the end of the file name.
+"""
+function supports_mpi end
+
+
+"""
+    supports_threads(::AbstractSolverIO)
+
+If the file format supports multiple threads concurrently reading and writing to the same
+file.
+If not, then calls to 
+"""
+function supports_threads end
+
+
+"""
+    supports_temporal_data(::AbstractSolverIO)
+
+If the file format supports writing temporal data, i.e. storing data of different cycle to
+the same file.
+Otherwise, one file is written per cycle (when )
+"""
+function supports_temporal_data end
+
+
+"""
+    domain_writer(format::Symbol, filename::String, params::ArmonParameters, grid::BlockGrid; vars=saved_vars(), kwargs...)
+    domain_writer(::Val{format},  filename::String, params::ArmonParameters, grid::BlockGrid; vars=saved_vars(), kwargs...)
+
+Create a new file for the given `format`, under the prefix `filename`, for the domain
+represented by `params` and `grid`.
+
+`vars` are the cell variables to write, it is a `Tuple` of `Symbol`s.
+
+`kwargs` are specific to the `format`.
+"""
+domain_writer(format::Symbol, file, params, grid; kwargs...) =
+    domain_writer(Val(format), file, params, grid; kwargs...)
+
+
+struct CSVSolverIO <: AbstractSolverIO
+    file      :: IO
+    vars      :: Tuple{Vararg{Symbol}}
+    precision :: Int
+end
+
+supports_mpi(::CSVSolverIO) = false
+supports_threads(::CSVSolverIO) = false
+supports_temporal_data(::CSVSolverIO) = false
+
+
+function domain_writer(::Val{:csv}, filename::AbstractString, params::ArmonParameters, grid::BlockGrid; kwargs...)
+    file = open(filename, "w")
+    return domain_writer(::Val{:csv}, file, params, grid; kwargs...)
+end
+
+function domain_writer(
+    ::Val{:csv}, file::IO, params::ArmonParameters{T}, grid::BlockGrid;
+    vars=saved_vars(), precision=nothing, 
+) where {T}
+    if isnothing(precision)
+        precision = T == Float64 ? 17 : 9  # Exact decimal output by default
+    end
+    return CSVSolverIO(file, vars, precision)
+end
+
+# TODO
 
 function write_blocks_to_file(
     params::ArmonParameters, grid::BlockGrid, file::IO, row_iter_params...;

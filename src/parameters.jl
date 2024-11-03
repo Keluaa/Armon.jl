@@ -260,12 +260,6 @@ Will write all `saved_vars()` to 3 output files, one for the middle X row, anoth
 Y column, and another for the diagonal. If `write_ghosts=true`, ghost cells will also be included.
 
 
-    output_precision = nothing
-
-Numbers are saved with `output_precision` digits of precision. Defaults to enough numbers for an
-exact decimal representation.
-
-
     animation_step = 0
 
 If `animation_step ≥ 1`, then every `animation_step` cycles, variables will be saved as with
@@ -323,7 +317,6 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams, KtContext <: Ke
     write_output::Bool
     write_ghosts::Bool
     write_slices::Bool
-    output_precision::Int
     animation_step::Int
     measure_time::Bool
     timer::TimerOutput
@@ -749,23 +742,19 @@ end
 
 function init_output(params::ArmonParameters{T};
     silent = 0, output_dir = ".", output_file = "output",
-    write_output = false, write_ghosts = false, write_slices = false, output_precision = nothing,
+    file_format = :csv, filename = "output", write_params = (;),  # TODO
+    write_output = false, write_ghosts = false, write_slices = false,
     animation_step = 0,
     compare = false, is_ref = false, comparison_tolerance = 1e-10,
     check_result = false, return_data = false,
     options...
 ) where {T}
-    if isnothing(output_precision)
-        output_precision = T == Float64 ? 17 : 9  # Exact decimal output by default
-    end
-
     params.silent = silent
     params.output_dir = output_dir
     params.output_file = output_file
     params.write_output = write_output
     params.write_ghosts = write_ghosts
     params.write_slices = write_slices
-    params.output_precision = output_precision
     params.animation_step = animation_step
     params.compare = compare
     params.is_ref = is_ref
@@ -906,7 +895,6 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
 
     if p.write_output || p.compare
         print_parameter(io, pad, "write output", p.write_output, nl=false)
-        print(io, " (precision: $(p.output_precision) digits)")
         println(io, p.write_ghosts ? "with ghosts" : "")
         print_parameter(io, pad, "to", "'$(p.output_file)'")
         p.write_slices && print_parameter(io, pad, "write slices", p.write_slices)
