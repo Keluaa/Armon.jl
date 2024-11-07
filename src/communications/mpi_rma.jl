@@ -163,3 +163,4 @@ function wait_send_completed end
 function recv_completed end
 function wait_recv_completed end
 
+function finalize_comm! end

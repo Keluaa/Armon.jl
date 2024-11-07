@@ -1,5 +1,6 @@
 
 mutable struct MPIPartitionedP2PGlobalInfo{A}
+    model          # :: MPIPartitionedCommunicationModel
     send_buffer      :: MPI.Buffer{A}  # Global send buffer
     recv_buffer      :: MPI.Buffer{A}  # Global recv buffer
     send_request     :: PartitionedRequest
@@ -12,6 +13,7 @@ mutable struct MPIPartitionedP2PGlobalInfo{A}
     total_partitions :: Int
     rank             :: Int
     side             :: Int
+    buffer_size      :: Int
     tag              :: Int
 end
 
@@ -46,8 +48,8 @@ Options:
 struct MPIPartitionedCommunicationModel <: AbstractCommunicationModel
     comm           :: MPI.Comm
     partition_size :: Int
-    # Dict of all initialized partitioned communications with the other rank+side
-    partitions     :: Dict{Tuple{Int, Int}, MPIPartitionedP2PGlobalInfo}
+    # Dict of all initialized partitioned communications with the other rank+side+total_size
+    partitions     :: Dict{Tuple{Int, Int, Int}, MPIPartitionedP2PGlobalInfo}
     lock           :: ReentrantLock  # lock for dict accesses
 end
 
@@ -117,21 +119,17 @@ function build_partitioned_communication(model::MPIPartitionedCommunicationModel
     MPI.Start(recv_req)
 
     global_c_info = MPIPartitionedP2PGlobalInfo{array_type}(
+        model,
         send_buffer, recv_buffer,
         send_req, recv_req,
         Atomic{Int}(0),
         Atomic{Bool}(false),
         Atomic{Int}(0),
         Atomic{Int}(0), Atomic{Int}(0),
-        total_partitions, rank, side, tag
+        total_partitions, rank, side, required_buffer_size, tag
     )
 
-    finalizer(global_c_info) do c_obj
-        # Cancel the active receive request, as it would remain always active otherwise
-        if !MPI.Finalized() && !MPI.Test(c_obj.recv_request)
-            MPI.Cancel!(c_obj.recv_request)
-        end
-    end
+    finalizer(finalize_comm!, global_c_info)
 
     return global_c_info
 end
@@ -141,10 +139,10 @@ function init_exchange(
     model::MPIPartitionedCommunicationModel,
     rank, side, side_pos, array_type, buffer_size, total_side_buffer_size
 )
-    # Get (or create) the partition communication for this combinaison of rank+side.
+    # Get (or create) the partition communication for this combinaison of rank+side+total_size.
     # The first thread to get here will initialize the whole communication.
     partition_info = lock(model.lock) do
-        partition_key = (rank, side)
+        partition_key = (rank, side, total_side_buffer_size)
         return get!(model.partitions, partition_key) do
             return build_partitioned_communication(model, rank, side, array_type, total_side_buffer_size)
         end
@@ -163,7 +161,9 @@ function init_exchange(
         # In order for this to be correct, it must be the last buffer, otherwise our communication
         # buffer would be discontinuous if the buffer size isn't a multiple of the partition size,
         # and the next partitions would also need to be shifted.
-        error("partitions with a size ≠ `partition_size` must be at the end of the global buffer")
+        error("partitions with a size ≠ `partition_size` must be at the end of the global buffer, got \
+               buffer_size=$buffer_size ($num_partitions partitions of size $(model.partition_size)) \
+               at side_pos=$side_pos (out of $(partition_info.total_partitions) total partitions)")
     end
 
     global_buffer_offset = (first(partition_range) - 1) * model.partition_size
@@ -176,7 +176,9 @@ function init_exchange(
     return MPIPartitionedP2P{expected_buffer_type}(
         model, partition_info, side_pos, partition_range,
         local_send_buffer, local_recv_buffer,
-        0, 0
+        # Copying the cycle numbers of the global state is only useful when the global state is reused
+        # for another set of exchanges, then the new partitions must be in sync with the global state.
+        (@atomic partition_info.send_cycle.x), (@atomic partition_info.recv_cycle.x)
     )
 end
 
@@ -186,16 +188,17 @@ function try_acquire_send_buffer!(c::MPIPartitionedP2P)
     # partition from being ready, this is thread-safe.
     (@atomic c.global_info.send_cycle.x) == c.send_cycle && return c.local_send_buffer
     # Otherwise we must explicitly check the request
-    return atomic_lock!(c.global_info.send_lock) do  # non-blocking lock
+    ok = atomic_lock!(c.global_info.send_lock) do  # non-blocking lock
         # Another thread could have done the job while we were acquiring the lock, so we must check again
-        (@atomic c.global_info.send_cycle.x) == c.send_cycle && return c.local_send_buffer
+        (@atomic c.global_info.send_cycle.x) == c.send_cycle && return true
         completed = MPI.Test(c.global_info.send_request)
         if completed
             @atomic c.global_info.send_cycle.x += 1
             @atomic c.global_info.send_started.x = false
         end
-        return completed ? c.local_send_buffer : nothing
+        return completed
     end
+    return ok ? c.local_send_buffer : nothing
 end
 
 
@@ -248,10 +251,12 @@ function send_completed(c::MPIPartitionedP2P, wait=false)
 
     return atomic_lock!(c.global_info.send_lock) do  # non-blocking lock
         # Another thread could have done the job while we were acquiring the lock, so we must check again
+        !(@atomic c.global_info.send_started.x) && return true
+
         previously_not_completed = (@atomic c.global_info.send_cycle.x) != c.send_cycle
         if !previously_not_completed
             # If another thread completed the request and started the next one, we mustn't test it as
-            # the result wouldn't be relevent for this partition.
+            # the result wouldn't be relevant for this partition.
             return true
         end
 
@@ -327,4 +332,29 @@ function wait_recv_completed(c::MPIPartitionedP2P)
     end
     res === :time_out && timeout_error && wait_lock_timeout(10.0)  # unhelpful error
     return true
+end
+
+
+finalize_comm!(c::MPIPartitionedP2P) = finalize_comm!(c.global_info)
+function finalize_comm!(gi::MPIPartitionedP2PGlobalInfo)
+    MPI.Finalized() && return
+
+    prev_send_lock = (@atomicswap gi.send_lock.x = -1)
+    prev_send_lock == -1 && return  # another thread already did the job
+    if prev_send_lock != 0
+        # `@async` since IOs in finalizers is dangerous
+        @async @warn "the communication object was still in use, \
+                      `finalize_comm!` must be called when it isn't used by other threads"
+    end
+
+    !MPI.Test(gi.recv_request) && MPI.Cancel!(gi.recv_request)
+
+    lock(gi.model.lock) do
+        partition_key = (gi.rank, gi.side, gi.buffer_size)
+        delete!(gi.model.partitions, partition_key)
+    end
+
+    # Free all global requests
+    finalize(gi.send_request)
+    finalize(gi.recv_request)
 end

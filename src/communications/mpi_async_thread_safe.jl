@@ -56,12 +56,7 @@ function MPIAsyncSafeP2P(model, send::A, recv::A, rank, side, side_pos) where {A
         (; send=MPI.Request(), recv=MPI.Request()),
     ), 1, 2, Atomic{Int}(0), Atomic{Int}(0), rank, side, side_pos)
 
-    finalizer(c) do c_obj
-        # Cancel the active receive request, as they are always active otherwise
-        if !MPI.Finalized() && !MPI.Test(c_obj.requests[c_obj.recv_state].recv)
-            MPI.Cancel!(c_obj.requests[c_obj.recv_state].recv)
-        end
-    end
+    finalizer(finalize_comm!, c)
 
     return c
 end
@@ -159,6 +154,18 @@ function wait_recv_completed(c::MPIAsyncSafeP2P)
         MPI.Wait(c.requests[c.recv_state].recv)
         return true
     end
+end
+
+
+function finalize_comm!(c::MPIAsyncSafeP2P)
+    MPI.Finalized() && return
+    if !MPI.Test(c.requests[c.recv_state].recv)
+        MPI.Cancel!(c.requests[c.recv_state].recv)
+    end
+    finalize(c.requests[1].send)
+    finalize(c.requests[1].recv)
+    finalize(c.requests[2].send)
+    finalize(c.requests[2].recv)
 end
 
 
@@ -272,3 +279,7 @@ release_recv_buffer!(c::MPIAsyncSafeCollective) = release_atomic_lock!(c.recv_lo
 
 recv_completed(c::MPIAsyncSafeCollective) = send_completed(c)
 wait_recv_completed(c::MPIAsyncSafeCollective) = wait_send_completed(c)
+
+function finalize_comm!(c::MPIAsyncSafeCollective)
+    c.model.persistant_reduction && finalize(c.request)
+end

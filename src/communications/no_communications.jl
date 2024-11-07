@@ -51,3 +51,5 @@ release_recv_buffer!(::DummyCommunication) = nothing
 
 recv_completed(::DummyCommunication) = true
 wait_recv_completed(::DummyCommunication) = true
+
+finalize_comm!(::DummyCommunication) = nothing

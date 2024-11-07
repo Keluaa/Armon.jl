@@ -64,6 +64,8 @@ release_recv_buffer!(::MPISyncP2P) = nothing
 recv_completed(::MPISyncP2P) = true
 wait_recv_completed(::MPISyncP2P) = true
 
+finalize_comm!(::MPISyncP2P) = nothing
+
 
 struct MPISyncCollective{A} <: AbstractCommunication{A}
     model       :: MPISyncCommunicationModel
@@ -102,3 +104,5 @@ release_recv_buffer!(::MPISyncCollective) = nothing
 
 recv_completed(::MPISyncCollective) = true
 wait_recv_completed(::MPISyncCollective) = true
+
+finalize_comm!(::MPISyncCollective) = nothing

@@ -295,6 +295,21 @@ For thread-safe [`AbstractCommunicationModel`](@ref)s, if another thread is wait
 function wait_recv_completed end
 
 
+"""
+    finalize_comm!(comm::AbstractCommunication)
+
+Finalize `comm` and free global ressources associated with it.
+`comm` is unusable afterward, much like a call to `finalize`.
+
+This call is thread-safe and supposes that no other thread is using any buffers, or starting another
+communication.
+
+For some models (such as [`MPIPartitionedCommunicationModel`](@ref)), this is a necessary step to
+ensure no requests are kept active, possibly affecting future MPI calls by mismatching requests.
+"""
+function finalize_comm! end
+
+
 include("mpi_extra.jl")
 include("empty_communication.jl")
 include("no_communications.jl")

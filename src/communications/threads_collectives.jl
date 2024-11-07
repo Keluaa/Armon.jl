@@ -230,3 +230,8 @@ end
 function wait_recv_completed(c::ThreadCollective)
     # TODO
 end
+
+
+function finalize_comm!(c::ThreadCollective)
+    # TODO
+end
