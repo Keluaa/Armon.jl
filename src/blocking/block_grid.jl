@@ -105,9 +105,8 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     # Compute the total amount of cells in remote buffers for each axis. Since both sides of an axis
     # share the same dimensions, they will have the same size.
     total_side_buffer_sizes = map(instances(Axis.T)) do axis
-        # Total buffer size is the amount of real cells along other axes, times the number of ghost
-        # cells (for the current axis/side, which is always `nghost`).
-        side_size = ifelse.(instances(Axis.T) .== axis, params.nghost, cell_size)
+        # Total buffer size is the amount of real cells along other axes
+        side_size = ifelse.(instances(Axis.T) .== axis, 1, cell_size)
         return prod(side_size)
     end
 
@@ -159,6 +158,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                     global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
 
                     total_side_buffer_size = total_side_buffer_sizes[Integer(axis_of(side))]
+                    total_side_buffer_size *= length(comm_vars()) * params.nghost
 
                     comm_model = params.comm_models[tid]
                     RemoteTaskBlock{buffer_array}(

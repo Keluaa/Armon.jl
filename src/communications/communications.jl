@@ -296,6 +296,7 @@ function wait_recv_completed end
 
 
 include("mpi_extra.jl")
+include("empty_communication.jl")
 include("no_communications.jl")
 include("mpi_sync_communications.jl")
 include("mpi_async_communications.jl")

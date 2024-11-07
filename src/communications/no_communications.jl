@@ -24,10 +24,6 @@ unsafe_send_buffer(c::DummyCommunication) = (c.buffer,)
 unsafe_recv_buffer(c::DummyCommunication) = (c.buffer,)
 exchange_position(::DummyCommunication) = (; rank=1, side=1, side_pos=1)
 
-is_thread_safe(::DummyCommunication) = is_thread_safe(NoCommunicationModel())
-is_async(::DummyCommunication) = is_async(NoCommunicationModel())
-uses_global_buffers(::DummyCommunication) = uses_global_buffers(NoCommunicationModel())
-
 function init_exchange(
     ::NoCommunicationModel,
     rank, side, side_pos, array_type, buffer_size, total_side_buffer_size
