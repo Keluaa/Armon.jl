@@ -39,14 +39,16 @@ function write_reference_data(
     dt, cycles::Int; options...
 )
     @printf(ref_file, "%#.15g, %d\n", dt, cycles)
-    Armon.write_blocks_to_file(ref_params, ref_data, ref_file; options...)
+    writer = Armon.domain_writer(:csv, ref_file, ref_params, ref_data)
+    Armon.write_blocks_to_file(writer, ref_params, ref_data; options...)
 end
 
 
 function read_reference_data(ref_params::ArmonParameters, ref_file::IO, ref_data::BlockGrid; options...)
     ref_dt = parse(Armon.data_type(ref_params), readuntil(ref_file, ','))
     ref_cycles = parse(Int, readuntil(ref_file, '\n'))
-    Armon.read_data_from_file(ref_params, ref_data, ref_file; options...)
+    reader = Armon.domain_writer(:csv, ref_file, ref_params, ref_data)
+    Armon.read_domain_from_file(reader, ref_params, ref_data; options...)
     return ref_dt, ref_cycles
 end
 

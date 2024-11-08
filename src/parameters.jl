@@ -243,21 +243,21 @@ after initialization).
 print anything.
 
 
-    output_dir = ".", output_file = "output"
+    output_format = :csv, output_file = "./output", output_options = (;),
 
-`joinpath(output_dir, output_file)` will be path to the output file.
+Write the resulting data to `output_file` using `output_format` (either `:csv` or `:hdf5`).
+`output_options` are specific to the format.
 
 
-    write_output = false, write_ghosts = false
+    write_output = false
 
-`write_output=true` will write all `saved_vars()` to the output file.
-If `write_ghosts=true`, ghost cells will also be included.
+`write_output=true` will write all `saved_vars()` to the `output_file`.
 
 
     write_slices = false
 
 Will write all `saved_vars()` to 3 output files, one for the middle X row, another for the middle
-Y column, and another for the diagonal. If `write_ghosts=true`, ghost cells will also be included.
+Y column, and another for the diagonal.
 
 
     animation_step = 0
@@ -269,8 +269,8 @@ If `animation_step ≥ 1`, then every `animation_step` cycles, variables will be
     compare = false, is_ref = false, comparison_tolerance = 1e-10
 
 If `compare=true`, then at every sub step of each iteration of the solver all variables will:
- - (`is_ref=false`) be compared with a reference file found in `output_dir`
- - (`is_ref=true`) be saved to a reference file in `output_dir`
+ - (`is_ref=false`) be compared with a reference file found with the prefix `output_file`
+ - (`is_ref=true`) be saved to a reference file with the prefix `output_file`
 When comparing, a relative `comparison_tolerance` (the `rtol` kwarg of `isapprox`) is accepted
 between values.
 
@@ -312,10 +312,9 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams, KtContext <: Ke
 
     # Output
     silent::Int
-    output_dir::String
+    output_format::Symbol
     output_file::String
     write_output::Bool
-    write_ghosts::Bool
     write_slices::Bool
     animation_step::Int
     measure_time::Bool
@@ -741,19 +740,20 @@ end
 
 
 function init_output(params::ArmonParameters{T};
-    silent = 0, output_dir = ".", output_file = "output",
-    file_format = :csv, filename = "output", write_params = (;),  # TODO
-    write_output = false, write_ghosts = false, write_slices = false,
+    silent = 0,
+    output_format = :csv, output_file = "./output", output_options = (;),
+    write_output = false, write_slices = false,
     animation_step = 0,
     compare = false, is_ref = false, comparison_tolerance = 1e-10,
     check_result = false, return_data = false,
     options...
 ) where {T}
     params.silent = silent
-    params.output_dir = output_dir
+    params.output_format = output_format
     params.output_file = output_file
+    params.output_options = output_options
+
     params.write_output = write_output
-    params.write_ghosts = write_ghosts
     params.write_slices = write_slices
     params.animation_step = animation_step
     params.compare = compare

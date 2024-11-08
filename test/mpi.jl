@@ -351,10 +351,7 @@ function test_halo_exchange(P, global_comm)
         global_diff_count = MPI.Allreduce(total_diff, MPI.SUM, global_comm)
         if global_diff_count > 0
             p_str = join(P, '×')
-            Armon.write_sub_domain_file(
-                ref_params, block_grid, "xchg_$(p_str)";
-                no_msg=true, all_ghosts=true, vars=(:x, :y, :ρ)
-            )
+            Armon.write_sub_domain_file(ref_params, block_grid, "xchg_$(p_str)"; ghosts=true, vars=(:x, :y, :ρ))
         end
     end
 
@@ -391,8 +388,8 @@ function test_reference(prefix, comm, test, type, P; kwargs...)
         if global_diff_count > 0 && diff_count >= 0
             prefix *= isempty(prefix) ? "" : "_"
             p_str = join(P, '×')
-            Armon.write_sub_domain_file(ref_params, data, "$(prefix)test_$(test)_$(type)_$(p_str)"; no_msg=true)
-            Armon.write_sub_domain_file(ref_params, ref_data, "$(prefix)ref_$(test)_$(type)_$(p_str)"; no_msg=true)
+            Armon.write_sub_domain_file(ref_params, data, "$(prefix)test_$(test)_$(type)_$(p_str)")
+            Armon.write_sub_domain_file(ref_params, ref_data, "$(prefix)ref_$(test)_$(type)_$(p_str)")
         end
     end
 

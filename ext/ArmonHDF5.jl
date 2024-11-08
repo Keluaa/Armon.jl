@@ -1,6 +1,7 @@
 module ArmonHDF5
 
 using Armon
+import Armon: ObjOrType
 using MPI
 import HDF5
 
@@ -14,22 +15,61 @@ struct HDF5BlockGridInfo{D} <: Armon.AbstractSolverIO
     cells         :: Dict{Symbol, HDF5.Dataset}
 end
 
-Armon.supports_mpi(::HDF5BlockGridInfo) = true  # Suppose `HDF5.has_parallel()` returns `true`
-Armon.supports_threads(::HDF5BlockGridInfo) = HDF5.API.h5_is_library_threadsafe()
-Armon.supports_temporal_data(::HDF5BlockGridInfo) = true  # TODO
+Armon.supports_mpi(::ObjOrType{HDF5BlockGridInfo}) = true  # Suppose `HDF5.has_parallel()` returns `true`
+Armon.supports_threads(::ObjOrType{HDF5BlockGridInfo}) = HDF5.API.h5_is_library_threadsafe()
+Armon.supports_temporal_data(::ObjOrType{HDF5BlockGridInfo}) = true  # TODO
+Armon.file_extension(::ObjOrType{HDF5BlockGridInfo}) = ".vtkhdf"
+Armon.format_from_name(::Val{:hdf5}) = HDF5BlockGridInfo
 
 
-function Armon.domain_writer(::Val{:hdf5}, filename::String, params::ArmonParameters, grid::BlockGrid; kwargs...)
-    file = create_file(filename, params)
+function Armon.domain_writer(
+    ::Type{HDF5BlockGridInfo}, filename::String,
+    params::ArmonParameters, grid::BlockGrid;
+    kwargs...
+)
+    file_path = Armon.build_file_path(HDF5BlockGridInfo, filename, params, grid.global_dt.cycle)
+    file = create_file(file_path, params)
     return write_domain_header(file, params, grid; kwargs...)
 end
 
-function Armon.domain_writer(::Val{:hdf5}, file::HDF5.File, params::ArmonParameters, grid::BlockGrid; kwargs...)
+
+function Armon.domain_writer(
+    ::Type{HDF5BlockGridInfo}, file::HDF5.File,
+    params::ArmonParameters, grid::BlockGrid;
+    kwargs...
+)
     return write_domain_header(file, params, grid; kwargs...)
 end
+
+
+function Armon.domain_reader(
+    ::Type{HDF5BlockGridInfo}, filename::AbstractString,
+    params::ArmonParameters{T}, cycle=nothing;
+    kwargs...
+)
+    file_path = Armon.build_file_path(HDF5BlockGridInfo, filename, params, cycle)
+    return  # TODO
+end
+
+
+function Armon.domain_reader(
+    ::Type{HDF5BlockGridInfo}, file::IO,
+    params::ArmonParameters{T}, cycle=nothing;
+    kwargs...
+) where {T}
+    return  # TODO
+end
+
+
+Base.close(info::HDF5BlockGridInfo) = close(info.file)
 
 
 function create_file(filename::AbstractString, params::ArmonParameters)
+    # TODO: mark metadata access as collective for higher performance
+    #  => H5Pset_coll_metadata_write
+    #  => H5Pset_all_coll_metadata_ops
+    # TODO: mark `AMRBox` as `dxpl_mpio=:collective`, since all processes write only once to that dataset
+    # TODO: maybe mark all variable datasets as `dxpl_mpio=:collective` (at least when we know that all processes have the same number of blocks)
     return if params.use_MPI
         h5open(filename; driver=HDF5.Drivers.MPIO(params.cart_comm), dxpl_mpio=:collective)
     else
@@ -38,16 +78,19 @@ function create_file(filename::AbstractString, params::ArmonParameters)
 end
 
 
-function write_domain(file::HDF5.File, params::ArmonParameters, grid::BlockGrid)
-    writer_info = if haskey(file, "VTKHDF")
-        get_writer_info(file, params, grid) 
-    else
-        write_domain_header(file, params, grid)
-    end
-
-    write_AMR_boxes!(writer_info.boxes, params, grid)
-    write_domain!(writer_info.cells, grid)
+function Armon.write_domain_to_file(info::HDF5BlockGridInfo, params::ArmonParameters, grid::BlockGrid)
+    write_AMR_boxes!(info.boxes, params, grid)
+    write_domain!(info.cells, grid)
 end
+
+
+function Armon.read_domain_from_file(info::HDF5BlockGridInfo, params::ArmonParameters, grid::BlockGrid)
+    # TODO
+end
+
+
+Armon.write_block_to_file(info::HDF5BlockGridInfo, ::ArmonParameters, blk::Armon.LocalTaskBlock) = write_block!(info, blk)
+Armon.read_block_from_file(info::HDF5BlockGridInfo, ::ArmonParameters, blk::Armon.LocalTaskBlock) = read_block!(blk, info)
 
 
 function compute_global_offsets(params::ArmonParameters, grid::BlockGrid)
@@ -82,7 +125,7 @@ function compute_boxes_offsets(grid::BlockGrid)
 end
 
 
-function get_writer_info(file::HDF5.File, params::ArmonParameters, grid::BlockGrid)
+function read_domain_header(file::HDF5.File, params::ArmonParameters, grid::BlockGrid)
     l0 = file["VTKHDF"]["Level0"]
     boxes_bb = l0["AMRBox"]
     cells = l0["CellData"]
@@ -139,6 +182,14 @@ function write_domain_header(
     boxes_bb = HDF5.create_dataset(l0, "AMRBox", Int64, (6, total_blocks))
     boxes_offsets = boxes_offsets(grid)
 
+    # TODO: idea to solve the uneven domain issue, which prevent smart chunking:
+    #   => compute the maximum amount of cells per domain
+    #   => `domain_file_size = chunk_size * cld(max_cells, chunk_size)`
+    #   => then each domain writes to its portion of the dataset: `(1:my_cell_count) .+ (domain_file_size * (rank-1) - 1)`
+    #   => some cells will remain undefined in the file, but the `AMRBox`es will not reference them
+    #   => then we know that two ranks will never access the same chunk, reducing contention? improving performance?
+    #   => the extra cost in file size should be small, as long as the chunk size isn't too big
+    #   => this could also remove the need for some `MPI_Exscan` operations
     cells = HDF5.create_group(l0, "CellData")
     vars = setdiff(vars, (:x, :y, :z))
     var_size = (var in Armon.dim_vars() ? dim : 1 for var in vars)
