@@ -48,7 +48,8 @@ function Armon.domain_reader(
     kwargs...
 )
     file_path = Armon.build_file_path(HDF5BlockGridInfo, filename, params, cycle)
-    return  # TODO
+    error("NYI")  # TODO
+    return
 end
 
 
@@ -57,7 +58,8 @@ function Armon.domain_reader(
     params::ArmonParameters{T}, cycle=nothing;
     kwargs...
 ) where {T}
-    return  # TODO
+    error("NYI")  # TODO
+    return
 end
 
 
@@ -85,7 +87,7 @@ end
 
 
 function Armon.read_domain_from_file(info::HDF5BlockGridInfo, params::ArmonParameters, grid::BlockGrid)
-    # TODO
+    error("NYI")  # TODO
 end
 
 

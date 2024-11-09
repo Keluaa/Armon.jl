@@ -101,13 +101,12 @@ function step_checkpoint(params::ArmonParameters, state::SolverState, grid::Bloc
     device_to_host!(grid)
     wait(params)
 
-    step_file_name = params.output_file * "_" * step_label
     if state.global_dt.cycle == 0 && step_label == "time_step"
         axis = Axis.X
     else
         axis = state.axis
     end
-    step_file_name *= "_" * string(axis)[1]
+    step_file_name = params.output_file * "_" * string(axis)[1] * "_" * step_label
 
     if params.is_ref
         if step_label == "time_step"

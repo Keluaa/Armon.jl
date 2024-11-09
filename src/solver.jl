@@ -324,7 +324,7 @@ end
 
 
 function time_loop(params::ArmonParameters, grid::BlockGrid)
-    (; maxtime, maxcycle, silent, animation_step, is_root, initial_mass, initial_energy) = params
+    (; maxtime, maxcycle, silent, write_freq, is_root, initial_mass, initial_energy) = params
 
     reset!(grid, params)
     (; global_dt) = grid
@@ -373,11 +373,9 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
             conservation_vars(params, grid)
         end
 
-        if animation_step != 0 && (global_dt.cycle - 1) % animation_step == 0
+        if write_freq != 0 && (global_dt.cycle - 1) % write_freq == 0
             wait(params)
-            frame_index = (global_dt.cycle - 1) ÷ animation_step
-            frame_file = joinpath("anim", params.output_file) * "_" * @sprintf("%03d", frame_index)
-            write_sub_domain_file(params, grid, frame_file)
+            write_sub_domain_file(params, grid, params.output_file)
         end
     end
 
@@ -434,14 +432,6 @@ function armon(params::ArmonParameters{T}) where T
         rank > 0 && MPI.Recv(Bool, rank-1, 1, params.global_comm)
         println(rank_info)
         rank < proc_size-1 && MPI.Send(true, rank+1, 1, params.global_comm)
-    end
-
-    if is_root && params.animation_step != 0
-        if isdir("anim")
-            rm.("anim/" .* readdir("anim"))
-        else
-            mkdir("anim")
-        end
     end
 
     if params.measure_time
@@ -503,12 +493,11 @@ function armon(params::ArmonParameters{T}) where T
         params.log_blocks ? collect_logs(data) : nothing
     )
 
-    if params.return_data || params.write_output || params.write_slices
+    if params.return_data || params.write_output
         device_to_host!(data)  # No-op if the host is the device
     end
 
     params.write_output && write_sub_domain_file(params, data, params.output_file)
-    params.write_slices && write_slices_files(params, data, params.output_file)
 
     if is_root && params.measure_time && params.silent < 3 && !isinteractive()
         show(params.timer)

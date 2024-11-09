@@ -243,27 +243,16 @@ after initialization).
 print anything.
 
 
-    output_format = :csv, output_file = "./output", output_options = (;),
+    io_format = :csv, output_file = "./output", io_options = (;),
 
-Write the resulting data to `output_file` using `output_format` (either `:csv` or `:hdf5`).
-`output_options` are specific to the format.
+Write the resulting data to `output_file` using `io_format` (either `:csv` or `:hdf5`).
+`io_options` are specific to the format.
 
 
-    write_output = false
+    write_output = false, write_freq = 0
 
 `write_output=true` will write all `saved_vars()` to the `output_file`.
-
-
-    write_slices = false
-
-Will write all `saved_vars()` to 3 output files, one for the middle X row, another for the middle
-Y column, and another for the diagonal.
-
-
-    animation_step = 0
-
-If `animation_step ≥ 1`, then every `animation_step` cycles, variables will be saved as with
-`write_output=true`.
+If `write_freq ≥ 1`, then the file is written every `write_freq` cycles.
 
 
     compare = false, is_ref = false, comparison_tolerance = 1e-10
@@ -312,11 +301,11 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams, KtContext <: Ke
 
     # Output
     silent::Int
-    output_format::Symbol
+    io_format::Symbol
+    io_options::Dict{Symbol, Any}
     output_file::String
     write_output::Bool
-    write_slices::Bool
-    animation_step::Int
+    write_freq::Int
     measure_time::Bool
     timer::TimerOutput
     time_async::Bool
@@ -545,7 +534,8 @@ function init_device(params::ArmonParameters;
     params.workload_distribution = workload_distribution
     params.distrib_params = distrib_params
 
-    numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
+    numa_ok = !Sys.iswindows() && NUMA.numa_available()
+    numa_aware && !numa_ok && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
     params.lock_memory = lock_memory
 
@@ -741,24 +731,24 @@ end
 
 function init_output(params::ArmonParameters{T};
     silent = 0,
-    output_format = :csv, output_file = "./output", output_options = (;),
-    write_output = false, write_slices = false,
-    animation_step = 0,
+    io_format = :csv, output_file = "./output", io_options = (;),
+    write_output = false, write_freq = 0,
     compare = false, is_ref = false, comparison_tolerance = 1e-10,
     check_result = false, return_data = false,
     options...
 ) where {T}
     params.silent = silent
-    params.output_format = output_format
-    params.output_file = output_file
-    params.output_options = output_options
 
+    params.io_format = io_format
+    params.io_options = Dict(pairs(io_options))
+    params.output_file = output_file
     params.write_output = write_output
-    params.write_slices = write_slices
-    params.animation_step = animation_step
+    params.write_freq = write_output ? write_freq : 0
+
     params.compare = compare
     params.is_ref = is_ref
     params.comparison_tolerance = comparison_tolerance
+
     params.check_result = check_result
     params.return_data = return_data
 
@@ -893,11 +883,9 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     print_parameter(io, pad, "verbosity", p.silent)
     print_parameter(io, pad, "check result", p.check_result)
 
+    print_parameter(io, pad, "file I/O", p.write_output ? p.io_format : "none")
     if p.write_output || p.compare
-        print_parameter(io, pad, "write output", p.write_output, nl=false)
-        println(io, p.write_ghosts ? "with ghosts" : "")
         print_parameter(io, pad, "to", "'$(p.output_file)'")
-        p.write_slices && print_parameter(io, pad, "write slices", p.write_slices)
         if p.compare
             print_parameter(io, pad, "compare", p.compare, nl=false)
             println(io, ", ", p.is_ref ? "as reference" : "with $(p.comparison_tolerance) of tolerance")

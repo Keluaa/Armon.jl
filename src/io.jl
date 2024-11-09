@@ -134,36 +134,49 @@ function read_block_from_file end
 
 """
     write_sub_domain_file(params::ArmonParameters, grid::BlockGrid, file_name::String; options...)
+    write_sub_domain_file(format, params::ArmonParameters, grid::BlockGrid, file_name::String; options...)
 
-Write `grid` to `file_name` with the `params.output_format`.
+Write `grid` to `file_name` with the given `format` (defaults to `params.io_format`).
 `options` are specific to the format.
 """
-function write_sub_domain_file(params::ArmonParameters, grid::BlockGrid, file_name::String; options...)
-    writer = domain_writer(params.output_format, file_name, params, grid; options...)
+function write_sub_domain_file(format, params::ArmonParameters, grid::BlockGrid, file_name::AbstractString; options...)
+    writer = domain_writer(format, file_name, params, grid; params.io_options..., options...)
     write_domain_to_file(writer, params, grid)
     close(writer)
     return grid
 end
 
+write_sub_domain_file(params::ArmonParameters, grid::BlockGrid, file_name::AbstractString; options...) =
+    write_sub_domain_file(params.io_format, params, grid, file_name; options...)
+
 
 """
     read_sub_domain_file!(params::ArmonParameters, grid::BlockGrid, file_name::String; options...)
+    read_sub_domain_file!(format, params::ArmonParameters, grid::BlockGrid, file_name::String; options...)
 
-Read `grid` from `file_name` with the `params.output_format`.
+Read `grid` from `file_name` with the given `format` (defaults to `params.io_format`).
 `options` are specific to the format.
 """
-function read_sub_domain_file!(params::ArmonParameters, grid::BlockGrid, file_name::String; options...)
-    reader = domain_reader(params.output_format, file_name, params, grid.global_dt.cycle; options...)
+function read_sub_domain_file!(format, params::ArmonParameters, grid::BlockGrid, file_name::AbstractString; options...)
+    reader = domain_reader(format, file_name, params, grid.global_dt.cycle; params.io_options..., options...)
     read_domain_from_file(reader, params, grid)
     close(reader)
     return grid
 end
+
+read_sub_domain_file!(params::ArmonParameters, grid::BlockGrid, file_name::AbstractString; options...) =
+    read_sub_domain_file!(params.io_format, params, grid, file_name; options...)
 
 
 function build_file_path(io_format::ObjOrType{AbstractSolverIO}, file_path::AbstractString, params::ArmonParameters, cycle)
     dir = dirname(file_path)
     if !isempty(dir) && !isdir(dir)
         mkpath(dir)
+    end
+
+    file_path, file_ext = splitext(file_path)
+    if !isempty(file_ext) && file_ext != file_extension(io_format)
+        error("file path '$file_path$file_ext' uses another extension than the format's: '$(file_extension(io_format))'")
     end
 
     if params.use_MPI && !supports_mpi(io_format)
