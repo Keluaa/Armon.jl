@@ -207,6 +207,21 @@ function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiti
 end
 
 
+"""
+    solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_count=typemax(Int))
+
+Applies all steps of the solver on all blocks of the `grid`.
+Used only when `params.async_cycle == true`.
+
+`async_cycle == true` implies two things: there is a single parallel section during a cycle
+(which lasts for the whole cycle), and each block manages its own solver state.
+[`block_state_machine`](@ref) advances that state, and is called by each thread, on the
+blocks the thread is assigned to.
+
+When a block cannot be advanced further (it is either done with the cycle, or waiting for
+a communication), the thread switches to another block. This is repeated until all blocks
+are done with the current solver cycle.
+"""
 function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_count=typemax(Int))
     # TODO: use meta-blocks, one for each core/thread, containing a set of `LocalTaskBlock`,
     # with a predefined repartition and device

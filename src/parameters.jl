@@ -521,7 +521,9 @@ function init_device(params::ArmonParameters;
     params.workload_distribution = workload_distribution
     params.distrib_params = distrib_params
 
-    numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
+    if numa_aware && (Sys.iswindows() || !NUMA.numa_available())
+        solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
+    end
     params.numa_aware = numa_aware
     params.lock_memory = lock_memory
 

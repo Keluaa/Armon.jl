@@ -1,6 +1,9 @@
 using Armon
 using Documenter
 
+include("render_plantuml.jl")
+using .DocumenterPlantUML
+
 CI = get(ENV, "CI", "false") == "true"
 
 DocMeta.setdocmeta!(Armon, :DocTestSetup, :(using Armon); recursive=true)
@@ -17,7 +20,15 @@ makedocs(;
     ),
     pages=[
         "Home" => "index.md",
+        "Parameters & Device" => "parameters_and_device.md",
+        "Grid" => "grid.md",
+        "Blocks" => "blocks.md",
+        "Block state" => "block_states.md",
+        "Kernels" => "kernels.md",
+        "Utils" => "utils.md",
+        "UML Structure" => "structure.md"
     ],
+    plugins=[PlantUML()]
 )
 
 if CI

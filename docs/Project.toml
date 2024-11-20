@@ -1,6 +1,11 @@
 [deps]
 Armon = "b773a7a3-b593-48d6-82f6-54bf745a629b"
+CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+MarkdownAST = "d0879d2d-cac2-40c8-9cee-1863dc0c7391"
 
 [compat]
+CodecZlib = "0.7"
 Documenter = "1"
+HTTP = "1"
