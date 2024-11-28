@@ -150,10 +150,14 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
 
     elseif blk_state == SolverStep.CellUpdate
         cell_update!(params, state, blk)
-        new_state = SolverStep.Remap
+        new_state = SolverStep.RemapAdvection
 
-    elseif blk_state == SolverStep.Remap
-        projection_remap!(params, state, blk)
+    elseif blk_state == SolverStep.RemapAdvection
+        advection_fluxes!(params, state, blk)
+        new_state = SolverStep.RemapProjection
+
+    elseif blk_state == SolverStep.RemapProjection
+        euler_projection!(params, state, blk)
         new_state = SolverStep.NewSweep
 
     elseif blk_state == SolverStep.EndCycle
