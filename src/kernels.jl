@@ -162,7 +162,7 @@ end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    return update_EOS!(params, state, blk, state.test_case)
+    return update_EOS!(params, state, blk, state.schemes.test_case)
 end
 
 

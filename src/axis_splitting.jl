@@ -19,7 +19,7 @@ Base.show(io::IO, ::GodunovSplitting)    = print(io, "Godunov (X, Y ; Y, X)")
 Base.show(io::IO, ::StrangSplitting)     = print(io, "Strong (½X, Y, ½X ; ½Y, X, ½Y)")
 Base.show(io::IO, ::SinglePassSplitting{Ax}) where {Ax} = print(io, "Single pass ($Ax ; $Ax)")
 
-split_axes(state::SolverState{T}) where {T} = split_axes(state.splitting, T, state.global_dt.cycle)
+split_axes(state::SolverState{T}) where {T} = split_axes(state.schemes.splitting, T, state.global_dt.cycle)
 
 function split_axes(::SequentialSplitting, ::Type{T}, _) where {T}
     return ((Axis.X, T(1.0)), (Axis.Y, T(1.0)))

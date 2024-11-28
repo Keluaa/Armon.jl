@@ -136,7 +136,7 @@ end
 
 
 advection_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock) =
-    advection_fluxes!(params::ArmonParameters, state, blk::LocalTaskBlock, state.projection_scheme)
+    advection_fluxes!(params::ArmonParameters, state, blk::LocalTaskBlock, state.schemes.projection_scheme)
 
 function advection_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @section "Advection" @iter_blocks for blk in grid

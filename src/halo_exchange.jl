@@ -30,7 +30,7 @@ end
 
 
 function boundary_conditions!(params::ArmonParameters{T}, state::SolverState, blk::LocalTaskBlock, side::Side.T) where {T}
-    (u_factor::T, v_factor::T) = boundary_condition(state.test_case, side)
+    (u_factor::T, v_factor::T) = boundary_condition(state.schemes.test_case, side)
     domain = border_domain(blk.size, side)
     boundary_conditions!(params, block_device_data(blk), domain, blk.size, state.axis, side, u_factor, v_factor)
 end

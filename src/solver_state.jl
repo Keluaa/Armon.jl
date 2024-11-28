@@ -349,6 +349,38 @@ end
 
 
 """
+    SolverSchemes
+
+The different numerical schemes to use in the solver, and their parameters.
+"""
+struct SolverSchemes{Splitting, Riemann, RiemannLimiter, Projection, TestCase}
+    splitting         :: Splitting
+    riemann_scheme    :: Riemann
+    riemann_limiter   :: RiemannLimiter
+    projection_scheme :: Projection
+    test_case         :: TestCase
+
+    function SolverSchemes(
+        splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC
+    ) where {
+        S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
+    }
+        return new{S, R, RL, P, TC}(splitting, riemann, limiter, projection, test_case)
+    end
+end
+
+
+function SolverSchemes(params::ArmonParameters)
+    return SolverSchemes(
+        params.axis_splitting,
+        params.riemann_scheme, params.riemann_limiter,
+        params.projection_scheme,
+        params.test
+    )
+end
+
+
+"""
     SolverState
 
 Object containing all non-constant parameters needed to run the solver, as well as type-parameters
@@ -357,47 +389,34 @@ needed to avoid runtime dispatch.
 This object is local to a block (or set of blocks): multiple blocks could be at different steps of
 the solver at once.
 """
-mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, TestCase}
+mutable struct SolverState{T, Schemes <: SolverSchemes}
     step               :: SolverStep.T  # Solver step the associated block is at. Unused if `params.async_cycle == false`
     dx                 :: T    # Space step along the current axis
     dt                 :: T    # Scaled time step for the current cycle
     axis               :: Axis.T
     axis_splitting_idx :: Int
     cycle              :: Int  # Local cycle of the block
-    splitting          :: Splitting
-    riemann_scheme     :: Riemann
-    riemann_limiter    :: RiemannLimiter
-    projection_scheme  :: Projection
-    test_case          :: TestCase
+    schemes            :: Schemes
     global_dt          :: GlobalTimeStep{T}
     steps_ranges       :: StepsRanges
     blk_logs           :: Vector{BlockLogEvent}
     total_stalls       :: Int
 
-    function SolverState{T}(
-        splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC, global_dt, steps_ranges, log_size
-    ) where {
-        T, S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
-    }
+    function SolverState{T}(schemes::Schemes, global_dt, steps_ranges, log_size) where {T, Schemes}
         blk_logs = Vector{BlockLogEvent}()
         log_size > 0 && sizehint!(blk_logs, log_size)
-        return new{T, S, R, RL, P, TC}(
+        return new{T, Schemes}(
             SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
-            splitting, riemann, limiter, projection, test_case,
-            global_dt, steps_ranges, blk_logs, 0
+            schemes, global_dt, steps_ranges, blk_logs, 0
         )
     end
 end
 
 
 function SolverState(params::ArmonParameters{T}, global_dt::GlobalTimeStep{T}) where {T}
+    schemes = SolverSchemes(params)
     return SolverState{T}(
-        params.axis_splitting,
-        params.riemann_scheme, params.riemann_limiter,
-        params.projection_scheme,
-        params.test,
-        global_dt,
-        first(params.steps_ranges),
+        schemes, global_dt, first(params.steps_ranges),
         params.estimated_blk_log_size
     )
 end

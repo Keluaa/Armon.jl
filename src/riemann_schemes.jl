@@ -109,12 +109,12 @@ function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::Loc
     blk_data = block_device_data(blk)
     u = state.axis == Axis.X ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)
-    return acoustic_GAD!(params, blk_data, range, s, state.dt, state.dx, u, state.riemann_limiter)
+    return acoustic_GAD!(params, blk_data, range, s, state.dt, state.dx, u, state.schemes.riemann_limiter)
 end
 
 
 numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock) =
-    numerical_fluxes!(params, state, blk, state.riemann_scheme)
+    numerical_fluxes!(params, state, blk, state.schemes.riemann_scheme)
 
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, grid::BlockGrid)
     @iter_blocks for blk in grid

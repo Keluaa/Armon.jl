@@ -78,6 +78,7 @@ DomainRange
 ## Block states
 
 ```@docs
+SolverSchemes
 SolverState
 first_state
 SolverStep

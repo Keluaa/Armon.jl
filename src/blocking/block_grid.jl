@@ -727,7 +727,7 @@ end
 memory_required(N::Tuple, block_size::Tuple, ghost::Int, device_array, host_array, buffer_array) =
     memory_required(N, block_size, ghost, device_array, host_array, buffer_array,
         # Default `SolverState` for a good enough estimation
-        SolverState{T, GodunovSplitting, RiemannGodunov, MinmodLimiter, EulerProjection, Sod})
+        SolverState{T, SolverSchemes{GodunovSplitting, RiemannGodunov, MinmodLimiter, EulerProjection, Sod}})
 
 memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
     memory_required(N, block_size, ghost, Vector{T}, Vector{T}, Vector{T})
