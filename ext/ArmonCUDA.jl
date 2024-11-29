@@ -27,8 +27,8 @@ end
 
 mutable struct CuThreadInfo <: Armon.ThreadInfo
     tid    :: Int
-    device :: CuDevice
-    stream :: CuStream
+    device :: CUDA.CuDevice
+    stream :: CUDA.CuStream
 end
 
 
@@ -58,6 +58,25 @@ end
 function Base.wait(params::ArmonParameters{<:Any, <:CUDABackend}, tid)
     thread_info::CuThreadInfo = Armon.thread_info(params, tid)
     CUDA.synchronize(thread_info.stream)
+    return
+end
+
+
+function Armon.lock_pages(::CUDABackend, ptr::Ptr, len)
+    len == 0 && return
+    # TODO: passing the `CUDA.MEMHOSTREGISTER_DEVICEMAP` flag would allow the GPU to access the host
+    # memory from the GPU seamlessly.
+    flags = 0
+    CUDA.register(CUDA.HostMemory, ptr, len, flags)
+    return
+end
+
+
+function Armon.unlock_pages(::CUDABackend, ptr::Ptr, len)
+    len == 0 && return
+    # TODO: passing the `CUDA.MEMHOSTREGISTER_DEVICEMAP` flag would allow the GPU to access the host
+    # memory from the GPU seamlessly.
+    CUDA.unregister(CUDA.HostMemory(CUDA.context(), ptr, len))
     return
 end
 

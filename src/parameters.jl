@@ -78,9 +78,10 @@ chunk of memory.
 This effectively enforces the *first-touch* policy, instead of blindly relying on it.
 
 
-    lock_memory = false
+    lock_memory = use_gpu
 
-Lock all memory pages using `mlock` to RAM.
+Lock/pin all host memory pages using `mlock` to RAM, or using the GPU's special pinning function.
+This is mandatory when using a GPU, as copies with the host cannot be asynchronous without this.
 
 
 ## Kernels
@@ -578,7 +579,7 @@ function init_device(params::ArmonParameters;
     nthreads = Threads.nthreads(),
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
-    workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
+    workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = use_gpu,
     busy_wait_limit = 100,
     options...
 )
@@ -639,7 +640,11 @@ function init_device(params::ArmonParameters;
 
     numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
+
     params.lock_memory = lock_memory
+    if !params.lock_memory && use_gpu isa GPU
+        solver_error(:config, "host memory locking/pinning is required to allow asynchronous device<->host copies")
+    end
 
     return options
 end

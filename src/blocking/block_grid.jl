@@ -783,14 +783,14 @@ end
 
 
 """
-    lock_pages(grid::BlockGrid)
+    lock_pages(device, grid::BlockGrid)
 
 Locks the pages of all blocks of the `grid`, including remote blocks.
 """
-function lock_pages(grid::BlockGrid)
-    foreach(lock_pages, grid.blocks)
-    foreach(lock_pages, grid.edge_blocks)
-    foreach(lock_pages, grid.remote_blocks)
+function lock_pages(device, grid::BlockGrid)
+    foreach(Base.Fix1(lock_pages, device), grid.blocks)
+    foreach(Base.Fix1(lock_pages, device), grid.edge_blocks)
+    foreach(Base.Fix1(lock_pages, device), grid.remote_blocks)
 end
 
 

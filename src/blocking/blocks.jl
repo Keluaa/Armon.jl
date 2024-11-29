@@ -145,14 +145,8 @@ end
 host_to_device!(::LocalTaskBlock{H, H}) where {H} = nothing
 
 
-function move_pages(blk::LocalTaskBlock, target_node)
-    for var in block_vars(blk)
-        move_pages(var, target_node)
-    end
-end
-
-
-lock_pages(blk::LocalTaskBlock) = foreach(lock_pages, block_vars(blk))
+move_pages(blk::LocalTaskBlock, target_node) = foreach(var -> move_pages(var, target_node), block_vars(blk.host_data))
+lock_pages(device, blk::LocalTaskBlock) = foreach(Base.Fix1(lock_pages, device), block_vars(blk.host_data))
 
 
 function Base.show(io::IO, blk::LocalTaskBlock)
@@ -176,6 +170,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
     neighbour  :: LocalTaskBlock     # Remote blocks are on the edges of the sub-domain: there can only be one real neighbour
     rank       :: Int                # `-1` if the remote block has no MPI rank to communicate with
     global_pos :: CartesianIndex{2}  # Rank position in the Cartesian process grid
+    on_device  :: Bool               # `true` if the communication buffers are not on the CPU memory
     comm_data  :: AbstractCommunication{B}
 
     function RemoteTaskBlock{B}(model, rank, global_pos, pos, base_array_type, size, side, total_side_buffer_size) where {B}
@@ -183,6 +178,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block = new{B}(pos)
         block.rank = rank
         block.global_pos = global_pos
+        block.on_device = base_array_type <: Array
 
         # Because two ranks may have several comms at once, we must use tags. They must match at both sides.
         # Since both ranks share the same (flat) side and block size, a unique index could be the block
@@ -206,6 +202,7 @@ mutable struct RemoteTaskBlock{B} <: TaskBlock{B}
         block = new{B}(pos)
         block.rank = -1
         block.global_pos = CartesianIndex(0, 0)
+        block.on_device = false
         block.comm_data = Communications.init_exchange(Communications.NoCommunicationModel(), 0, 0, 0, B, 0, 0)
         return block
     end
@@ -213,7 +210,7 @@ end
 
 
 function move_pages(blk::RemoteTaskBlock, target_node)
-    blk.rank == -1 && return
+    blk.rank == -1 || blk.on_device && return
 
     if Communications.uses_global_buffers(blk.comm_data)
         # Since the blocks of the same side share the same communication array, we impose that only
@@ -231,8 +228,8 @@ function move_pages(blk::RemoteTaskBlock, target_node)
 end
 
 
-function lock_pages(blk::RemoteTaskBlock)
-    blk.rank == -1 && return
+function lock_pages(device, blk::RemoteTaskBlock)
+    blk.rank == -1 || blk.on_device && return
 
     if Communications.uses_global_buffers(blk.comm_data)
         # Same logic as for `move_pages`
@@ -241,7 +238,7 @@ function lock_pages(blk::RemoteTaskBlock)
     end
 
     for buffer in Communications.unsafe_buffers(blk.comm_data)
-        lock_pages(buffer)
+        lock_pages(device, buffer)
     end
 end
 

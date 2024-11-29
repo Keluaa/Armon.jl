@@ -195,13 +195,13 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
         # currently cannot be used by other threads.
         target_numa_node = NUMA.current_numa_node()
         move_pages(blk, target_numa_node)
-        params.lock_memory && lock_pages(blk)
+        params.lock_memory && lock_pages(params.device, blk)
 
         # Do the exact same with the MPI buffers associated with the block
         for neighbour in blk.neighbours
             !(neighbour isa RemoteTaskBlock) && continue
             move_pages(neighbour, target_numa_node)
-            params.lock_memory && lock_pages(neighbour)
+            params.lock_memory && lock_pages(params.device, neighbour)
         end
     end
 end

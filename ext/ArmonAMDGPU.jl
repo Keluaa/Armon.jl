@@ -47,6 +47,20 @@ function Base.wait(params::ArmonParameters{<:Any, <:ROCBackend}, tid)
 end
 
 
+function Armon.lock_pages(::ROCBackend, ptr::Ptr, len)
+    len == 0 && return
+    AMDGPU.HIP.hipHostRegister(ptr, len, AMDGPU.HIP.hipHostRegisterMapped)
+    return
+end
+
+
+function Armon.unlock_pages(::ROCBackend, ptr::Ptr, len)
+    len == 0 && return
+    AMDGPU.HIP.hipHostUnregister(ptr)
+    return
+end
+
+
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:ROCBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": ROCm (block size: ", join(p.block_size, '×'), ")")

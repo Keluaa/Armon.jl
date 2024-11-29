@@ -55,6 +55,11 @@ function Base.wait(params::ArmonParameters{<:Any, <:oneAPIBackend}, tid)
 end
 
 
+# TODO: check if there is a concept of pinned memory in oneAPI
+Armon.lock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.lock_pages(Armon.CPU_HP(), ptr, len)
+Armon.unlock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.unlock_pages(Armon.CPU_HP(), ptr, len)
+
+
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:oneAPIBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": oneAPI (block size: ", join(p.block_size, '×'), ")")
