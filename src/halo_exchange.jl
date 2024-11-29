@@ -233,19 +233,28 @@ function start_exchange(
     send_buffer = Communications.try_acquire_send_buffer!(other_blk.comm_data)
     isnothing(send_buffer) && return false
 
-    buffer_are_on_device = D == B
-    if !buffer_are_on_device
-        # MPI buffers are not located where the up-to-date data is: we must to a copy first.
-        device_to_host!(blk)
+    buffer_is_on_device = D == B
+    if buffer_is_on_device
+        packed_array = send_buffer
+    else
+        # When the buffer is on the host, we do the marshalling on the device to a temporary array,
+        # then do a copy to the host.
+        # TODO: temporary solution! Ideally this array is allocated once per thread, and reused for all xchgs
+        @warn "allocating temporary array for marshalling to the host" maxlog=1
+        packed_array = KernelAbstractions.allocate(params.device, eltype(send_buffer), size(send_buffer))
     end
 
     send_domain = border_domain(blk.size, side; single_strip=false)
-    vars = comm_vars(blk; on_device=buffer_are_on_device)
-    # TODO: run on host if `D != B`, or perform it on the device on a tmp array
-    pack_to_array!(params, send_domain, blk.size, side, send_buffer, vars)
-    wait(params)  # Wait for the copy to complete
+    vars = comm_vars(blk)
+    pack_to_array!(params, send_domain, blk.size, side, packed_array, vars)
 
+    if !buffer_is_on_device
+        copyto!(params, send_buffer, packed_array)
+    end
+
+    wait(params, Threads.threadid())  # Wait for `send_buffer` to be ready
     Communications.release_send_buffer!(other_blk.comm_data)
+    KernelAbstractions.unsafe_free!(packed_array)
     return true
 end
 
@@ -265,24 +274,28 @@ function finish_exchange(
     params::ArmonParameters,
     blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
-    # Finish the exchange between one local block and a remote block from another sub-domain
     recv_buffer = Communications.try_acquire_recv_buffer!(other_blk.comm_data)
     isnothing(recv_buffer) && return false
 
-    recv_domain = ghost_domain(blk.size, side; single_strip=false)
-    buffer_are_on_device = D == B
-    vars = comm_vars(blk; on_device=buffer_are_on_device)
-    # TODO: run on host if `D != B`
-    unpack_from_array!(params, recv_domain, blk.size, side, recv_buffer, vars)
-    wait(params)  # Wait for the copy to complete
-
-    Communications.release_recv_buffer!(other_blk.comm_data)
-
-    if !buffer_are_on_device
-        # MPI buffers are not where we want the data to be. Retreive the result of the exchange.
-        host_to_device!(blk)
+    buffer_is_on_device = D == B
+    if buffer_is_on_device
+        packed_array = recv_buffer
+    else
+        # When the buffer is on the host, we first do a copy from the host to a temporary array,
+        # then do the unmarshalling on the device.
+        # TODO: temporary solution! Ideally this array is allocated once per thread, and reused for all xchgs
+        @warn "allocating temporary array for unmarshalling from the host" maxlog=1
+        packed_array = KernelAbstractions.allocate(params.device, eltype(recv_buffer), size(recv_buffer))
+        copyto!(params, packed_array, recv_buffer)
     end
 
+    recv_domain = ghost_domain(blk.size, side; single_strip=false)
+    vars = comm_vars(blk)
+    unpack_from_array!(params, recv_domain, blk.size, side, packed_array, vars)
+
+    wait(params, Threads.threadid())  # Wait all operations on `recv_buffer` to complete
+    Communications.release_recv_buffer!(other_blk.comm_data)
+    KernelAbstractions.unsafe_free!(packed_array)
     return true
 end
 

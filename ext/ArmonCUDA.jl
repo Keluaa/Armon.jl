@@ -81,6 +81,19 @@ function Armon.unlock_pages(::CUDABackend, ptr::Ptr, len)
 end
 
 
+function Base.copyto!(::ArmonParameters{<:Any, <:CUDABackend}, dst::AbstractArray, src::AbstractArray)
+    # Asynchronous copy using the current active CuStream. This requires that host arrays to be
+    # pinned.
+    # The implementation is similar to `CUDAKernels.copyto!`, but without the expensive `CUDA.pin`
+    # on host arrays.
+    GC.@preserve dst src begin
+        dst_ptr = pointer(dst_var)
+        src_ptr = pointer(src_var)
+        unsafe_copyto!(dst_ptr, src_ptr, length(dst); async=true)
+    end
+end
+
+
 function cuda_kernel_start(_, _)
     # Equivalent to CUDA.@profile
     CUDA.Profile.start()
