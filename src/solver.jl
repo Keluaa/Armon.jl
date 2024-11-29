@@ -222,6 +222,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
         # TODO: thread block iteration should be done along the current axis
 
         tid = Threads.threadid()
+        setup_task_for_device(params, tid)
         thread_blocks_idx = grid.threads_workload[tid]
         can_advance_time_step = can_touch_global_mpi_time_step(params)
 
@@ -253,6 +254,8 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
             all_finished_cycle && break
             no_progress_count += no_progress
 
+            wait(params, tid)  # Wait for the completion of all GPU kernels
+
             if can_advance_time_step
                 # If `params.thread_split_comm`, then only the main thread can touch the MPI reduction
                 # for the time step. This means that the last thread to contribute to the local time
@@ -274,6 +277,8 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
                 total_wait_time += wait_time
             end
         end
+
+        wait(params, tid)
 
         if params.log_blocks && !isempty(thread_blocks_idx)
             t_end = time_ns()

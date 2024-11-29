@@ -348,6 +348,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     nthreads::Int
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
+    threads_info::Vector{ThreadInfo}
     block_size::NTuple{2, Int}
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
@@ -607,6 +608,7 @@ function init_device(params::ArmonParameters;
     else
         params.nthreads = 1
     end
+    params.threads_info = Vector{ThreadInfo}(undef, params.nthreads)
 
     if !use_cache_blocking
         if use_gpu
@@ -849,44 +851,25 @@ end
 
 
 """
-    create_device(::Val{:device_name})
-
-Create a device object from its name.
-
-Default devices:
- - `:CPU`: the CPU backend of `KernelAbstractions.jl`
- - `:CPU_HP`: `Polyester.jl` multithreading
-
-Extensions:
- - `:Kokkos`: the default `Kokkos.jl` device
- - `:CUDA`: the `CUDA.jl` backend of `KernelAbstractions.jl`
- - `:ROCM`: the `AMDGPU.jl` backend of `KernelAbstractions.jl`
-"""
-function create_device end
-
-
-create_device(::Val{:CPU}) = CPU()
-create_device(::Val{:CPU_HP}) = CPU_HP()
-
-
-"""
     init_backend(params::ArmonParameters, ::Dev; options...)
 
 Initialize the backend corresponding to the `Dev` device returned by `create_device` using
-`options`. Set the `params.backend_options` field.
+`options`. Set the `params.backend_options` field, as well as all `ThreadInfo` in `params.thread_info`.
 
 It must return `options`, with the backend-specific options removed.
 """
-function init_backend(params::ArmonParameters, ::Dev; options...) where {Dev}
-    params.backend_options = EmptyParams()
-    return options
-end
+function init_backend(params::ArmonParameters, dev::Union{CPU_HP, CPU}; options...)
+    if dev isa CPU
+        # The CPU backend of KernelAbstractions can be useful in some cases for debugging, but isn't
+        # optimized for performance.
+        params.is_root && @warn "`use_gpu=true` but the device is set to the CPU. \
+                                Therefore no kernel will run on a GPU." maxlog=1
+    end
 
+    for tid in 1:params.nthreads
+        params.threads_info[tid] = CPUThreadInfo(tid)
+    end
 
-function init_backend(params::ArmonParameters, ::CPU; options...)
-    # The CPU backend of KernelAbstractions can be useful in some cases for debugging
-    params.is_root && @warn "`use_gpu=true` but the device is set to the CPU. \
-                              Therefore no kernel will run on a GPU." maxlog=1
     params.backend_options = EmptyParams()
     return options
 end
@@ -1030,31 +1013,6 @@ Base.show(io::IO, p::ArmonParameters) = print_parameters(io::IO, p::ArmonParamet
 
 
 """
-    memory_info(params)
-
-The total and free memory the current process can store on the `params.device`.
-"""
-function memory_info(params::ArmonParameters)
-    mem_info = device_memory_info(params.device)
-    # TODO: MPI support
-    return mem_info
-end
-
-
-"""
-    device_memory_info(device)
-
-The total and free memory on the device, in bytes.
-"""
-function device_memory_info(::Union{CPU_HP, CPU})
-    return (
-        total = UInt64(Sys.total_physical_memory()),
-        free  = UInt64(Sys.free_physical_memory())
-    )
-end
-
-
-"""
     data_type(::ArmonParameters{T})
 
 Get `T`, the type used for numbers by the solver
@@ -1150,17 +1108,4 @@ function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionS
         axis, real_domain, full_domain,
         EOS, fluxes, cell_update, advection, projection
     )
-end
-
-#
-# Synchronisation
-#
-
-function Base.wait(::ArmonParameters{<:Any, <:Union{CPU, CPU_HP}})
-    # CPU backends are synchronous
-end
-
-
-function Base.wait(params::ArmonParameters{<:Any, <:GPU})
-    KernelAbstractions.synchronize(params.device)
 end

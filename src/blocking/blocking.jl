@@ -284,12 +284,6 @@ mutable struct BlockInterface
 end
 
 
-include("blocks.jl")
-include("workload_distribution.jl")
-include("block_grid.jl")
-include("interface.jl")
-
-
 """
     @iter_blocks for blk in grid
         # body...
@@ -297,6 +291,9 @@ include("interface.jl")
 
 Applies the body of the for-loop in to all blocks of the `grid`. Threads iterate over the blocks they
 are assigned to via `grid.threads_workload`.
+
+All GPU operations are scheduled on the streams of each thread. All streams are synchronized after
+all of the thread's blocks have been parsed.
 """
 macro iter_blocks(expr)
     !Base.isexpr(expr, :for) && error("expected for-loop")
@@ -307,6 +304,7 @@ macro iter_blocks(expr)
     return esc(quote
         $Armon.@threaded :outside_kernel for _ in 1:params.nthreads
             tid = Threads.threadid()
+            setup_task_for_device(params, tid)
             thread_blocks_idx = $grid_var.threads_workload[tid]
             for blk_pos in thread_blocks_idx
                 # One path for each type of block to avoid runtime dispatch
@@ -320,9 +318,16 @@ macro iter_blocks(expr)
                     end
                 end
             end
+            wait(params, tid)
         end
     end)
 end
+
+
+include("blocks.jl")
+include("workload_distribution.jl")
+include("block_grid.jl")
+include("interface.jl")
 
 
 """

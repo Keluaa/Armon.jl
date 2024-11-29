@@ -16,6 +16,7 @@ export ArmonParameters, BlockGrid, SolverStats, armon, data_type, memory_require
 export device_to_host!, host_to_device!
 
 # Forward declarations
+abstract type ThreadInfo end
 abstract type Limiter end
 abstract type RiemannScheme end
 abstract type ProjectionScheme end
@@ -32,6 +33,7 @@ include("tests.jl")
 include("parameters.jl")
 include("solver_state.jl")
 include("profiling.jl")
+include("device.jl")
 include("generic_kernel.jl")
 include("blocking/blocking.jl")
 include("kernels.jl")

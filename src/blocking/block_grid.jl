@@ -615,7 +615,7 @@ push_log!(grid::BlockGrid, tid, thread_log::ThreadLogEvent) = push!(grid.threads
 `(device_memory, host_memory)` required for `params`.
 
 MPI buffers size are included in the appropriate field depending on `params.gpu_aware`.
-`params.use_MPI` and `params.neighbours` is taken into account.
+`params.use_MPI` and `params.neighbours` are taken into account.
 
 If `device_is_host`, then, `device_memory` only includes memory required by data arrays and MPI buffers.
 """
@@ -739,7 +739,7 @@ memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
 Copies device data of all blocks to the host data. A no-op if the device is the host.
 """
 function device_to_host!(grid::BlockGrid{<:Any, D, H}) where {D, H}
-    for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         device_to_host!(blk)
     end
 end
@@ -753,7 +753,7 @@ device_to_host!(::BlockGrid{<:Any, D, D}) where {D} = nothing
 Copies host data of all blocks to the device data. A no-op if the device is the host.
 """
 function host_to_device!(grid::BlockGrid{<:Any, D, H}) where {D, H}
-    for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         host_to_device!(blk)
     end
 end
@@ -769,9 +769,8 @@ which is in charge of working on that block.
 """
 function move_pages(grid::BlockGrid)
     numa_map = tid_to_numa_node_map()
-    for (tid, blks_pos) in enumerate(grid.threads_workload), blk_pos in blks_pos
-        target_numa = numa_map[tid]
-        blk = block_at(grid, blk_pos)
+    @iter_blocks for blk in grid
+        target_numa = numa_map[Threads.threadid()]
         move_pages(blk, target_numa)
 
         # Make sure the MPI buffers are as close as the data they will be interacting with
