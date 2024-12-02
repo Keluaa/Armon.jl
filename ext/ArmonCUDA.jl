@@ -33,9 +33,14 @@ end
 
 
 function Armon.init_backend(params::ArmonParameters, ::CUDABackend; options...)
+    armon_nvtx = Base.get_extension(Armon, :ArmonNVTX)
+
     device = CUDA.device()  # TODO: would this allow us to use multiple devices from the same process?
     for tid in 1:params.nthreads
-        stream = CUDA.create_stream()  # TODO: name the stream with NVTX.jl : `NVTX.nvtxNameCuStreamA`
+        stream = CUDA.create_stream()
+        if !isnothing(armon_nvtx)
+            armon_nvtx.name_stream(stream, "Armon stream $tid")
+        end
         params.threads_info[tid] = CuThreadInfo(tid, device, stream)
     end
 
