@@ -63,7 +63,7 @@ end
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:ROCBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": ROCm (block size: ", join(p.block_size, '×'), ")")
+    println(io, ": ROCm (workgroup size: ", join(p.workgroup_size, '×'), ")")
 end
 
 

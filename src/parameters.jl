@@ -93,9 +93,10 @@ Switches for [`CPU_HP`](@ref) kernels.
 `use_simd` enables [`@simd_loop`](@ref) for inner loops.
 
 
-    use_gpu = false
+    use_gpu = false, workgroup_size = (32, 32)
 
-Enables the use of `KernelAbstractions.jl` kernels.
+`use_gpu=true` enables the use of `KernelAbstractions.jl` kernels.
+`workgroup_size` is the size of the workgroups (or "blocks" in the CUDA terminology).
 
 
     use_kokkos = false
@@ -114,10 +115,10 @@ and therefore memory throughput.
 Apply all steps of the solver to all blocks asynchronously, fully taking advantage of cache blocking.
 
 
-    block_size = 1024
+    block_size = (64, 64)
 
-Size of blocks for cache blocking. Can be a tuple. If `use_cache_blocking == false`, this option
-only controls the size of GPU blocks.
+Size of 2D blocks for cache blocking. Ghost cells are included in this size: with 4 ghost cells on
+each size, the default size of 64x64 would have 56x56 real cells per block.
 
 
     use_two_step_reduction = false
@@ -351,6 +352,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     backend_options::DeviceParams
     threads_info::Vector{ThreadInfo}
     block_size::NTuple{2, Int}
+    workgroup_size::NTuple{2, Int}  # GPU workgroup size (the block size in CUDA terminology)
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
@@ -575,7 +577,7 @@ end
 
 function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
-    use_gpu = false, use_kokkos = false,
+    use_gpu = false, use_kokkos = false, workgroup_size = (32, 32),
     nthreads = Threads.nthreads(),
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
@@ -611,32 +613,24 @@ function init_device(params::ArmonParameters;
     end
     params.threads_info = Vector{ThreadInfo}(undef, params.nthreads)
 
-    if !use_cache_blocking
-        if use_gpu
-            # The literal block size for GPU kernels
-            block_size = something(block_size, 1024)
-        else
-            # Disable cache blocking by using an empty block size
-            block_size = (0, 0)
-        end
+    params.block_size = if !use_cache_blocking
+        # Disable cache blocking by using an empty block size
+        (0, 0)
     elseif isnothing(block_size)
         # TODO: Estimate the optimal block size, given the solver's stencils
-        if !use_gpu
-            block_size = (64, 64)
-        else
-            # TODO: GPU block size ?? 1024? but how?
-            block_size = (32, 32)
-        end
+        (64, 64)
+    else
+        block_size
     end
-
-    length(block_size) > 2 && solver_error(:config, "Expected `block_size` to contain up to 2 elements, got: $block_size")
-    params.block_size = tuple(block_size..., ntuple(Returns(1), 2 - length(block_size))...)
 
     if !(workload_distribution in (:simple, :scotch, :sorted_scotch, :weighted_sorted_scotch))
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
     end
     params.workload_distribution = workload_distribution
     params.distrib_params = distrib_params
+
+    # Default workgroup size: use the maximum of 1024 threads per workgroup
+    params.workgroup_size = workgroup_size 
 
     numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
@@ -900,7 +894,7 @@ end
 
 function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU})
     print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": KA.jl's CPU backend (block size: ", join(p.block_size, '×'), ")")
+    println(io, ": KA.jl's CPU backend (workgroup size: ", join(p.workgroup_size, '×'), ")")
 end
 
 

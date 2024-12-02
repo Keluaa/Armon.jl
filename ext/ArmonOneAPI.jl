@@ -62,7 +62,7 @@ Armon.unlock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.unlock_pages(Armon.CP
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:oneAPIBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": oneAPI (block size: ", join(p.block_size, '×'), ")")
+    println(io, ": oneAPI (workgroup size: ", join(p.workgroup_size, '×'), ")")
 end
 
 
