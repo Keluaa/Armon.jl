@@ -83,7 +83,12 @@ function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTas
         u_v    = @view blk_data.u[lin_range]
         v_v    = @view blk_data.v[lin_range]
         mask_v = @view blk_data.mask[lin_range]
-        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, Δx...)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
+
+        # Since GPUArrays.jl doesn't define a clean way of reducing with arrays and scalars, we must
+        # put `Δx` in a closure.
+        dtCFL_kernel_reduction_func(u, v, c, mask) = dtCFL_kernel_reduction(u, v, c, mask, Δx...)
+
+        return mapreduce(dtCFL_kernel_reduction_func, min, u_v, v_v, c_v, mask_v)
     end
 end
 
