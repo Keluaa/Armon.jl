@@ -881,11 +881,6 @@ end
 
 
 function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
-    print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
-    if p.use_threading
-        println(io, " ($(p.nthreads) $(use_std_lib_threads ? "standard " : "")thread",
-            p.nthreads != 1 ? "s" : "", ")")
-    end
     print_parameter(io, pad, "use_simd", p.use_simd)
     print_parameter(io, pad, "use_gpu", false)
     print_parameter(io, pad, "use_kokkos", false)
@@ -901,6 +896,11 @@ end
 function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
+    print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
+    if p.use_threading
+        println(io, " ($(p.nthreads) $(use_std_lib_threads ? "standard " : "")thread",
+            p.nthreads != 1 ? "s" : "", ")")
+    end
     print_device_info(io, pad, p)
     print_parameter(io, pad, "blocking", p.use_cache_blocking ? (p.async_cycle ? "async" : "sync") : false, nl=false)
     if p.use_cache_blocking && p.async_cycle

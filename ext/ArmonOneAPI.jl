@@ -55,14 +55,18 @@ function Base.wait(params::ArmonParameters{<:Any, <:oneAPIBackend}, tid)
 end
 
 
-# TODO: check if there is a concept of pinned memory in oneAPI
+# TODO: check if there is a concept of pinned memory in oneAPI => does this mean that memory copies cannot be asynchronous?
 Armon.lock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.lock_pages(Armon.CPU_HP(), ptr, len)
 Armon.unlock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.unlock_pages(Armon.CPU_HP(), ptr, len)
 
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:oneAPIBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": oneAPI (workgroup size: ", join(p.workgroup_size, '×'), ")")
+    driver = first(p.threads_info).driver
+    device = first(p.threads_info).device
+    device_id = findfirst(==(device), oneAPI.devices(driver))
+    println(io, ": oneAPI, workgroup size: ", join(p.workgroup_size, '×'), ", ",
+        p.nthreads, " streams, device n°", device_id)
 end
 
 

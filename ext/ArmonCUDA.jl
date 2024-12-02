@@ -12,7 +12,9 @@ Armon.device_array_type(::CUDABackend) = CUDA.CuArray
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:CUDABackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": CUDA (workgroup size: ", join(p.workgroup_size, '×'), ")")
+    device = first(p.threads_info).device
+    println(io, ": CUDA, workgroup size: ", join(p.workgroup_size, '×'), ", ",
+        p.nthreads, " streams, device n°", CUDA.deviceid(device))
 end
 
 
