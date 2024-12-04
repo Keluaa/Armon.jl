@@ -44,7 +44,7 @@ end
 
 
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGodunov)
-    range = block_domain_range(blk.size, state.steps_ranges.fluxes)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].fluxes)
     blk_data = block_device_data(blk)
     u = state.axis == Axis.X ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)
@@ -105,7 +105,7 @@ end
 
 
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGAD)
-    range = block_domain_range(blk.size, state.steps_ranges.fluxes)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].fluxes)
     blk_data = block_device_data(blk)
     u = state.axis == Axis.X ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)

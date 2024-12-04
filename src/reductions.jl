@@ -23,7 +23,7 @@ end
 @fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2, T}) where {T}
     # CPU reduction
     (; u, v, c) = block_device_data(blk)
-    range = block_domain_range(blk.size, state.steps_ranges.real_domain)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
@@ -64,7 +64,7 @@ end
 
 function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2})
     # GPU generic reduction
-    range = block_domain_range(blk.size, state.steps_ranges.full_domain)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].full_domain)
     blk_data = block_device_data(blk)
 
     if params.use_two_step_reduction
@@ -208,7 +208,7 @@ end
 @fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
     # CPU reduction
     (; ρ, E) = block_device_data(blk)
-    range = block_domain_range(blk.size, blk.state.steps_ranges.real_domain)
+    range = block_domain_range(blk.size, blk.state.steps_ranges[Int(state.axis)].real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
@@ -259,7 +259,7 @@ end
 
 function conservation_vars(params::ArmonParameters{T}, blk::LocalTaskBlock) where {T}
     # GPU generic reduction
-    range = block_domain_range(blk.size, blk.state.steps_ranges.full_domain)
+    range = block_domain_range(blk.size, blk.state.steps_ranges[Int(blk.state.axis)].full_domain)
     blk_data = block_device_data(blk)
 
     if params.use_two_step_reduction

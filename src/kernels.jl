@@ -149,14 +149,14 @@ end
 #
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, tc::TestCase)
-    range = block_domain_range(blk.size, state.steps_ranges.EOS)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].EOS)
     gamma = eltype(blk)(specific_heat_ratio(tc))
     return perfect_gas_EOS!(params, block_device_data(blk), range, gamma)
 end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Bizarrium)
-    range = block_domain_range(blk.size, state.steps_ranges.EOS)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].EOS)
     return bizarrium_EOS!(params, block_device_data(blk), range)
 end
 
@@ -215,7 +215,7 @@ end
 
 
 function cell_update!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    blk_domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
+    blk_domain = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].cell_update)
     blk_data = block_device_data(blk)
     u = state.axis == Axis.X ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)

@@ -328,6 +328,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     cst_dt::Bool
     dt_on_even_cycles::Bool
     steps_ranges::Vector{StepsRanges}
+    device_steps_ranges::AbstractArray{StepsRanges}
 
     # Bounds
     maxtime::Flt_T
@@ -1089,6 +1090,9 @@ end
 
 function compute_steps_ranges(params::ArmonParameters)
     params.steps_ranges = collect(compute_steps_ranges.(instances(Axis.T), params.nghost, Ref(params.projection_scheme)))
+    # Upload the step_ranges to the device
+    # TODO: use constant memory?
+    params.device_steps_ranges = device_array_type(params.device)(params.steps_ranges)
 end
 
 function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme)

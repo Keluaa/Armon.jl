@@ -391,7 +391,7 @@ needed to avoid runtime dispatch.
 This object is local to a block (or set of blocks): multiple blocks could be at different steps of
 the solver at once.
 """
-mutable struct SolverState{T, Schemes <: SolverSchemes, Queue <: AbstractStepQueue}
+mutable struct SolverState{T, Schemes <: SolverSchemes, StepsRangesArray <: AbstractArray{StepsRanges}, Queue <: AbstractStepQueue}
     step               :: SolverStep.T  # Solver step the associated block is at. Unused if `params.async_cycle == false`
     dx                 :: T    # Space step along the current axis
     dt                 :: T    # Scaled time step for the current cycle
@@ -400,17 +400,18 @@ mutable struct SolverState{T, Schemes <: SolverSchemes, Queue <: AbstractStepQue
     cycle              :: Int  # Local cycle of the block
     schemes            :: Schemes
     global_dt          :: GlobalTimeStep{T}
-    steps_ranges       :: StepsRanges
+    steps_ranges       :: Vector{StepsRanges}
+    device_ranges      :: StepsRangesArray
     queue              :: Queue  # Queue to schedule the solver steps to the device
     blk_logs           :: Vector{BlockLogEvent}
     total_stalls       :: Int
 
-    function SolverState{T}(schemes::Schemes, global_dt, steps_ranges, queue::Queue, log_size) where {T, Schemes, Queue}
+    function SolverState{T}(schemes::Schemes, global_dt, steps_ranges, device_steps_ranges, queue::Queue, log_size) where {T, Schemes, Queue}
         blk_logs = Vector{BlockLogEvent}()
         log_size > 0 && sizehint!(blk_logs, log_size)
-        return new{T, Schemes, Queue}(
+        return new{T, Schemes, typeof(device_steps_ranges), Queue}(
             SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
-            schemes, global_dt, steps_ranges, queue,
+            schemes, global_dt, steps_ranges, device_steps_ranges, queue,
             blk_logs, 0
         )
     end
@@ -425,7 +426,7 @@ function SolverState(params::ArmonParameters{T}, global_dt::GlobalTimeStep{T}) w
         queue = StepQueue(params.device, params.step_queue_capacity)
     end
     return SolverState{T}(
-        schemes, global_dt, first(params.steps_ranges), queue,
+        schemes, global_dt, params.steps_ranges, params.device_steps_ranges, queue,
         params.estimated_blk_log_size
     )
 end
@@ -454,7 +455,6 @@ function update_solver_state!(params::ArmonParameters, state::SolverState, axis:
     state.dx = params.domain_size[i_ax] / params.global_grid[i_ax]
     state.dt = state.global_dt.current_dt * dt_factor
     state.axis = axis
-    state.steps_ranges = params.steps_ranges[i_ax]
 end
 
 
