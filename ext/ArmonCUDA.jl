@@ -62,6 +62,11 @@ function Armon.setup_task_for_device(params::ArmonParameters{<:Any, <:CUDABacken
 end
 
 
+Armon.create_kernel_event(::CUDABackend) = CUDA.CuEvent(CUDA.EVENT_DISABLE_TIMING)
+Armon.put_kernel_event(::CUDABackend, event) = CUDA.record(event)
+Armon.query_kernel_event(::CUDABackend, event) = CUDA.isdone(event)
+
+
 function Base.wait(params::ArmonParameters{<:Any, <:CUDABackend}, tid)
     thread_info::CuThreadInfo = Armon.thread_info(params, tid)
     CUDA.synchronize(thread_info.stream)

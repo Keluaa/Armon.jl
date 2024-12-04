@@ -391,7 +391,7 @@ needed to avoid runtime dispatch.
 This object is local to a block (or set of blocks): multiple blocks could be at different steps of
 the solver at once.
 """
-mutable struct SolverState{T, Schemes <: SolverSchemes}
+mutable struct SolverState{T, Schemes <: SolverSchemes, Queue <: AbstractStepQueue}
     step               :: SolverStep.T  # Solver step the associated block is at. Unused if `params.async_cycle == false`
     dx                 :: T    # Space step along the current axis
     dt                 :: T    # Scaled time step for the current cycle
@@ -401,15 +401,17 @@ mutable struct SolverState{T, Schemes <: SolverSchemes}
     schemes            :: Schemes
     global_dt          :: GlobalTimeStep{T}
     steps_ranges       :: StepsRanges
+    queue              :: Queue  # Queue to schedule the solver steps to the device
     blk_logs           :: Vector{BlockLogEvent}
     total_stalls       :: Int
 
-    function SolverState{T}(schemes::Schemes, global_dt, steps_ranges, log_size) where {T, Schemes}
+    function SolverState{T}(schemes::Schemes, global_dt, steps_ranges, queue::Queue, log_size) where {T, Schemes, Queue}
         blk_logs = Vector{BlockLogEvent}()
         log_size > 0 && sizehint!(blk_logs, log_size)
-        return new{T, Schemes}(
+        return new{T, Schemes, Queue}(
             SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
-            schemes, global_dt, steps_ranges, blk_logs, 0
+            schemes, global_dt, steps_ranges, queue,
+            blk_logs, 0
         )
     end
 end
@@ -417,8 +419,13 @@ end
 
 function SolverState(params::ArmonParameters{T}, global_dt::GlobalTimeStep{T}) where {T}
     schemes = SolverSchemes(params)
+    if params.use_step_queue
+        queue = NoQueue(params.device)
+    else
+        queue = StepQueue(params.device, params.step_queue_capacity)
+    end
     return SolverState{T}(
-        schemes, global_dt, first(params.steps_ranges),
+        schemes, global_dt, first(params.steps_ranges), queue,
         params.estimated_blk_log_size
     )
 end

@@ -128,6 +128,18 @@ reduction in a single step. It might cause issues on some GPU backends: a more "
 could avoid those by doing it in two steps.
 
 
+    use_step_queue = use_gpu, step_queue_capacity = 100
+
+If `use_step_queue == true`, then the solver steps are put into a queue before being executed.
+This allows schedule mulitple steps on the GPU in the same kernel, reusing cached memory and
+therefore greatly improving performance.
+While it is also supported on the CPU, the default is to not use a queue and execute the steps
+immediately.
+The `step_queue_capacity` is the maximum number of steps that can be put on the queue. Greater
+numbers can increase the lifetime of a GPU kernel, but with a greater overhead when sending the
+steps to the device.
+
+
     workload_distribution = :simple
 
 Dictates how blocks are distributed among threads when `async_cycle == true`:
@@ -353,6 +365,8 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     threads_info::Vector{ThreadInfo}
     block_size::NTuple{2, Int}
     workgroup_size::NTuple{2, Int}  # GPU workgroup size (the block size in CUDA terminology)
+    use_step_queue::Bool
+    step_queue_capacity::Int
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
@@ -579,6 +593,7 @@ function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false, workgroup_size = (32, 32),
     nthreads = Threads.nthreads(),
+    use_step_queue = use_gpu, step_queue_capacity = 100,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = use_gpu,
@@ -630,7 +645,10 @@ function init_device(params::ArmonParameters;
     params.distrib_params = distrib_params
 
     # Default workgroup size: use the maximum of 1024 threads per workgroup
-    params.workgroup_size = workgroup_size 
+    params.workgroup_size = workgroup_size
+
+    params.use_step_queue = use_step_queue
+    params.step_queue_capacity = max(1, step_queue_capacity)
 
     numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
@@ -929,6 +947,13 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     reduc_model = p.reduc_model == first(p.comm_models) ? "same as the exchange model" : p.reduc_model
     print_parameter(io, pad, "reduction model", reduc_model)
 
+    print_parameter(io, pad, "step queue", p.use_step_queue, nl=false)
+    if p.use_step_queue
+        println(io, ", capacity: ", p.step_queue_capacity)
+    else
+        println(io)
+    end
+
     println(io, " ", "─" ^ (pad*2+2))
 
     print_parameter(io, pad, "test", p.test)
@@ -1030,10 +1055,6 @@ neighbour_count(params::ArmonParameters, dir::Axis.T) = count(≠(MPI.PROC_NULL)
 function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
 end
-
-
-host_array_type(::D) where D = Array
-device_array_type(::D) where D = Array
 
 
 function alloc_host_kwargs(params::ArmonParameters)

@@ -46,6 +46,15 @@ macro checkpoint(step_label)
 end
 
 
+can_run_on_device(::Union{CPU, CPU_HP}, step::SolverStep.T) = true
+function can_run_on_device(::GPU, step::SolverStep.T)
+    # Not on GPU (yet): NewCycle, TimeStep, InitTimeStep, NewSweep, Exchange, EndCycle, ErrorState
+    return step in (SolverStep.EOS, SolverStep.Fluxes, SolverStep.CellUpdate, SolverStep.RemapAdvection, SolverStep.RemapProjection)
+end
+
+
+
+
 """
     block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
 
@@ -60,14 +69,20 @@ progress any further until all other blocks have reached the same point.
 """
 function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     state = blk.state
+    queue = state.queue
     steps_completed = 0
     steps_vars = zero(UInt16)
     steps_var_count = 0
+
+    update_queue_status!(queue)
+    !is_done(queue) && return false
+    empty!(queue)
 
     @label next_step
     blk_state = state.step
     new_state = blk_state
     stop_processing = false
+    step_queued = true
 
     #=
     Roughly equivalent to:
@@ -91,7 +106,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     if blk_state == SolverStep.NewCycle
         if start_cycle(state)
             if state.global_dt.cycle == 0
-                update_EOS!(params, state, blk)
+                step_queued, _ = planify_step!(queue, params, state, blk, SolverStep.EOS)
             end
             new_state = SolverStep.TimeStep
         else
@@ -104,8 +119,8 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         # If not given at config-time, the time step of the first cycle will be the same as the
         # second cycle, requiring all blocks to finish computing the time step before starting the
         # first cycle, hence the `InitTimeStep` state.
-        must_wait = next_time_step(params, state, blk)
-        if must_wait
+        step_queued, step_completed = planify_step!(queue, params, state, blk, blk_state)
+        if !(step_queued && step_completed)
             stop_processing = true
         else
             # At initialization, if the time step is 0, we must wait for next cycle's time step, which
@@ -126,38 +141,39 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         end
 
     elseif blk_state == SolverStep.NewSweep
-        if next_axis_sweep!(params, state)
+        step_queued, sweeps_not_done = planify_step!(queue, params, state, blk, blk_state)
+        if !(step_queued && sweeps_not_done)
             new_state = SolverStep.EndCycle
         else
             new_state = SolverStep.EOS
         end
 
     elseif blk_state == SolverStep.EOS
-        update_EOS!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.Exchange
 
     elseif blk_state == SolverStep.Exchange
-        must_wait = block_ghost_exchange(params, state, blk)
-        if must_wait
+        step_queued, step_completed = planify_step!(queue, params, state, blk, blk_state)
+        if !(step_queued && step_completed)
             stop_processing = true
         else
             new_state = SolverStep.Fluxes
         end
 
     elseif blk_state == SolverStep.Fluxes
-        numerical_fluxes!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.CellUpdate
 
     elseif blk_state == SolverStep.CellUpdate
-        cell_update!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.RemapAdvection
 
     elseif blk_state == SolverStep.RemapAdvection
-        advection_fluxes!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.RemapProjection
 
     elseif blk_state == SolverStep.RemapProjection
-        euler_projection!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.NewSweep
 
     elseif blk_state == SolverStep.EndCycle
@@ -180,6 +196,8 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         steps_vars |= var_flags
         steps_var_count += count_ones(var_flags)
     end
+    !step_queued && error("step could not be queued: ", blk_state)
+    stop_processing &= is_full(queue)
     !stop_processing && @goto next_step
 
     if params.log_blocks
@@ -192,6 +210,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         end
     end
 
+    process_queue!(queue, params, state, blk)
     return new_state
 end
 

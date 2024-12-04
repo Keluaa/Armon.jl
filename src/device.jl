@@ -18,6 +18,10 @@ create_device(::Val{:CPU}) = CPU()
 create_device(::Val{:CPU_HP}) = CPU_HP()
 
 
+host_array_type(::Any) = Array
+device_array_type(::Union{CPU, CPU_HP}) = Array
+
+
 struct CPUThreadInfo <: ThreadInfo
     tid :: Int
 end
@@ -37,6 +41,11 @@ same stream is consistently used by the same thread throughout all solver iterat
 function setup_task_for_device(::ArmonParameters{<:Any, <:Union{CPU, CPU_HP}}, tid)
     # nothing to do on CPU
 end
+
+
+create_kernel_event(::Union{CPU, CPU_HP}) = nothing
+put_kernel_event(::Union{CPU, CPU_HP}, event) = nothing
+query_kernel_event(::Union{CPU, CPU_HP}, event) = nothing
 
 
 """

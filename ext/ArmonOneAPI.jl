@@ -23,7 +23,12 @@ function Armon.init_backend(params::ArmonParameters, ::oneAPIBackend; options...
     device = oneAPI.device()
     driver = oneAPI.driver()
     context = oneAPI.context()
+    # TODO: add a ZeEventPool, per device or driver
     for tid in 1:params.nthreads
+        # TODO: defaults are `ordinal=1` and `index=1`, which indicate that two queues cannot execute
+        # simultanously: change to different numbers
+        # See https://oneapi-src.github.io/level-zero-spec/level-zero/latest/core/PROG.html#creation
+        # And https://github.com/JuliaGPU/oneAPI.jl/blob/master/lib/level-zero/cmdqueue.jl
         queue = oneAPI.ZeCommandQueue(context, device)
         params.threads_info[tid] = oneAPIThreadInfo(tid, driver, device, context, queue)
     end
@@ -46,6 +51,14 @@ function Armon.setup_task_for_device(params::ArmonParameters{<:Any, <:oneAPIBack
     task_local_storage((:ZeCommandQueue, thread_info.context, thread_info.device), thread_info.queue)
     return
 end
+
+
+# TODO: see https://oneapi-src.github.io/level-zero-spec/level-zero/latest/core/PROG.html#events
+# TODO: see https://github.com/JuliaGPU/oneAPI.jl/blob/master/lib/level-zero/event.jl
+#      also https://github.com/JuliaGPU/oneAPI.jl/blob/master/lib/level-zero/cmdlist.jl
+# Armon.create_kernel_event(::oneAPIBackend) = oneAPI.oneL0.ZeEvent(pool, index)
+# Armon.put_kernel_event(::oneAPIBackend, event) = oneAPI.oneL0.record(event)
+# Armon.query_kernel_event(::oneAPIBackend, event) = CUDA.isdone(event)
 
 
 function Base.wait(params::ArmonParameters{<:Any, <:oneAPIBackend}, tid)

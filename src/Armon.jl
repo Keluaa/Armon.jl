@@ -17,6 +17,7 @@ export device_to_host!, host_to_device!
 
 # Forward declarations
 abstract type ThreadInfo end
+abstract type AbstractStepQueue{Device} end
 abstract type Limiter end
 abstract type RiemannScheme end
 abstract type ProjectionScheme end
@@ -45,6 +46,7 @@ include("axis_splitting.jl")
 include("halo_exchange.jl")
 include("io.jl")
 include("logging.jl")
+include("step_queue.jl")
 include("solver.jl")
 
 end

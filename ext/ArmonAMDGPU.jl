@@ -40,6 +40,11 @@ function Armon.setup_task_for_device(params::ArmonParameters{<:Any, <:ROCBackend
 end
 
 
+Armon.create_kernel_event(::ROCBackend) = AMDGPU.HIPEvent(ADMGPU.stream(); do_record=false, timing=false)
+Armon.put_kernel_event(::ROCBackend, event) = AMDGPU.record(event)
+Armon.query_kernel_event(::ROCBackend, event) = AMDGPU.isdone(event)
+
+
 function Base.wait(params::ArmonParameters{<:Any, <:ROCBackend}, tid)
     thread_info::ROCThreadInfo = Armon.thread_info(params, tid)
     AMDGPU.synchronize(thread_info.stream)
