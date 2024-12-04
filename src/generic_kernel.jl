@@ -644,6 +644,40 @@ function make_kokkos_kernel_call(func_name, cpu_kernel_def, is_V_in_where, loop_
 end
 
 
+"""
+    @sub_kernel_call(idx, call_expr)
+
+`call_expr` should be a call to a `@generic_kernel`.
+Then this kernel will be executed as a normal function call inside the current GPU kernel,
+for a single index: `idx`.
+
+This is only valid on GPU.
+
+```julia
+@generic_kernel function kernel_a(a, b, c)
+    i = @index_2D_lin()
+    a[i] = b[i] * c[i] + π
+end
+
+@kernel cpu=false function complex_kernel(a, b, c, ranges_info)
+    i = @index(Global, Linear)
+    idx = (; idx = ..., lin_1D = ..., lin_2D = ...)
+    @sub_kernel_call idx kernel_a(a, b, c)
+end
+```
+"""
+macro sub_kernel_call(idx, call_expr)
+    if !isexpr(:call, call_expr)
+        return esc(:(error("not a function call: ", $(QuoteNode(call_expr)))))
+    end
+
+    insert!(call_expr, 2, :($KernelAbstractions.@context))
+    insert!(call_expr, 3, idx)
+
+    return esc(call_expr)
+end
+
+
 function transform_kernel(func::Expr)
     def = splitdef(func)
     func_name = def[:name]
@@ -820,6 +854,29 @@ function transform_kernel(func::Expr)
         ndrange = ($gpu_ndrange, 1, 1)
     end
 
+    # -- GPU function (to be called from another GPU kernel) --
+
+    gpu_f_def = deepcopy(def)
+
+    # Indexes are replaced by a NamedTuple placed in the function arguments
+    index_arg = gensym(:I)
+
+    gpu_f_def[:body], _, _, _, _ = kernel_body_pass!(gpu_f_def[:body], Dict(
+        :lin_1D => quote $index_arg.lin_1D end,
+        :lin_2D => quote $index_arg.lin_2D end,
+        :iter_idx => quote $index_arg.idx end
+    ), :GPU)
+
+    # Adding the KernelAbstractions context to the arguments allows to use some device-side functions,
+    # as well as disambiguate this kernel function from the other kernel methods.
+    ka_ctx_sym = @macroexpand KernelAbstractions.@context()
+    pushfirst!(gpu_f_def[:args],
+        :($ka_ctx_sym::KernelAbstractions.CompilerMetadata),
+        :($index_arg::@NamedTuple{idx::Int, lin_1D::Int, lin_2D::Int})
+    )
+
+    gpu_f_block = combinedef(gpu_f_def)
+
     # -- Wrapping function --
 
     # Create the definition of the main function, which will take care of dispatching the arguments
@@ -924,6 +981,7 @@ function transform_kernel(func::Expr)
         $(cpu_block)
         $(kokkos_block)
         $(gpu_block)
+        $(gpu_f_block)
         $(main_block)
     end
 

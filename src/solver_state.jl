@@ -497,6 +497,28 @@ end
 
 
 """
+    BasicSolverState
+
+Immutable version of a lightweight [`SolverState`](@ref), for use in GPU kernels.
+"""
+struct BasicSolverState{T, Schemes <: SolverSchemes, StepsRangesArray <: AbstractArray{StepsRanges}}
+    dx                :: T
+    dt                :: T
+    axis              :: Axis.T
+    schemes           :: Schemes
+    steps_ranges      :: StepsRangesArray
+end
+
+BasicSolverState(solver_state::SolverState) =
+    BasicSolverState(solver_state.dx, solver_state.dt, solver_state.axis, solver_state.schemes, solver_state.device_ranges)
+
+Base.eltype(::ObjOrType{BasicSolverState{T}}) where {T} = T
+
+Adapt.adapt_structure(to, bss::BasicSolverState) =
+    BasicSolverState(bss.dx, bss.dt, bss.axis, bss.schemes, Adapt.adapt(to, bss.steps_ranges))
+
+
+"""
     BLOCK_LOG_THREAD_LOCAL_STORAGE::Dict{UInt16, Int32}
 
 Incremented by 1 every time a `BlockLogEvent` is created in a thread, i.e. each time a block has

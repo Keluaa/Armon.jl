@@ -12,6 +12,8 @@ using Preferences
 using EnumX
 using Scotch
 
+import Adapt
+
 export ArmonParameters, BlockGrid, SolverStats, armon, data_type, memory_required
 export device_to_host!, host_to_device!
 
@@ -48,5 +50,6 @@ include("io.jl")
 include("logging.jl")
 include("step_queue.jl")
 include("solver.jl")
+include("state_machine_kernel.jl")
 
 end

@@ -32,17 +32,19 @@ struct BlockData{V}
     work_3 :: V
     work_4 :: V
     mask   :: V  # TODO: remove ??
-
-    function BlockData{V}(size; kwargs...) where {V}
-        vars = ntuple(length(block_vars())) do i
-            var = block_vars()[i]
-            label = string(var)
-            return V(undef, size; alloc_array_kwargs(; label, kwargs...)...)
-        end
-        return new{V}(vars...)
-    end
 end
 
+function BlockData{V}(size; kwargs...) where {V}
+    vars = ntuple(length(block_vars())) do i
+        var = block_vars()[i]
+        label = string(var)
+        return V(undef, size; alloc_array_kwargs(; label, kwargs...)...)
+    end
+    return new{V}(vars...)
+end
+
+# Adapt function to allow passing a BlockData struct to a GPU kernel
+Adapt.adapt_structure(to, data::BlockData) = BlockData(Adapt.adapt.(Ref(to), get_vars(data, fieldnames(typeof(data))))...)
 
 block_vars() = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ, :work_1, :work_2, :work_3, :work_4, :mask)
 main_vars()  = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ)  # Variables synchronized between host and device
