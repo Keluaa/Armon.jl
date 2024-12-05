@@ -40,7 +40,7 @@ function BlockData{V}(size; kwargs...) where {V}
         label = string(var)
         return V(undef, size; alloc_array_kwargs(; label, kwargs...)...)
     end
-    return new{V}(vars...)
+    return BlockData{V}(vars...)
 end
 
 # Adapt function to allow passing a BlockData struct to a GPU kernel

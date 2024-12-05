@@ -421,9 +421,9 @@ end
 function SolverState(params::ArmonParameters{T}, global_dt::GlobalTimeStep{T}) where {T}
     schemes = SolverSchemes(params)
     if params.use_step_queue
-        queue = NoQueue(params.device)
-    else
         queue = StepQueue(params.device, params.step_queue_capacity)
+    else
+        queue = NoQueue(params.device)
     end
     return SolverState{T}(
         schemes, global_dt, params.steps_ranges, params.device_steps_ranges, queue,

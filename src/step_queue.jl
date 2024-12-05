@@ -12,6 +12,7 @@ Base.length(::NoQueue) = 0
 Base.isempty(::NoQueue) = true
 is_full(::NoQueue) = false
 is_done(::NoQueue) = true
+is_running(q::NoQueue) = false  # all steps are synchronous
 Base.empty!(q::NoQueue) = q
 
 function planify_step!(queue::NoQueue, params, state, blk, step)
@@ -49,13 +50,16 @@ function StepQueue(device, expected_max_num_steps)
     else
         device_queue = DeviceStepQueue(device, expected_max_num_steps)
     end
-    return StepQueue(device, Vector{SolverStep.T}(undef, expected_max_num_steps), 0, 1, true, device_queue)
+    queue = StepQueue(device, Vector{SolverStep.T}(undef, expected_max_num_steps), 0, 1, true, device_queue)
+    !(device isa Union{CPU, CPU_HP}) && copyto!(device_queue, queue)
+    return queue
 end
 
 Base.length(q::StepQueue) = q.length
 Base.isempty(q::StepQueue) = q.length == 0
 is_full(q::StepQueue) = q.length == length(q.steps)
 is_done(q::StepQueue) = q.pos > q.length
+is_running(q::StepQueue) = is_running(q.device_queue)
 
 
 function Base.empty!(q::StepQueue)
@@ -68,8 +72,8 @@ end
 @inbounds function Base.push!(queue::StepQueue, step::SolverStep.T)
     !can_run_on_device(queue.device, step) && return false
     is_full(queue) && return false
-    queue.steps[queue.length] = step
     queue.length += 1
+    queue.steps[queue.length] = step
     return true
 end
 
@@ -97,9 +101,12 @@ end
 
 function process_queue!(queue::StepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
     if !(queue.device_queue isa NoQueue)
-        # Send the steps to the GPU and process them there
-        copyto!(queue.device_queue, queue)
-        process_queue!(queue, params, state, blk)
+        if queue.pos == 1
+            # Initial step: send all steps to the device
+            # TODO: we will repeatedly send the steps if the first one blocks for any reason
+            copyto!(queue.device_queue, queue)
+        end
+        process_queue!(queue.device_queue, params, state, blk)
         return
     end
 
@@ -121,8 +128,8 @@ end
 
 
 function update_queue_status!(q::StepQueue)
-    queue.device_queue isa NoQueue && return true
-    !update_queue_status!(q.device_queue) && return false
+    q.device_queue isa NoQueue && return true
+    is_running(q.device_queue) && return false
     copyto!(q, q.device_queue)  # Retreive the status of the device to the host
     return true
 end
@@ -157,10 +164,17 @@ end
 Adapt.adapt_structure(to, q::DeviceStepQueue) =
     DeviceStepQueue(q.device, Adapt.adapt(to, q.steps), Adapt.adapt(to, q.status), nothing)
 
+# Those 4 methods can only be called from the device
 Base.length(q::DeviceStepQueue) = @inbounds(q.status[1])
 Base.isempty(q::DeviceStepQueue) = length(q) == 0
 is_full(q::DeviceStepQueue) = length(q) == length(q.steps)
 is_done(q::DeviceStepQueue) = @inbounds(q.status[2]) > length(q)
+
+function is_running(q::DeviceStepQueue)
+    isnothing(q.event) && return true
+    # TODO: this is somewhat expensive (>1µs), make sure to not abuse it
+    return !query_kernel_event(queue.device, queue.event)
+end
 
 
 function Base.copyto!(dst::DeviceStepQueue, src::StepQueue)
@@ -190,9 +204,6 @@ function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::
     put_kernel_event(queue.device, queue.event)
     return
 end
-
-
-update_queue_status!(queue::DeviceStepQueue) = query_kernel_event(queue.device, queue.event)
 
 
 function perform_step(device, step::SolverStep.T, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)

@@ -208,7 +208,7 @@ end
 @fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
     # CPU reduction
     (; ρ, E) = block_device_data(blk)
-    range = block_domain_range(blk.size, blk.state.steps_ranges[Int(state.axis)].real_domain)
+    range = block_domain_range(blk.size, blk.state.steps_ranges[Int(blk.state.axis)].real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
