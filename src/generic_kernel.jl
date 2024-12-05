@@ -667,13 +667,25 @@ end
 ```
 """
 macro sub_kernel_call(idx, call_expr)
-    if !isexpr(:call, call_expr)
-        return esc(:(error("not a function call: ", $(QuoteNode(call_expr)))))
+    if !isexpr(call_expr, :call)
+        err_str = "not a function call: " * string(call_expr)
+        return esc(:(error($err_str)))
     end
 
-    insert!(call_expr, 2, :($KernelAbstractions.@context))
-    insert!(call_expr, 3, idx)
+    func_name = isexpr(call_expr.args[1], :.) ? call_expr.args[1].args[2].value : call_expr.args[1]
+    kernel_name = Symbol(string(func_name) * "_kernel")
 
+    if isexpr(call_expr.args[1], :.)
+        call_expr.args[1].args[2].value = kernel_name
+    else
+        call_expr.args[1] = kernel_name
+    end
+
+    insert!(call_expr.args, 2, :($KernelAbstractions.@context))
+    insert!(call_expr.args, 3, idx)
+
+    # TODO: inlining seems to decrease performance... to investigate
+    # return esc(Expr(:macrocall, Base.var"@inline", __source__, call_expr))
     return esc(call_expr)
 end
 

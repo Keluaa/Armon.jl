@@ -1,6 +1,10 @@
 
 struct StateMachineKernelError <: Exception
-    task :: SolverStep.T
+    step :: SolverStep.T
+end
+
+function Base.showerror(io::IO, ex::StateMachineKernelError)
+    println(io, "Invalid device state machine step: ", ex.step)
 end
 
 
@@ -27,8 +31,7 @@ function is_gpu_thread_in_step_domain(state::BasicSolverState, bsize::BlockSize,
 end
 
 
-@kernel cpu=false function state_machine_kernel(data::BlockData, state::BasicSolverState, bsize::BlockSize, sub_tasks::AbstractArray{SolverStep.T})
-
+@kernel cpu=false function state_machine_kernel(data::BlockData, state::BasicSolverState, bsize::BlockSize, queue::DeviceStepQueue)
     # TODO: first attempt: kernels are launched with as many items as there is cells in the block
     #   => this means that we don't have to worry about tiling
     #   => this means that all items on the edges will do almost no work
@@ -39,112 +42,117 @@ end
     I = @index(Global, NTuple)
     idx = (;
         idx = @index(Global, Linear),
-        lin_1D = 0,  # TODO: not sure
-        lin_2D = lin_position(bsize, I)  # TODO: check
+        lin_1D = 0,  # TODO: not sure, only used in some steps
+        lin_2D = lin_position(bsize, I .- ghosts(bsize))
     )
 
-    for task in sub_tasks
-        # Each step may use a different domain, therefore some threads will have nothing to do for
-        # some steps. They go immediately to the `__syncthreads` call.
-        if !is_gpu_thread_in_step_domain(state, bisze, task, I)
-            @goto nothing_to_do
+    step_idx = @inbounds queue.status[2]
+    KernelAbstractions.@synchronize()
+
+@label step_loop
+    # In order to spare some registers, we don't use a `for` loop but use `@goto` and an index stored
+    # in `queue.status[2]`.
+    step_idx > length(queue) && return
+    step = queue.steps[step_idx]
+
+    if !can_run_on_device(queue.device, step)
+        throw(StateMachineKernelError(step))
+    end
+
+    # Each step may use a different domain, therefore some threads will have nothing to do for
+    # some steps. They go immediately to the `__syncthreads` call.
+    if !is_gpu_thread_in_step_domain(state, bsize, step, I)
+        @goto nothing_to_do
+    end
+
+    if step == SolverStep.TimeStep
+        # TODO: reduction? => possible for a single block, need to reuse the logic inside CUDA.mapreduce/AMDGPU.mapreduce
+        # TODO: use `Armon.gpu_workgroup_reduction` for this
+        # TODO: are we forced to use a single workgroup? couldn't we just place the results of
+        # each workgroup in an array (which wouldn't be very large), and then perform the final
+        # reduction on the CPU after a copy. Since the reduction isn't always required for the
+        # rest of the steps, this is a very attractive option.
+        # => however this comes at the cost of preventing any other type of reduction in this kernel,
+        #    this can be viewed as an ad-hoc optimization...
+        # => the only alternative is parsing the block by tiles of the workgroup size
+
+    elseif step == SolverStep.NewSweep
+        # TODO: start a new sweep here? or do it on the host?
+        # TODO: since we have the domains, strides, and all data arrays, it is possible to do this
+        # TODO: but we may be missing Δx or Δy
+
+    elseif step == SolverStep.EOS
+        if state.schemes.test_case isa Bizarrium
+            @sub_kernel_call idx bizarrium_EOS!(data.ρ, data.u, data.v, data.E, data.p, data.c, data.g)
+        else
+            γ = eltype(state)(specific_heat_ratio(state.schemes.test_case))
+            @sub_kernel_call idx perfect_gas_EOS!(γ, data.ρ, data.E, data.u, data.v, data.p, data.c, data.g)
         end
 
-        if task == SolverStep.TimeStep
-            # TODO: reduction? => possible for a single block, need to reuse the logic inside CUDA.mapreduce/AMDGPU.mapreduce
-            # TODO: use `Armon.gpu_workgroup_reduction` for this
-            # TODO: are we forced to use a single workgroup? couldn't we just place the results of
-            # each workgroup in an array (which wouldn't be very large), and then perform the final
-            # reduction on the CPU after a copy. Since the reduction isn't always required for the
-            # rest of the steps, this is a very attractive option.
-            # => however this comes at the cost of preventing any other type of reduction in this kernel,
-            #    this can be viewed as an ad-hoc optimization...
-            # => the only alternative is parsing the block by tiles of the workgroup size
-            throw(StateMachineKernelError(task))
+    elseif step == SolverStep.Exchange
+        # TODO: boundary conditions use a very different domain, dertermine if `idx` is in the domain
+        #   and compute the BC only if so, otherwise `@synchronize(is_idx_not_on_the_side)`
+        # TODO: since there is one kernel item per cell, we could do the BC of both sides at once
+        # TODO: u_factor, v_factor could also be computed from here
+        # side = Side.Left
+        # u_factor, v_factor = zero(eltype(state)), zero(eltype(state))
+        # @sub_kernel_call idx boundary_conditions!(
+        #     data.ρ, data.u, data.v, data.p, data.c, data.g, data.E,
+        #     bsize, state.axis, side,
+        #     u_factor, v_factor
+        # )
+        # TODO: local block exchange using atomic (but how to get the dimensions + data arrays of the neighbouring block?)
 
-        elseif task == SolverStep.NewSweep
-            # TODO: start a new sweep here? or do it on the host?
-            # TODO: since we have the domains, strides, and all data arrays, it is possible to do this
-            # TODO: but we may be missing Δx or Δy
-            throw(StateMachineKernelError(task))
-
-        elseif task == SolverStep.EOS
-            if state.schemes.test_case <: Bizarrium
-                @sub_kernel_call idx bizarrium_EOS!(data.ρ, data.u, data.v, data.E, data.p, data.c, data.g)
-            else
-                γ = eltype(state)(specific_heat_ratio(state.schemes.test_case))
-                @sub_kernel_call idx perfect_gas_EOS!(γ, data.ρ, data.E, data.u, data.v, data.p, data.c, data.g)
-            end
-
-        elseif task == SolverStep.Exchange
-            throw(StateMachineKernelError(task))
-
-            # TODO: boundary conditions use a very different domain, dertermine if `idx` is in the domain
-            #   and compute the BC only if so, otherwise `@synchronize(is_idx_not_on_the_side)`
-            # TODO: since there is one kernel item per cell, we could do the BC of both sides at once
-            # TODO: u_factor, v_factor could also be computed from here
-            side = Side.Left
-            u_factor, v_factor = zero(eltype(state)), zero(eltype(state))
-            @sub_kernel_call idx boundary_conditions!(
-                data.ρ, data.u, data.v, data.p, data.c, data.g, data.E,
-                bsize, state.axis, side,
-                u_factor, v_factor
+    elseif step == SolverStep.Fluxes
+        s = stride_along(bsize, state.axis)
+        uₐ = state.axis == Axis.X ? data.u : data.v
+        if state.schemes.riemann_scheme isa RiemannGodunov
+            @sub_kernel_call idx acoustic!(s, data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c)
+        elseif state.schemes.riemann_scheme isa RiemannGAD
+            @sub_kernel_call idx acoustic_GAD!(
+                s, state.dt, state.dx,
+                data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c,
+                state.schemes.riemann_limiter
             )
-            # TODO: local block exchange using atomic (but how to get the dimensions + data arrays of the neighbouring block?)
+        end
 
-        elseif task == SolverStep.Fluxes
-            s = stride_along(bsize, state.axis)
-            uₐ = state.axis == Axis.X ? data.u : data.v
-            if state.schemes.riemann_scheme <: RiemannGodunov
-                @sub_kernel_call idx acoustic!(s, data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c)
-            elseif state.schemes.riemann_scheme <: RiemannGAD
-                @sub_kernel_call idx acoustic_GAD!(
-                    s, state.dt, state.dx,
-                    data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c,
-                    state.schemes.riemann_limiter
-                )
-            else
-                throw(StateMachineKernelError(task))
-            end
+    elseif step == SolverStep.CellUpdate
+        s = stride_along(bsize, state.axis)
+        uₐ = state.axis == Axis.X ? data.u : data.v
+        @sub_kernel_call idx cell_update!(s, state.dx, state.dt, data.uˢ, data.pˢ, data.ρ, uₐ, data.E)
 
-        elseif task == SolverStep.CellUpdate
-            s = stride_along(bsize, state.axis)
-            uₐ = state.axis == Axis.X ? data.u : data.v
-            @sub_kernel_call idx cell_update!(s, state.dx, state.dt, data.uˢ, data.pˢ, data.ρ, uₐ, data.E)
-
-        elseif step == SolverStep.RemapAdvection
-            s = stride_along(bsize, state.axis)
-            if state.schemes.projection_scheme <: EulerProjection
-                @sub_kernel_call idx advection_first_order!(
-                    s, state.dt,
-                    data.uˢ, data.ρ, data.u, data.v, data.E,
-                    data.work_1, data.work_2, data.work_3, data.work_4
-                )
-            elseif state.schemes.projection_scheme <: Euler2ndProjection
-                @sub_kernel_call idx advection_second_order!(
-                    s, state.dx, state.dt,
-                    data.uˢ, data.ρ, data.u, data.v, data.E,
-                    data.work_1, data.work_2, data.work_3, data.work_4
-                )
-            else
-                throw(StateMachineKernelError(task))
-            end
-
-        elseif task == SolverStep.RemapProjection
-            s = stride_along(bsize, state.axis)
-            @sub_kernel_call idx euler_projection!(
-                s, state.dx, state.dt, data.uˢ, data.ρ, data.u, data.v, data.E,
+    elseif step == SolverStep.RemapAdvection
+        s = stride_along(bsize, state.axis)
+        if state.schemes.projection_scheme isa EulerProjection
+            @sub_kernel_call idx advection_first_order!(
+                s, state.dt,
+                data.uˢ, data.ρ, data.u, data.v, data.E,
                 data.work_1, data.work_2, data.work_3, data.work_4
             )
-
-        elseif task == SolverStep.EndCycle
-            break
-
-        else
-            throw(StateMachineKernelError(task))
+        elseif state.schemes.projection_scheme isa Euler2ndProjection
+            @sub_kernel_call idx advection_second_order!(
+                s, state.dx, state.dt,
+                data.uˢ, data.ρ, data.u, data.v, data.E,
+                data.work_1, data.work_2, data.work_3, data.work_4
+            )
         end
 
-@label nothing_to_do
-        KernelAbstractions.@synchronize()
+    elseif step == SolverStep.RemapProjection
+        s = stride_along(bsize, state.axis)
+        @sub_kernel_call idx euler_projection!(
+            s, state.dx, state.dt, data.uˢ, data.ρ, data.u, data.v, data.E,
+            data.work_1, data.work_2, data.work_3, data.work_4
+        )
     end
+
+@label nothing_to_do
+    if idx.idx == 1  # TODO: ugly
+        queue.status[2] += 1  # increment the position, as this step was completed
+        # queue.status[3] = true  # we can always continue to the next step (for now)
+    end
+    KernelAbstractions.@synchronize()
+
+    # step_idx = queue.status[2]  # TODO: using atomic add + load is mandatory here I think
+    step_idx += 1
+    @goto step_loop
 end

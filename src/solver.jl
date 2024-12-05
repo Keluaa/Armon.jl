@@ -74,6 +74,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
 
     is_stopped = update_queue_status!(queue)
     if !is_stopped
+        # The device is still processing the steps
         return state.step
     elseif !is_done(queue)
         # The queue stopped since one step needed to wait for an external event (e.g. neighbouring

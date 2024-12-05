@@ -100,6 +100,8 @@ end
 
 
 function process_queue!(queue::StepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    is_done(queue) && return  # no step to process
+
     if !(queue.device_queue isa NoQueue)
         if queue.pos == 1
             # Initial step: send all steps to the device
@@ -111,18 +113,18 @@ function process_queue!(queue::StepQueue, params::ArmonParameters, state::Solver
     end
 
     pos = queue.pos
-    must_wait = false
+    can_continue = true
     for outer pos in queue.pos:queue.length
-        must_wait = perform_step(queue.device, @inbounds(queue.steps[pos]), params, state, blk)
-        must_wait && break
+        can_continue = perform_step(queue.device, @inbounds(queue.steps[pos]), params, state, blk)
+        !can_continue && break
     end
 
-    # If `must_wait == false`, then all steps in the queue have been completed, so make `pos > length`
+    # If `can_continue == true`, then all steps in the queue have been completed, so make `pos > length`
     # in order to mark the queue as done.
-    # If `must_wait == true`, then the last step couldn't be completed: the next call to `process_queue!`
+    # If `can_continue == false`, then the last step couldn't be completed: the next call to `process_queue!`
     # should retry that same step.
-    queue.pos = pos + !must_wait
-    queue.can_continue = !must_wait
+    queue.pos = pos + can_continue
+    queue.can_continue = can_continue
     return
 end
 
@@ -149,7 +151,7 @@ struct DeviceStepQueue{Device, StepArray, StatusArray, Event} <: AbstractStepQue
     # The status array is required in order to return multiple values from the device
     #  1: number of steps (may be lower than `length(steps)`)
     #  2: index in `steps`
-    #  3: `≠ 0` if we cannot continue (i.e. must wait before applying the next steps)
+    #  3: `≠ 1` if we cannot continue (i.e. must wait before applying the next steps)
     status :: StatusArray
     event  :: Event
 end
@@ -173,7 +175,7 @@ is_done(q::DeviceStepQueue) = @inbounds(q.status[2]) > length(q)
 function is_running(q::DeviceStepQueue)
     isnothing(q.event) && return true
     # TODO: this is somewhat expensive (>1µs), make sure to not abuse it
-    return !query_kernel_event(queue.device, queue.event)
+    return !query_kernel_event(q.device, q.event)
 end
 
 
@@ -194,10 +196,9 @@ end
 function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
     basic_state = BasicSolverState(state)
     state_machine_func = state_machine_kernel(queue.device, params.workgroup_size)
-    sub_tasks = queue.steps
 
     # TODO: the ndrange is quite important, the current choice is maybe sub-optimal since it includes all ghost cells
-    state_machine_func(blk.device_data, basic_state, blk.size, sub_tasks; ndrange=block_size(blk))
+    state_machine_func(blk.device_data, basic_state, blk.size, queue; ndrange=block_size(blk))
 
     # Place an event in the device stream in order to be able to know when the kernel has completed,
     # independantly of the status of the stream.
