@@ -156,3 +156,144 @@ end
     step_idx += 1
     @goto step_loop
 end
+
+
+function thread_position_to_block_index(thread_pos, tile_iter_idx, state, wrap_tile, step)
+    tile_idx = thread_pos .+ tile_iter_idx .* wrap_tile
+
+    # `corners` are offsets, and `I` would be an index in the real cells of the block
+    corners = getfield(state.steps_ranges[Int(state.axis)], step)
+    I = tile_idx .+ corners[1]
+
+    in_bounds = all(I .< real_block_size(bsize) .+ corners[2])
+    return I, in_bounds
+end
+
+
+macro tiled_2D_iter(step, step_call)
+    return esc(quote
+        for tile_iter_idx_y in 1:tile_count[2], tile_iter_idx_x in 1:tile_count[1]
+            # Compute everything from `tile_iter_idx`, in order to minimize the amount of
+            # memory dependancies across loop iterations.
+            thread_pos = @index(Local, NTuple)
+            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, $step)
+            if in_bounds
+                idx = lin_position(bsize, I)
+                $step_call
+            end
+        end
+    end)
+end
+
+
+@kernel cpu=false function tiled_block_iter(
+    data::BlockData, state::BasicSolverState, queue::DeviceStepQueue, bsize::BlockSize,
+    ::Val{wrap_tile}, ::Val{tile_count}
+) where {wrap_tile, tile_count}
+    # TODO: does using gotos instead of loops could improve register usage and performance?
+    for step_idx in 1:length(queue)
+        step = queue.steps[step_idx]
+
+        if step == SolverStep.EOS
+            @tiled_2D_iter :EOS begin
+                if state.schemes.test_case isa Bizarrium
+                    @sub_kernel_call idx bizarrium_EOS!(data.ρ, data.u, data.v, data.E, data.p, data.c, data.g)
+                else
+                    γ = eltype(state)(specific_heat_ratio(state.schemes.test_case))
+                    @sub_kernel_call idx perfect_gas_EOS!(γ, data.ρ, data.E, data.u, data.v, data.p, data.c, data.g)
+                end
+            end
+
+        elseif step == SolverStep.Fluxes
+            @tiled_2D_iter :fluxes begin
+                s = stride_along(bsize, state.axis)
+                uₐ = state.axis == Axis.X ? data.u : data.v
+                if state.schemes.riemann_scheme isa RiemannGodunov
+                    @sub_kernel_call idx acoustic!(s, data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c)
+                elseif state.schemes.riemann_scheme isa RiemannGAD
+                    @sub_kernel_call idx acoustic_GAD!(
+                        s, state.dt, state.dx,
+                        data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c,
+                        state.schemes.riemann_limiter
+                    )
+                end
+            end
+
+        elseif step == SolverStep.CellUpdate
+            @tiled_2D_iter :cell_updsate begin
+                s = stride_along(bsize, state.axis)
+                uₐ = state.axis == Axis.X ? data.u : data.v
+                @sub_kernel_call idx cell_update!(s, state.dx, state.dt, data.uˢ, data.pˢ, data.ρ, uₐ, data.E)
+            end
+    
+        elseif step == SolverStep.RemapAdvection
+            @tiled_2D_iter :advection begin
+                s = stride_along(bsize, state.axis)
+                if state.schemes.projection_scheme isa EulerProjection
+                    @sub_kernel_call idx advection_first_order!(
+                        s, state.dt,
+                        data.uˢ, data.ρ, data.u, data.v, data.E,
+                        data.work_1, data.work_2, data.work_3, data.work_4
+                    )
+                elseif state.schemes.projection_scheme isa Euler2ndProjection
+                    @sub_kernel_call idx advection_second_order!(
+                        s, state.dx, state.dt,
+                        data.uˢ, data.ρ, data.u, data.v, data.E,
+                        data.work_1, data.work_2, data.work_3, data.work_4
+                    )
+                end
+            end
+    
+        elseif step == SolverStep.RemapProjection
+            @tiled_2D_iter :projection begin
+                s = stride_along(bsize, state.axis)
+                @sub_kernel_call idx euler_projection!(
+                    s, state.dx, state.dt, data.uˢ, data.ρ, data.u, data.v, data.E,
+                    data.work_1, data.work_2, data.work_3, data.work_4
+                )
+            end
+        end
+
+        @synchronize()
+    end
+
+    if isone(@index(Global, Cartesian))
+        queue.status[2] = length(queue) + 1
+    end
+end
+
+
+function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    basic_state = BasicSolverState(state)
+
+    if !params.use_tiled_state_machine
+        state_machine_func = state_machine_kernel(queue.device, params.workgroup_size)
+        # TODO: the ndrange is quite important, the current choice is maybe sub-optimal since it includes all ghost cells
+        state_machine_func(blk.device_data, basic_state, blk.size, queue; ndrange=block_size(blk))
+    else
+        # grid size == workgroup size  =>  exactly 1 workgroup per kernel
+        tiled_block_iter_func = tiled_block_iter(queue.device, params.workgroup_size, params.workgroup_size)
+
+        # split `block_size(blk)` into tiles
+        # `(64, 64)` split into tiles of `workgroup_size`
+        # => `(64, 64) .÷ (32, 32) = (2, 2)`
+        # => each thread does:
+        #  - `thread_pos .+ work_group_size .* (0, 0)`
+        #  - `thread_pos .+ work_group_size .* (1, 0)`
+        #  - `thread_pos .+ work_group_size .* (0, 0)`
+        #  - `thread_pos .+ work_group_size .* (1, 1)`
+
+        wrap_tile = params.workgroup_size
+        tile_count = cld.(block_size(blk), wrap_tile)
+
+        tiled_block_iter_func(
+            blk.device_data, basic_state, queue, blk.size,
+            Val(wrap_tile), Val(tile_count)
+        )
+    end
+
+    # Place an event in the device stream in order to be able to know when the kernel has completed,
+    # independantly of the status of the stream.
+    put_kernel_event(queue.device, queue.event)
+    return
+end

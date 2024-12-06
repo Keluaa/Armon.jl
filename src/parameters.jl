@@ -368,6 +368,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     workgroup_size::NTuple{2, Int}  # GPU workgroup size (the block size in CUDA terminology)
     use_step_queue::Bool
     step_queue_capacity::Int
+    use_tiled_state_machine::Bool
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
@@ -594,7 +595,7 @@ function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false, workgroup_size = (32, 32),
     nthreads = Threads.nthreads(),
-    use_step_queue = use_gpu, step_queue_capacity = 100,
+    use_step_queue = use_gpu, step_queue_capacity = 100, use_tiled_state_machine = false,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = use_gpu,
@@ -647,6 +648,7 @@ function init_device(params::ArmonParameters;
 
     # Default workgroup size: use the maximum of 1024 threads per workgroup
     params.workgroup_size = workgroup_size
+    params.use_tiled_state_machine = use_tiled_state_machine
 
     params.use_step_queue = use_step_queue
     params.step_queue_capacity = max(1, step_queue_capacity)
@@ -921,6 +923,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
             p.nthreads != 1 ? "s" : "", ")")
     end
     print_device_info(io, pad, p)
+    print_parameter(io, pad, "tiled state mach", p.use_tiled_state_machine)
     print_parameter(io, pad, "blocking", p.use_cache_blocking ? (p.async_cycle ? "async" : "sync") : false, nl=false)
     if p.use_cache_blocking && p.async_cycle
         print(io, ", distribution: ", p.workload_distribution)

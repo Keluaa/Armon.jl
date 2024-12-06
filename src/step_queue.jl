@@ -193,20 +193,6 @@ function Base.copyto!(dst::StepQueue, src::DeviceStepQueue)
 end
 
 
-function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    basic_state = BasicSolverState(state)
-    state_machine_func = state_machine_kernel(queue.device, params.workgroup_size)
-
-    # TODO: the ndrange is quite important, the current choice is maybe sub-optimal since it includes all ghost cells
-    state_machine_func(blk.device_data, basic_state, blk.size, queue; ndrange=block_size(blk))
-
-    # Place an event in the device stream in order to be able to know when the kernel has completed,
-    # independantly of the status of the stream.
-    put_kernel_event(queue.device, queue.event)
-    return
-end
-
-
 function perform_step(device, step::SolverStep.T, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
     # TODO: move this elsewhere
     must_wait = false
