@@ -184,9 +184,11 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         new_state = SolverStep.NewSweep
 
     elseif blk_state == SolverStep.EndCycle
-        end_cycle!(state)
         stop_processing = true
-        new_state = SolverStep.NewCycle
+        if is_done(queue)
+            end_cycle!(state)
+            new_state = SolverStep.NewCycle
+        end
 
     else
         error("unknown state: $blk_state")
@@ -279,8 +281,6 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
             step_count += 1
             all_finished_cycle && break
             no_progress_count += no_progress
-
-            wait(params, tid)  # Wait for the completion of all GPU kernels
 
             if can_advance_time_step
                 # If `params.thread_split_comm`, then only the main thread can touch the MPI reduction

@@ -178,7 +178,11 @@ macro tiled_2D_iter(step, step_call)
             thread_pos = @index(Local, NTuple)
             I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, $step)
             if in_bounds
-                idx = lin_position(bsize, I)
+                idx = (;
+                    idx = 0,
+                    lin_1D = 0,
+                    lin_2D = lin_position(bsize, I)
+                )
                 $step_call
             end
         end
@@ -257,7 +261,7 @@ end
         @synchronize()
     end
 
-    if isone(@index(Global, Cartesian))
+    if @index(Global, Cartesian) == CartesianIndex(1, 1)
         queue.status[2] = length(queue) + 1
     end
 end
