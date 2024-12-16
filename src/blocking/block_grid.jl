@@ -28,12 +28,16 @@ struct BlockGrid{
     BS          <: StaticBSize{<:Any, Ghost},
     SState      <: SolverState,
     Device,
+    DeviceGrid  <: Union{DeviceBlockGrid, Nothing},
+    DeviceGridRef <: Union{AbstractArray{<:DeviceBlockGrid, 0}, Nothing},
 } <: AbstractBlockGrid{T, Ghost, BS, Device}
     grid_size          :: NTuple{2, Int}  # Size of the grid, including all local blocks
     static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
     cell_size          :: NTuple{2, Int}  # Number of real cells in each direction
     edge_size          :: NTuple{2, Int}  # Number of real cells in edge blocks in each direction (only along non-edge directions)
     device             :: Device
+    device_grid        :: DeviceGrid      # Device mirror of this structure, or `nothing` if disabled
+    device_grid_ref    :: DeviceGridRef   # Device pointer to `device_grid`
     global_dt          :: GlobalTimeStep{T}
     blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, BS, SState}}
     edge_blocks        :: Vector{LocalTaskBlock{DeviceArray, HostArray, DynamicBSize{Ghost}, SState}}
@@ -74,6 +78,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     blocks = Vector{LocalTaskBlock{device_array, host_array, typeof(static_size), state_type}}(undef, static_sized_block_count)
 
     # Container for blocks on the edges, with a non-uniform size
+    edge_size = remainder_block_size .- 2*ghost
     edge_blocks = Vector{LocalTaskBlock{device_array, host_array, DynamicBSize{ghost}, state_type}}(undef, dyn_sized_block_count)
 
     # Container for remote blocks, neighbours of blocks on the edges. Corners are excluded.
@@ -99,14 +104,28 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         return logs
     end
 
+    # TODO: enabling device-side grid should be broader than this condition
+    if params.use_tiled_state_machine
+        # `dev_block_grid` is the `DeviceBlockGrid` object manipulable only from the host
+        dev_block_grid = DeviceBlockGrid(
+            T, params.device, static_size, DynamicBSize{ghost},
+            (; grid=grid_size, static_grid=static_sized_grid, real_cells=cell_size, edge=edge_size)
+        )
+        # `dev_block_grid_ref` is a pointer to a `DeviceBlockGrid` object manipulable from the device
+        dev_block_grid_ref = put_block_grid_on_device(dev_block_grid)
+    else
+        dev_block_grid = nothing
+        dev_block_grid_ref = nothing
+    end
+
     # Main grid container
-    edge_size = remainder_block_size .- 2*ghost
     grid = BlockGrid{
         T, device_array, host_array, buffer_array,
         ghost, typeof(static_size),
-        state_type, typeof(params.device)
+        state_type, typeof(params.device), typeof(dev_block_grid), typeof(dev_block_grid_ref)
     }(
-        grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
+        grid_size, static_sized_grid, cell_size, edge_size,
+        params.device, dev_block_grid, dev_block_grid_ref, global_dt,
         blocks, edge_blocks, remote_blocks, threads_workload, threads_logs
     )
 
@@ -209,6 +228,10 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
             blk isa RemoteTaskBlock || continue
             blk.neighbour = this_block
         end
+    end
+
+    if !isnothing(grid.device_grid)
+        init_device_block_grid!(grid.device_grid, grid)
     end
 
     return grid
@@ -926,6 +949,7 @@ function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, D, H, B, Ghost
     print_parameter(io, pad, "device", grid.device)
     print_parameter(io, pad, "device array", D)
     print_parameter(io, pad, "host array", D == H ? "same as device" : H; nl=false)
+    print_parameter(io, pad, "device mirror", !isnothing(grid.device_grid))
 end
 
 

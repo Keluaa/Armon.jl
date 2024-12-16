@@ -335,6 +335,8 @@ real_block_size(grid::ObjOrType{AbstractBlockGrid}) = real_block_size(block_size
 
 include("blocks.jl")
 include("workload_distribution.jl")
+include("device_block_interface.jl")
+include("device_block_grid.jl")
 include("block_grid.jl")
 include("interface.jl")
 
