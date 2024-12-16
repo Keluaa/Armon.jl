@@ -324,6 +324,15 @@ macro iter_blocks(expr)
 end
 
 
+abstract type AbstractBlockGrid{T, Ghost, Size <: StaticBSize, Device} end
+
+Base.eltype(::ObjOrType{AbstractBlockGrid{T}}) where {T} = T
+ghosts(::ObjOrType{AbstractBlockGrid{<:Any, Ghost}}) where {Ghost} = Ghost
+block_size(::ObjOrType{AbstractBlockGrid{<:Any, G, BS}}) where {G, BS} = BS
+static_block_size(grid::ObjOrType{AbstractBlockGrid}) = block_size(block_size(grid))
+real_block_size(grid::ObjOrType{AbstractBlockGrid}) = real_block_size(block_size(grid))
+
+
 include("blocks.jl")
 include("workload_distribution.jl")
 include("block_grid.jl")

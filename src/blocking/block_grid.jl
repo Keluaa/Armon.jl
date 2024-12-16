@@ -27,8 +27,8 @@ struct BlockGrid{
     Ghost,
     BS          <: StaticBSize{<:Any, Ghost},
     SState      <: SolverState,
-    Device
-}
+    Device,
+} <: AbstractBlockGrid{T, Ghost, BS, Device}
     grid_size          :: NTuple{2, Int}  # Size of the grid, including all local blocks
     static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
     cell_size          :: NTuple{2, Int}  # Number of real cells in each direction
@@ -41,6 +41,14 @@ struct BlockGrid{
     threads_workload   :: Vector{Vector{CartesianIndex{2}}}  # `tid => block index` map for all threads, distributing each block to each thread
     threads_logs       :: Vector{Vector{ThreadLogEvent}}
 end
+
+
+device(grid::BlockGrid) = grid.device
+grid_sizes(grid::BlockGrid) =
+    (; grid=grid.grid_size, static_grid=grid.static_sized_grid, real_cells=grid.cell_size, edge=grid.edge_size)
+device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
+host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
+buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
 
 
 function BlockGrid(params::ArmonParameters{T}) where {T}
@@ -366,7 +374,7 @@ of size `domain_size`.
     `block_size`.
 
 !!! note
-    
+
     In case `domain_size` is smaller than `block_size .- 2*ghost` along any axis, the grid will
     contain only edge blocks.
 """
@@ -539,14 +547,6 @@ function block_size_at(idx, grid_size, static_sized_grid, block_size, remainder_
         return edge_block_size .- 2*ghosts
     end
 end
-
-
-device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
-host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
-buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
-ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
-static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = block_size(BS)
-real_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = real_block_size(BS)
 
 
 """
