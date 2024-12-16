@@ -158,7 +158,7 @@ end
 end
 
 
-function thread_position_to_block_index(thread_pos, tile_iter_idx, state, wrap_tile, step)
+function thread_position_to_block_index(thread_pos, tile_iter_idx, state, wrap_tile, bsize, ::Val{step}) where {step}
     tile_idx = thread_pos .+ tile_iter_idx .* wrap_tile
 
     # `corners` are offsets, and `I` would be an index in the real cells of the block
@@ -176,7 +176,7 @@ macro tiled_2D_iter(step, step_call)
             # Compute everything from `tile_iter_idx`, in order to minimize the amount of
             # memory dependancies across loop iterations.
             thread_pos = @index(Local, NTuple)
-            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, $step)
+            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, bsize, Val($step))
             if in_bounds
                 idx = (;
                     idx = 0,
