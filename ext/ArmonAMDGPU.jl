@@ -8,6 +8,7 @@ import AMDGPU: ROCBackend
 
 Armon.create_device(::Val{:ROCM}) = ROCBackend()
 Armon.device_array_type(::ROCBackend) = AMDGPU.ROCArray
+Armon.device_converter(::ROCBackend) = AMDGPU.Runtime.Adaptor()
 
 
 mutable struct ROCThreadInfo <: Armon.ThreadInfo

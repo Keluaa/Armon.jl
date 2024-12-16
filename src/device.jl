@@ -22,6 +22,15 @@ host_array_type(::Any) = Array
 device_array_type(::Union{CPU, CPU_HP}) = Array
 
 
+"""
+    device_converter(::Backend)
+
+Adapter object for `Adapt.adapt(converter, obj)` which converts `obj` to a value compatible with
+`Backend` to be used in a kernel (e.g. converts device array to an immutable device pointer).
+"""
+device_converter(::Union{CPU, CPU_HP}) = nothing  # Objects stay the same on CPU
+
+
 struct CPUThreadInfo <: ThreadInfo
     tid :: Int
 end

@@ -44,7 +44,7 @@ function BlockData{V}(size; kwargs...) where {V}
 end
 
 # Adapt function to allow passing a BlockData struct to a GPU kernel
-Adapt.adapt_structure(to, data::BlockData) = BlockData(Adapt.adapt.(Ref(to), get_vars(data, fieldnames(typeof(data))))...)
+Adapt.@adapt_structure BlockData
 
 block_vars() = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ, :work_1, :work_2, :work_3, :work_4, :mask)
 main_vars()  = (:x, :y, :ρ, :u, :v, :E, :p, :c, :g, :uˢ, :pˢ)  # Variables synchronized between host and device

@@ -8,6 +8,7 @@ import CUDA: CUDABackend
 
 Armon.create_device(::Val{:CUDA}) = CUDABackend()
 Armon.device_array_type(::CUDABackend) = CUDA.CuArray
+Armon.device_converter(::CUDABackend) = CUDA.KernelAdaptor()
 
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:CUDABackend})

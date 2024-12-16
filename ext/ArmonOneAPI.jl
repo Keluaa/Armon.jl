@@ -8,6 +8,7 @@ import oneAPI: oneAPIBackend
 
 Armon.create_device(::Val{:oneAPI}) = oneAPIBackend()
 Armon.device_array_type(::oneAPIBackend) = oneAPI.oneArray
+Armon.device_adaptor(::oneAPIBackend) = oneAPI.KernelAdaptor()
 
 
 mutable struct oneAPIThreadInfo <: Armon.ThreadInfo
