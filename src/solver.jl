@@ -54,7 +54,7 @@ end
 
 
 """
-    block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
+    block_state_machine(params::ArmonParameters, grid::BlockGrid, blk::LocalTaskBlock)
 
 Advances the [`SolverStep`](@ref) state of the `blk`, apply each step of the solver on the `blk`.
 This continues until the current cycle is done, or the block needs to wait for another block to do
@@ -65,7 +65,7 @@ Returns the new step of the block.
 If `SolverStep.NewCycle` is returned, the `blk` reached the end of the current cycle and will not
 progress any further until all other blocks have reached the same point.
 """
-function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
+function block_state_machine(params::ArmonParameters, grid::BlockGrid, blk::LocalTaskBlock)
     state = blk.state
     queue = state.queue
     steps_completed = 0
@@ -79,7 +79,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     elseif !is_done(queue)
         # The queue stopped since one step needed to wait for an external event (e.g. neighbouring
         # block ready for an exchange, time step, etc...)
-        process_queue!(queue, params, state, blk)
+        process_queue!(queue, params, state, grid, blk)
         return state.step
     end
     empty!(queue)
@@ -219,7 +219,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         end
     end
 
-    process_queue!(queue, params, state, blk)
+    process_queue!(queue, params, state, grid, blk)
     return new_state
 end
 
@@ -268,11 +268,11 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
                 if in_grid(blk_pos, grid.static_sized_grid)
                     blk = grid.blocks[block_idx(grid, blk_pos)]
                     prev_state = blk.state.step
-                    new_state = block_state_machine(params, blk)
+                    new_state = block_state_machine(params, grid, blk)
                 else
                     blk = grid.edge_blocks[edge_block_idx(grid, blk_pos)]
                     prev_state = blk.state.step
-                    new_state = block_state_machine(params, blk)
+                    new_state = block_state_machine(params, grid, blk)
                 end
 
                 all_finished_cycle &= new_state == SolverStep.NewCycle

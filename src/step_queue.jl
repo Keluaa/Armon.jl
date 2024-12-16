@@ -20,7 +20,7 @@ function planify_step!(queue::NoQueue, params, state, blk, step)
     return true, perform_step(queue.device, step, params, state, blk)
 end
 
-process_queue!(::NoQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock) = nothing
+process_queue!(::NoQueue, params::ArmonParameters, state::SolverState, grid::BlockGrid, blk::LocalTaskBlock) = nothing
 update_queue_status!(::NoQueue) = true
 
 
@@ -99,7 +99,7 @@ function planify_step!(queue::StepQueue, params::ArmonParameters, state::SolverS
 end
 
 
-function process_queue!(queue::StepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+function process_queue!(queue::StepQueue, params::ArmonParameters, state::SolverState, grid::BlockGrid, blk::LocalTaskBlock)
     is_done(queue) && return  # no step to process
 
     if !(queue.device_queue isa NoQueue)
@@ -108,7 +108,7 @@ function process_queue!(queue::StepQueue, params::ArmonParameters, state::Solver
             # TODO: we will repeatedly send the steps if the first one blocks for any reason
             copyto!(queue.device_queue, queue)
         end
-        process_queue!(queue.device_queue, params, state, blk)
+        process_queue!(queue.device_queue, params, state, grid, blk)
         return
     end
 

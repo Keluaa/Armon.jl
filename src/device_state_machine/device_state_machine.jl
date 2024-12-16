@@ -8,19 +8,19 @@ function Base.showerror(io::IO, ex::StateMachineKernelError)
 end
 
 
+include("halo_exchange.jl")
+
+
 function is_gpu_thread_in_step_domain(state::BasicSolverState, bsize::BlockSize, step::SolverStep.T, I::NTuple{2})
     steps_ranges = state.steps_ranges[Int(state.axis)]
 
-    if     step == SolverStep.TimeStep         return false  # TODO: full_domain, or real_domain? We can nicely optimize things here
-    elseif step == SolverStep.NewSweep         return false
-    elseif step == SolverStep.EOS              corners = steps_ranges.EOS
-    elseif step == SolverStep.Exchange         return false  # TODO
+    # TODO: see if using Int8 for corners would improve performance and register usage
+    if     step == SolverStep.EOS              corners = steps_ranges.EOS
     elseif step == SolverStep.Fluxes           corners = steps_ranges.fluxes
     elseif step == SolverStep.CellUpdate       corners = steps_ranges.cell_update
     elseif step == SolverStep.RemapAdvection   corners = steps_ranges.advection
     elseif step == SolverStep.RemapProjection  corners = steps_ranges.projection
-    elseif step == SolverStep.EndCycle         return false
-    else                                       return false
+    else                                       corners = steps_ranges.full_domain
     end
 
     # A domain is represented by offsets to the bottom-left and top-right corners of the block size.
@@ -181,7 +181,7 @@ macro tiled_2D_iter(step, step_call)
                 idx = (;
                     idx = 0,
                     lin_1D = 0,
-                    lin_2D = lin_position(bsize, I)
+                    lin_2D = lin_position(block.bsize, I)
                 )
                 $step_call
             end
@@ -191,11 +191,29 @@ end
 
 
 @kernel cpu=false function tiled_block_iter(
-    data::BlockData, state::BasicSolverState, queue::DeviceStepQueue, bsize::BlockSize,
+    grid_ptr::Ref{DeviceBlockGrid}, block_ptr::Ref{DeviceLocalBlock},
+    state::BasicSolverState, queue::DeviceStepQueue,
     ::Val{wrap_tile}, ::Val{tile_count}
 ) where {wrap_tile, tile_count}
+    # TODO: try to handle all blocks of the queue in the same kernel
+    #  => use a LIFO stack with a fixed size to keep track of the latest blocks handled which weren't
+    #     completed, and backtrack whenever a block is stuck (and mirror this feature to the CPU as well)
+
     # TODO: does using gotos instead of loops could improve register usage and performance?
-    for step_idx in 1:length(queue)
+
+    # By loading the grid and block from pointers to pre-initialized device memory (common to all
+    # blocks), we greatly reduce the amount of memory required by the kernel parameters. Conversions
+    # from device arrays to device pointers at kernel launch are also eliminated.
+    grid = unsafe_load(grid_ptr)
+    block = unsafe_load(block_ptr)
+    (; data) = block
+
+    xchg_state = KernelAbstractions.@localmem Bool (4,)
+
+    # TODO: using some gotos, we could eliminate some loop variables
+    last_step_completed = true
+    step_idx = 0
+    for outer step_idx in 1:length(queue)
         step = queue.steps[step_idx]
 
         if step == SolverStep.EOS
@@ -208,9 +226,18 @@ end
                 end
             end
 
+        elseif step == SolverStep.Exchange
+            is_done = device_border_exchange(
+                KernelAbstractions.@context(), grid, block, state, xchg_state
+            )
+            if !is_done
+                last_step_completed = false
+                break
+            end
+
         elseif step == SolverStep.Fluxes
             @tiled_2D_iter :fluxes begin
-                s = stride_along(bsize, state.axis)
+                s = stride_along(block.bsize, state.axis)
                 uₐ = state.axis == Axis.X ? data.u : data.v
                 if state.schemes.riemann_scheme isa RiemannGodunov
                     @sub_kernel_call idx acoustic!(s, data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c)
@@ -224,15 +251,15 @@ end
             end
 
         elseif step == SolverStep.CellUpdate
-            @tiled_2D_iter :cell_updsate begin
-                s = stride_along(bsize, state.axis)
+            @tiled_2D_iter :cell_update begin
+                s = stride_along(block.bsize, state.axis)
                 uₐ = state.axis == Axis.X ? data.u : data.v
                 @sub_kernel_call idx cell_update!(s, state.dx, state.dt, data.uˢ, data.pˢ, data.ρ, uₐ, data.E)
             end
-    
+
         elseif step == SolverStep.RemapAdvection
             @tiled_2D_iter :advection begin
-                s = stride_along(bsize, state.axis)
+                s = stride_along(block.bsize, state.axis)
                 if state.schemes.projection_scheme isa EulerProjection
                     @sub_kernel_call idx advection_first_order!(
                         s, state.dt,
@@ -247,10 +274,10 @@ end
                     )
                 end
             end
-    
+
         elseif step == SolverStep.RemapProjection
             @tiled_2D_iter :projection begin
-                s = stride_along(bsize, state.axis)
+                s = stride_along(block.bsize, state.axis)
                 @sub_kernel_call idx euler_projection!(
                     s, state.dx, state.dt, data.uˢ, data.ρ, data.u, data.v, data.E,
                     data.work_1, data.work_2, data.work_3, data.work_4
@@ -262,19 +289,24 @@ end
     end
 
     if @index(Global, Cartesian) == CartesianIndex(1, 1)
-        queue.status[2] = length(queue) + 1
+        # If `last_step_completed`, then we want to place ourselfves to the step after the last one.
+        # In case it was the last step in the queue, then `is_done(queue)` becomes `true`.
+        queue.status[2] = step_idx + last_step_completed
     end
 end
 
 
-function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::SolverState, grid::BlockGrid, blk::LocalTaskBlock)
     basic_state = BasicSolverState(state)
 
-    if !params.use_tiled_state_machine
-        state_machine_func = state_machine_kernel(queue.device, params.workgroup_size)
-        # TODO: the ndrange is quite important, the current choice is maybe sub-optimal since it includes all ghost cells
-        state_machine_func(blk.device_data, basic_state, blk.size, queue; ndrange=block_size(blk))
-    else
+    if params.use_tiled_state_machine
+        if isnothing(grid.device_grid)
+            error("cannot run the tiled block kernel as `device_grid` is `nothing`")
+        end
+        if prod(params.workgroup_size) ≤ 1
+            error("`tiled_block_iter` requires a workgroup size greater than 1, got: ", params.workgroup_size)
+        end
+
         # grid size == workgroup size  =>  exactly 1 workgroup per kernel
         tiled_block_iter_func = tiled_block_iter(queue.device, params.workgroup_size, params.workgroup_size)
 
@@ -290,10 +322,22 @@ function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::
         wrap_tile = params.workgroup_size
         tile_count = cld.(block_size(blk), wrap_tile)
 
-        tiled_block_iter_func(
-            blk.device_data, basic_state, queue, blk.size,
-            Val(wrap_tile), Val(tile_count)
-        )
+        # TODO: one kernel launch seems to take about 5µs, make sure we can launch again before the kernel completes
+
+        # TODO: cudaFuncSetCacheConfig(cudaFuncCachePreferL1)
+        #   => may help, especially if there is register spilling (maybe?)
+
+        @apply_device_block dev_blk_ptr = pointer(grid.device_grid, blk.pos) begin
+            tiled_block_iter_func(
+                pointer(grid.device_grid_ref), dev_blk_ptr, basic_state, queue,
+                Val(wrap_tile), Val(tile_count)
+            )
+        end
+    else
+        state_machine_func = state_machine_kernel(queue.device, params.workgroup_size)
+        # TODO: the ndrange is quite important, the current choice is maybe sub-optimal since it includes all ghost cells
+        #   => all wraps with only ghost cells will do little to no work, yet their register footprint remains
+        state_machine_func(blk.device_data, basic_state, blk.size, queue; ndrange=block_size(blk))
     end
 
     # Place an event in the device stream in order to be able to know when the kernel has completed,
@@ -301,3 +345,4 @@ function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::
     put_kernel_event(queue.device, queue.event)
     return
 end
+
