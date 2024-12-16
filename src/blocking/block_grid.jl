@@ -109,7 +109,8 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         # `dev_block_grid` is the `DeviceBlockGrid` object manipulable only from the host
         dev_block_grid = DeviceBlockGrid(
             T, params.device, static_size, DynamicBSize{ghost},
-            (; grid=grid_size, static_grid=static_sized_grid, real_cells=cell_size, edge=edge_size)
+            (; grid=grid_size, static_grid=static_sized_grid, real_cells=cell_size, edge=edge_size),
+            (; static=static_sized_block_count, edge=dyn_sized_block_count, remote=grid_perimeter)
         )
         # `dev_block_grid_ref` is a pointer to a `DeviceBlockGrid` object manipulable from the device
         dev_block_grid_ref = put_block_grid_on_device(dev_block_grid)

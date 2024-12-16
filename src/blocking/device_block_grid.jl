@@ -124,7 +124,10 @@ grid_sizes(grid::DeviceBlockGrid) =
     (; grid=grid.grid_size, static_grid=grid.static_sized_grid, real_cells=grid.cell_size, edge=grid.edge_size)
 
 
-function DeviceBlockGrid(::Type{T}, device::Device, static_size::StaticBSize, dyn_size_t::Type{<:DynamicBSize}, grid_sizes) where {T, Device}
+function DeviceBlockGrid(
+    ::Type{T}, device::Device, static_size::StaticBSize, dyn_size_t::Type{<:DynamicBSize},
+    grid_sizes, num_blocks
+) where {T, Device}
     device_array = device_array_type(device)
 
     SB_Container = device_array{DeviceLocalBlock{device_array, typeof(static_size)}, 1}
@@ -136,9 +139,9 @@ function DeviceBlockGrid(::Type{T}, device::Device, static_size::StaticBSize, dy
 
     interfaces = GridInterfaces(grid_sizes.grid, device)
 
-    dev_blocks = SB_Container(undef, size(host_grid.blocks))
-    dev_edge_blocks = EB_Container(undef, size(host_grid.edge_blocks))
-    dev_remote_blocks = RB_Container(undef, size(host_grid.remote_blocks))
+    dev_blocks = SB_Container(undef, size(num_blocks.static))
+    dev_edge_blocks = EB_Container(undef, size(num_blocks.edge))
+    dev_remote_blocks = RB_Container(undef, size(num_blocks.remote))
 
     return DeviceBlockGrid{
         T, D, Device, ghosts(static_size), typeof(static_size), IndexMap, typeof(interfaces),
