@@ -1,27 +1,25 @@
 
 @generic_kernel function boundary_conditions!(
-    ρ::V, u::V, v::V, p::V, c::V, g::V, E::V,
-    bsize::BlockSize, axis::Axis.T, side::Side.T,
-    u_factor::T, v_factor::T
-) where {T, V <: AbstractArray{T}}
-    @kernel_init begin
+    scalars::NTuple{N, V}, u::NTuple{D, V}, u_factor::NTuple{D, T},
+    bsize::BlockSize{D}, side::Side.T
+) where {T, V <: AbstractArray{T}, N, D}
+    #= TODO: @kernel_init =# begin
         # `incr` is the stride of `axis` going towards the edge along `side`
-        incr = stride_along(bsize, axis)
-        incr = ifelse(side in first_sides(), -incr, incr)
+        incr = stride_along(bsize, axis_of(side))
+        incr = ifelse(first_side(side), -incr, incr)
     end
 
-    i = @index_2D_lin()
+    i = @kt_i()
     ig = i + incr  # index of the ghost cell
 
-    # TODO: use `comm_vars()` and iterate it like `pack_to_array` ?
     for _ in 1:ghosts(bsize)
-        ρ[ig] = ρ[i]
-        u[ig] = u[i] * u_factor
-        v[ig] = v[i] * v_factor
-        p[ig] = p[i]
-        c[ig] = c[i]
-        g[ig] = g[i]
-        E[ig] = E[i]
+        # TODO: KernelAbstractions.Extras.@unroll ??
+        for n in 1:N
+            scalars[n][ig] = scalars[n][i]
+        end
+        for d in 1:D
+            u[d][ig] = u[d][i] * u_factor[d]
+        end
 
         i  -= incr
         ig += incr
@@ -29,10 +27,17 @@
 end
 
 
-function boundary_conditions!(params::ArmonParameters{T}, state::SolverState, blk::LocalTaskBlock, side::Side.T) where {T}
-    (u_factor::T, v_factor::T) = boundary_condition(state.test_case, side)
+function boundary_conditions!(params::ArmonParameters{T, D}, state::SolverState, blk::LocalTaskBlock, side::Side.T) where {T, D}
     domain = border_domain(blk.size, side)
-    boundary_conditions!(params, block_device_data(blk), domain, blk.size, state.axis, side, u_factor, v_factor)
+    data = block_data(blk; on_device=true)
+
+    scalar_comm_vars = filter(!in(dim_vars()), comm_vars())
+    scalars = var_arrays(data, scalar_comm_vars)
+    u = data.dim_vars.u  # Assume the only dimensional variable is `u`
+
+    u_factor = boundary_condition(state.test_case, side, Val{D}(), T)
+
+    boundary_conditions!(scalars, u, u_factor, blk.size, side; ctx=params.kernel_ctx, domain)
 end
 
 
@@ -41,6 +46,9 @@ end
     vars₂::NTuple{N, V}, i₂, ig₂, sg₂,
     ghosts
 ) where {N, V}
+    # `ig₁` and `ig₂` are the indices of the first ghost cell in each block
+    # `i₁`  and `i₂`  are the indices of the first real cell in each block
+    # `sg₁` and `sg₂` are the strides from one ghost cell to the next in each block
     for gᵢ in 0:ghosts-1
         j₁ = gᵢ * sg₁
         j₂ = gᵢ * sg₂
@@ -63,22 +71,22 @@ end
 @generic_kernel function block_ghost_exchange(
     vars₁::NTuple{N, V},
     vars₂::NTuple{N, V},
-    bsize::BlockSize, axis::Axis.T, side₁::Side.T
+    bsize::BlockSize, side₁::Side.T
 ) where {N, V}
-    @kernel_init begin
+    #= TODO: @kernel_init =# begin
         side₂ = opposite_of(side₁)
 
         # Offsets going towards the ghost cells
         sg  = stride_along(bsize, axis)
-        sg₁ = ifelse(side₁ in first_sides(), -sg, sg)
+        sg₁ = ifelse(first_side(side₁), -sg, sg)
         sg₂ = -sg₁
 
         # Convertion from `i₁` to `i₂`, exploiting the fact that both blocks have the same size
         d₂ = stride_along(bsize, axis) * (real_size_along(bsize, axis) - 1)
-        d₂ = ifelse(side₂ in first_sides(), -d₂, d₂)
+        d₂ = ifelse(first_side(side₂), -d₂, d₂)
     end
 
-    i₁ = @index_2D_lin()
+    i₁ = @kt_i()
     i₂ = i₁ + d₂
 
     # `ig` is the position of the ghost cell at the border of the block
@@ -106,9 +114,9 @@ function block_ghost_exchange(
 
     # Exchange between two blocks with the same dimensions
     domain = border_domain(blk₁.size, side)
-    block_ghost_exchange(params, domain,
-        comm_vars(blk₁), comm_vars(blk₂),
-        blk₁.size, state.axis, side
+    block_ghost_exchange(
+        comm_arrays(blk₁), comm_arrays(blk₂), blk₁.size, side;
+        ctx=params.kernel_ctx, domain
     )
 
     return exchange_done!(blk₁, side)
@@ -118,34 +126,28 @@ end
 @generic_kernel function block_ghost_exchange(
     vars₁::NTuple{N, V}, bsize₁::BlockSize,
     vars₂::NTuple{N, V}, bsize₂::BlockSize,
-    axis::Axis.T, side₁::Side.T
+    side₁::Side.T
 ) where {N, V}
-    @kernel_init begin
+    #= TODO: @kernel_init =# begin
         side₂ = opposite_of(side₁)
 
         # Offsets going towards the ghost cells
+        axis = axis_of(side₁)
         sg₁ = stride_along(bsize₁, axis)
         sg₂ = stride_along(bsize₂, axis)
-        sg₁ = ifelse(side₁ in first_sides(), -sg₁, sg₁)
-        sg₂ = ifelse(side₂ in first_sides(), -sg₂, sg₂)
+        sg₁ = ifelse(first_side(side₁), -sg₁, sg₁)
+        sg₂ = ifelse(first_side(side₂), -sg₂, sg₂)
     end
 
-    i₁ = @index_2D_lin()
+    i₁ = @kt_i()
 
     # `bsize₁` and `bsize₂` are different, therefore such is the iteration domain. We translate the
     # `i₁` index to its reciprocal `i₂` on the other side using the nD index.
-    I₁ = position(bsize₁, i₁)
-
-    # TODO: cleanup
-    I₂x = ifelse(side₂ in sides_along(Axis.X), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[1]), I₁[1])
-    I₂y = ifelse(side₂ in sides_along(Axis.Y), ifelse(side₂ in first_sides(), 1, real_block_size(bsize₂)[2]), I₁[2])
-    I₂ = (I₂x, I₂y)
-    # TODO: Unreadable but efficient and dimension-agnostic?
-    # I₂ = ifelse.(
-    #     in.(side₂, (sides_along(Axis.X), sides_along(Axis.Y))),
-    #     ifelse.(side₂ in first_sides(), 1, real_block_size(bsize₂)),
-    #     I₁
-    # )
+    I₁ = to_real_position(bsize₁, Tuple(@kt_I()))
+    I₂ = ifelse.(axis_of(side₂) .== axes_of(ndims(bsize₂)),
+        ifelse(first_side(side₂), 1, real_block_size(bsize₂)),
+        I₁
+    )
 
     i₂ = lin_position(bsize₂, I₂)
 
@@ -174,10 +176,9 @@ function block_ghost_exchange(
 
     # Exchange between two blocks with (possibly) different dimensions, but the same length along `side`
     domain = border_domain(blk₁.size, side)
-    block_ghost_exchange(params, domain,
-        comm_vars(blk₁), blk₁.size,
-        comm_vars(blk₂), blk₂.size,
-        state.axis, side
+    block_ghost_exchange(
+        comm_arrays(blk₁), blk₁.size, comm_arrays(blk₂), blk₂.size, side;
+        ctx=params.kernel_ctx, domain
     )
 
     return exchange_done!(blk₁, side)
@@ -187,8 +188,8 @@ end
 @generic_kernel function pack_to_array!(
     bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
 ) where {N, V}
-    idx = @index_2D_lin()
-    itr = @iter_idx()
+    idx = @kt_i()
+    itr = @kt_pos()
 
     (i, i_g) = divrem(itr - 1, ghosts(bsize))
     i_arr = (i_g * real_face_size(bsize, side) + i) * N
@@ -203,8 +204,8 @@ end
 @generic_kernel function unpack_from_array!(
     bsize::BlockSize, side::Side.T, array::V, vars::NTuple{N, V}
 ) where {N, V}
-    idx = @index_2D_lin()
-    itr = @iter_idx()
+    idx = @kt_i()
+    itr = @kt_pos()
 
     (i, i_g) = divrem(itr - 1, ghosts(bsize))
     i_arr = (i_g * real_face_size(bsize, side) + i) * N
@@ -237,9 +238,12 @@ function start_exchange(
     end
 
     send_domain = border_domain(blk.size, side; single_strip=false)
-    vars = comm_vars(blk; on_device=buffer_are_on_device)
+    vars = comm_arrays(blk; on_device=buffer_are_on_device)
     # TODO: run on host if `D != B`, or perform it on the device on a tmp array
-    pack_to_array!(params, send_domain, blk.size, side, other_blk.send_buf.data, vars)
+    pack_to_array!(
+        blk.size, side, other_blk.send_buf.data, vars;
+        ctx=params.ctx, domain=send_domain
+    )
 
     wait(params)  # Wait for the copy to complete
 
@@ -270,9 +274,12 @@ function finish_exchange(
 
     recv_domain = ghost_domain(blk.size, side; single_strip=false)
     buffer_are_on_device = D == B
-    vars = comm_vars(blk; on_device=buffer_are_on_device)
+    vars = comm_arrays(blk; on_device=buffer_are_on_device)
     # TODO: run on host if `D != B`
-    unpack_from_array!(params, recv_domain, blk.size, side, other_blk.recv_buf.data, vars)
+    unpack_from_array!(
+        blk.size, side, other_blk.recv_buf.data, vars;
+        ctx=params.kernel_ctx, domain=recv_domain
+    )
 
     if !buffer_are_on_device
         # MPI buffers are not where we want the data to be. Retreive the result of the exchange.
@@ -293,13 +300,13 @@ function block_ghost_exchange(
         return BlockExchangeState.Done
     end
 
-    bint = blk.exchanges[Int(side)]
+    bint = blk.exchanges[side]
     bint_state = block_interface_state(bint)[1]
 
     # Exchange between one local block and a remote block from another sub-domain
     if bint_state == BlockExchangeState.NotReady
         exchange_ended = start_exchange(params, blk, other_blk, side)
-        side_flag = side in first_sides() ? 0b10 : 0b01
+        side_flag = first_side(side) ? 0b10 : 0b01
         !exchange_ended && interface_start_exchange!(bint, side_flag; for_MPI=true)
     else
         exchange_ended = finish_exchange(params, blk, other_blk, side)
@@ -326,7 +333,7 @@ function block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::
     # Exchange with the Left/Bottom neighbour
     side = first_side(state.axis)
     if !is_side_done(blk, side)
-        other_blk = blk.neighbours[Int(side)]
+        other_blk = blk.neighbours[side]
         left_exchange_state = block_ghost_exchange(params, state, blk, other_blk, side)
         left_exchange_state == BlockExchangeState.Done && side_is_done!(blk, side, true)
     else
@@ -336,7 +343,7 @@ function block_ghost_exchange(params::ArmonParameters, state::SolverState, blk::
     # Exchange with the Right/Top neighbour
     other_side = opposite_of(side)
     if !is_side_done(blk, other_side)
-        other_blk = blk.neighbours[Int(other_side)]
+        other_blk = blk.neighbours[other_side]
         right_exchange_state = block_ghost_exchange(params, state, blk, other_blk, other_side)
         right_exchange_state == BlockExchangeState.Done && side_is_done!(blk, other_side, true)
     else

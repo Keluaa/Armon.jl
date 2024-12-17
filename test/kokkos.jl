@@ -32,7 +32,7 @@ function cmp_cpp_with_reference_for(type, test; kwargs...)
     )
 
     if differences_count > 0 && WRITE_FAILED
-        file_name = "test_kokkos_$(Armon.test_name(ref_params.test))_$(data_type(ref_params))"
+        file_name = "test_kokkos_$(Armon.test_name(ref_params.test))_$(Armon.data_type(ref_params))"
         open(file_name, "w") do file
             write_reference_data(ref_params, file, data, dt, cycles; more_vars=(:work_1,))
         end

@@ -32,10 +32,11 @@ if isinteractive()
      - short          Equivalent to 'quality, stability, convergence, conservation'
      - quality        Code quality
      - stability      Type stability
-     - domains        Domain 2D indexing
      - blocking       Blocking tests
      - logging        Block logging tests
      - numa           Memory pages placement tests
+     - dimension      Dimension agnostism tests (solver should work for any dimension)
+     - io             Loading and saving data from/to an different file formats
      - convergence    Convergence to the reference solutions
      - conservation   Check that the energy and mass for each are kept constant throughout a lot of cycles.
      - GPU            Equivalence of the GPU backends (CUDA & ROCm) with the CPU
@@ -60,7 +61,8 @@ filter!(!isempty, main_options)
 main_options = main_options .|> Symbol |> union
 
 if :all in main_options
-    expanded_options = [:quality, :stability, :domains, :blocking, :convergence, :conservation,
+    expanded_options = [:quality, :stability, :dimension,
+                        :blocking, :io, :convergence, :conservation,
                         :logging, :kokkos, :gpu, :mpi]
 elseif :short in main_options
     expanded_options = [:quality, :stability, :convergence, :conservation]
@@ -93,8 +95,9 @@ function do_tests(tests_to_do)
                 end
             elseif test === :quality        run_file("code_quality.jl")
             elseif test === :stability      run_file("type_stability.jl")
-            elseif test === :domains        run_file("domains.jl")
             elseif test === :blocking       run_file("blocking.jl")
+            elseif test === :dimension      run_file("dimension_agnostism.jl")
+            elseif test === :io             run_file("io.jl")
             elseif test === :convergence    run_file("convergence.jl")
             elseif test === :conservation   run_file("conservation.jl")
             elseif test === :gpu            run_file("gpu.jl")

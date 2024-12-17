@@ -10,7 +10,7 @@ Armon.create_device(::Val{:ROCM}) = ROCBackend()
 Armon.device_array_type(::ROCBackend) = AMDGPU.ROCArray
 
 
-function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:ROCBackend})
+function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, <:ROCBackend}) where {Dim}
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": ROCm (block size: ", join(p.block_size, '×'), ")")
 end

@@ -10,7 +10,7 @@ Armon.create_device(::Val{:oneAPI}) = oneAPIBackend()
 Armon.device_array_type(::oneAPIBackend) = oneAPI.oneArray
 
 
-function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:oneAPIBackend})
+function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, <:oneAPIBackend}) where {Dim}
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": oneAPI (block size: ", join(p.block_size, '×'), ")")
 end

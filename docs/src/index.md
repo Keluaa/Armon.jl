@@ -36,6 +36,8 @@ TaskBlock
 LocalTaskBlock
 BlockData
 RemoteTaskBlock
+var_arrays
+var_arrays_names
 device_to_host!
 host_to_device!
 buffers_on_device
@@ -69,10 +71,12 @@ ghost_domain
 block_domain_range
 position
 lin_position
+to_real_position
+to_raw_position
+real_lin_position
 in_grid
 is_ghost
 BlockRowIterator
-DomainRange
 ```
 
 ## Block states
@@ -131,22 +135,7 @@ init_backend
 device_memory_info
 memory_info
 memory_required
-```
-
-## Kernels
-
-```@docs
-@generic_kernel
-@kernel_init
-@kernel_options
-@index_1D_lin
-@index_2D_lin
-@iter_idx
-@simd_loop
-@simd_threaded_iter
-@simd_threaded_loop
 @threaded
-@threads
 ```
 
 ## Logging
@@ -158,23 +147,4 @@ collect_logs
 analyse_log_stats
 BlockGridLogStats
 BLOCK_LOG_THREAD_LOCAL_STORAGE
-```
-
-## Utility
-
-```@docs
-Axis
-Side
-SolverException
-@section
-```
-
-### NUMA utilities
-
-```@docs
-array_pages
-touch_pages
-move_pages(::Vector{Ptr{T}}, ::Any) where T
-lock_pages(::Ptr, ::Any)
-unlock_pages
 ```

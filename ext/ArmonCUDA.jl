@@ -10,7 +10,7 @@ Armon.create_device(::Val{:CUDA}) = CUDABackend()
 Armon.device_array_type(::CUDABackend) = CUDA.CuArray
 
 
-function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:CUDABackend})
+function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, <:CUDABackend}) where {Dim}
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": CUDA (block size: ", join(p.block_size, '×'), ")")
 end

@@ -189,42 +189,45 @@ end
 
 # Bit flags for each of the variables of a block
 const STEPS_VARS_FLAGS = (;
-    x      = 0b0000_0000_0000_0001,
-    y      = 0b0000_0000_0000_0010,
-    ρ      = 0b0000_0000_0000_0100,
-    u      = 0b0000_0000_0000_1000,
-    v      = 0b0000_0000_0001_0000,
-    E      = 0b0000_0000_0010_0000,
-    p      = 0b0000_0000_0100_0000,
-    c      = 0b0000_0000_1000_0000,
-    g      = 0b0000_0001_0000_0000,
-    uˢ     = 0b0000_0010_0000_0000,
-    pˢ     = 0b0000_0100_0000_0000,
-    work_1 = 0b0000_1000_0000_0000,
-    work_2 = 0b0001_0000_0000_0000,
-    work_3 = 0b0010_0000_0000_0000,
-    work_4 = 0b0100_0000_0000_0000,
-    mask   = 0b1000_0000_0000_0000,
+    x      = UInt16(1) << 0,
+    ρ      = UInt16(1) << 1,
+    u      = UInt16(1) << 2,
+    E      = UInt16(1) << 3,
+    p      = UInt16(1) << 4,
+    c      = UInt16(1) << 5,
+    g      = UInt16(1) << 6,
+    uˢ     = UInt16(1) << 7,
+    pˢ     = UInt16(1) << 8,
+    work_1 = UInt16(1) << 9,
+    work_2 = UInt16(1) << 10,
+    work_3 = UInt16(1) << 11,
+    mask   = UInt16(1) << 12,
 )
+
+
+# OR of all dimensional vars' flags
+steps_dimensional_vars_flags() = |(getindex.(Ref(STEPS_VARS_FLAGS), dim_vars())...)
+
 
 # Flags for the arrays used by kernels: `count_ones(SOLVER_STEPS_VARS[step][2])` represents the
 # number of arrays the kernels of `step` can bring into the cache. If `SOLVER_STEPS_VARS[step][1] == true`
-# then the kernel uses one of `STEPS_VARS_FLAGS.u` or `STEPS_VARS_FLAGS.v` depending on the current
-# axis.
+# then the kernel uses only one of the array of all dimensional variables.
 # TODO: deduce them from kernel + steps definitions?
-const SOLVER_STEPS_VARS = Dict{SolverStep.T, Tuple{Bool, UInt16}}(
-    SolverStep.NewCycle     => (false, 0),
-    SolverStep.TimeStep     => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
-    SolverStep.InitTimeStep => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
-    SolverStep.NewSweep     => (false, 0),
-    SolverStep.EOS          => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
-    SolverStep.Exchange     => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
-    SolverStep.Fluxes       => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
-    SolverStep.CellUpdate   => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
-    SolverStep.Remap        => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4),
-    SolverStep.EndCycle     => (false, 0),
-    SolverStep.ErrorState   => (false, 0),
-)
+const SOLVER_STEPS_VARS = let SVF = STEPS_VARS_FLAGS
+    Dict{SolverStep.T, Tuple{Bool, UInt16}}(
+        SolverStep.NewCycle     => (false, 0),
+        SolverStep.TimeStep     => (false, SVF.u | SVF.c),
+        SolverStep.InitTimeStep => (false, SVF.u | SVF.c),
+        SolverStep.NewSweep     => (false, 0),
+        SolverStep.EOS          => (false, SVF.ρ | SVF.E | SVF.u | SVF.p | SVF.c | SVF.g),
+        SolverStep.Exchange     => (false, SVF.ρ | SVF.E | SVF.u | SVF.p | SVF.c | SVF.g),
+        SolverStep.Fluxes       => (true,  SVF.ρ | SVF.p | SVF.c | SVF.uˢ| SVF.pˢ),
+        SolverStep.CellUpdate   => (true,  SVF.ρ | SVF.E | SVF.uˢ| SVF.pˢ),
+        SolverStep.Remap        => (false, SVF.ρ | SVF.E | SVF.u | SVF.uˢ| SVF.work_1 | SVF.work_2 | SVF.work_3),
+        SolverStep.EndCycle     => (false, 0),
+        SolverStep.ErrorState   => (false, 0),
+    )
+end
 
 
 """
@@ -320,9 +323,9 @@ end
 
 function next_axis_sweep!(params::ArmonParameters, state::SolverState)
     if state.axis_splitting_idx == 0
-        iter_val = iterate(split_axes(state))
+        iter_val = iterate(split_axes(state, ndims(params)))
     else
-        iter_val = iterate(split_axes(state), state.axis_splitting_idx)
+        iter_val = iterate(split_axes(state, ndims(params)), state.axis_splitting_idx)
     end
 
     if isnothing(iter_val)
@@ -337,11 +340,10 @@ end
 
 
 function update_solver_state!(params::ArmonParameters, state::SolverState, axis::Axis.T, dt_factor)
-    i_ax = Int(axis)
-    state.dx = params.domain_size[i_ax] / params.global_grid[i_ax]
+    state.dx = params.domain_size[axis] / params.global_grid[axis]
     state.dt = state.global_dt.current_dt * dt_factor
     state.axis = axis
-    state.steps_ranges = params.steps_ranges[i_ax]
+    state.steps_ranges = params.steps_ranges[axis]
 end
 
 

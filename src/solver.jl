@@ -73,7 +73,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         update_EOS!(params, state, blk)
     end
     next_time_step(params, blk)  # Yields to other blocks until this cycle's time step is available
-    for (axis, dt_factor) in split_axes(state)
+    for (axis, dt_factor) in split_axes(state, ndims(params))
         update_solver_state!(params, state, axis, dt_factor)
         update_EOS!(params, state, blk)
         block_ghost_exchange(params, state, blk)  # Yields to other blocks until all neighbours are updated
@@ -156,12 +156,15 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     steps_completed += 1
     if params.log_blocks
         axis_dependent, var_flags = SOLVER_STEPS_VARS[blk_state]
-        if axis_dependent
-            # TODO: dimension agnostic
-            var_flags |= state.axis == Axis.X ? STEPS_VARS_FLAGS.u : STEPS_VARS_FLAGS.v
+        if !axis_dependent
+            # All arrays of dimensional variables have been used by the step
+            extra_dim_arrays = count_ones(var_flags & steps_dimensional_vars_flags()) * (ndims(blk) - 1)
+        else
+            # Only one array of dimensional variables has been used
+            extra_dim_arrays = 0
         end
         steps_vars |= var_flags
-        steps_var_count += count_ones(var_flags)
+        steps_var_count += count_ones(var_flags) + extra_dim_arrays
     end
     !stop_processing && @goto next_step
 
@@ -214,7 +217,7 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
     timeout = UInt(120e9)  # 120 sec  # TODO: should depend on the total workload, or be deactivatable
     threads_count = params.use_threading ? Threads.nthreads() : 1
 
-    @threaded :outside_kernel for _ in 1:threads_count
+    @threaded for _ in 1:threads_count
         # TODO: thread block iteration should be done along the current axis
 
         tid = Threads.threadid()
@@ -297,7 +300,7 @@ function solver_cycle(params::ArmonParameters, data::BlockGrid)
     (@section "time_step" next_time_step(params, state, data)) && return true
     @checkpoint("time_step") && return true
 
-    @section "$axis" for (axis, dt_factor) in split_axes(state)
+    @section "$axis" for (axis, dt_factor) in split_axes(state, ndims(params))
         update_solver_state!(params, state, axis, dt_factor)
 
         @section "EOS" update_EOS!(params, state, data)
@@ -321,7 +324,7 @@ end
 
 
 function time_loop(params::ArmonParameters, grid::BlockGrid)
-    (; maxtime, maxcycle, silent, animation_step, is_root, initial_mass, initial_energy) = params
+    (; maxtime, maxcycle, silent, write_freq, is_root, initial_mass, initial_energy) = params
 
     reset!(grid, params)
     (; global_dt) = grid
@@ -362,7 +365,7 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
                 current_mass, current_energy = conservation_vars(params, grid)
                 ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
                 ΔE = abs(initial_energy - current_energy) / initial_energy * 100
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#8.6g%%, |ΔE| = %#8.6g%%\n",
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#11.6g%%, |ΔE| = %#11.6g%%\n",
                     global_dt.cycle, global_dt.current_dt, global_dt.time, ΔM, ΔE)
             end
         elseif silent <= 1
@@ -370,11 +373,10 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
             conservation_vars(params, grid)
         end
 
-        if animation_step != 0 && (global_dt.cycle - 1) % animation_step == 0
+        if write_freq != 0 && (global_dt.cycle - 1) % write_freq == 0
+            device_to_host!(data)
             wait(params)
-            frame_index = (global_dt.cycle - 1) ÷ animation_step
-            frame_file = joinpath("anim", params.output_file) * "_" * @sprintf("%03d", frame_index)
-            write_sub_domain_file(params, grid, frame_file)
+            write_sub_domain_file(params, grid, params.output_file)
         end
     end
 
@@ -423,22 +425,14 @@ function armon(params::ArmonParameters{T}) where T
         local_rank = MPI.Comm_rank(node_local_comm)
         local_size = MPI.Comm_size(node_local_comm)
 
-        rank_info = @sprintf(" - %2d/%-2d, local: %2d/%-2d, coords: (%2d,%-2d), cores: %3d to %3d",
-                             rank, proc_size-1, local_rank, local_size-1, cart_coords[1], cart_coords[2],
+        rank_info = @sprintf(" - %2d/%-2d, local: %2d/%-2d, coords: (%s), cores: %3d to %3d",
+                             rank, proc_size-1, local_rank, local_size-1, join(cart_coords, ','),
                              minimum(getcpuids()), maximum(getcpuids()))
 
         is_root && println("\nProcesses info:")
         rank > 0 && MPI.Recv(Bool, rank-1, 1, params.global_comm)
         println(rank_info)
         rank < proc_size-1 && MPI.Send(true, rank+1, 1, params.global_comm)
-    end
-
-    if is_root && params.animation_step != 0
-        if isdir("anim")
-            rm.("anim/" .* readdir("anim"))
-        else
-            mkdir("anim")
-        end
     end
 
     if params.measure_time
@@ -454,6 +448,11 @@ function armon(params::ArmonParameters{T}) where T
             init_test(params, data)
             wait(params)
         end
+    end
+
+    if isnothing(params.io_writer) && params.write_freq > 0 && supports_temporal_data(format_from_name(params.io_format))
+        # When writing multiple times to the same file, initialize the output file only once
+        params.io_writer = domain_writer(params.io_format, params.output_file, params, grid; params.io_options...)
     end
 
     if params.check_result || params.silent <= 1
@@ -500,12 +499,16 @@ function armon(params::ArmonParameters{T}) where T
         params.log_blocks ? collect_logs(data) : nothing
     )
 
-    if params.return_data || params.write_output || params.write_slices
-        device_to_host!(data)  # No-op if the host is the device
+    if params.write_output
+        # Only write the final state if it hasn't been already (with `write_freq > 0`)
+        if (params.write_freq == 0 || (data.global_dt.cycle - 1) % params.write_freq != 0)
+            device_to_host!(data)
+            write_sub_domain_file(params, data, params.output_file)
+        end
+        params.write_freq > 0 && close(params.io_writer)
+    elseif params.return_data
+        device_to_host!(data) 
     end
-
-    params.write_output && write_sub_domain_file(params, data, params.output_file)
-    params.write_slices && write_slices_files(params, data, params.output_file)
 
     if is_root && params.measure_time && params.silent < 3 && !isinteractive()
         show(params.timer)

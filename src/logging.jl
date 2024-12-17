@@ -1,7 +1,7 @@
 
-struct BlockGridLog
-    blk_logs           :: Array{Vector{BlockLogEvent}}
-    blk_sizes          :: Array{NTuple{2, Int}}
+struct BlockGridLog{D}
+    blk_logs           :: Array{Vector{BlockLogEvent}, D}
+    blk_sizes          :: Array{NTuple{D, Int}, D}
     thr_logs           :: Vector{Vector{ThreadLogEvent}}
     ghosts             :: Int
     mean_blk_cells     :: Float64  # Mean number of cells in all blocks
@@ -16,9 +16,9 @@ end
 Collect all [`BlockLogEvent`](@ref) of the `grid` into a single object (a `BlockGridLog`).
 See [`analyse_log_stats`](@ref) to print metrics about all blocks.
 """
-function collect_logs(grid::BlockGrid{T}) where {T}
+function collect_logs(grid::BlockGrid{T, D}) where {T, D}
     logs = Array{Vector{BlockLogEvent}}(undef, grid.grid_size)
-    blk_sizes = Array{NTuple{2, Int}}(undef, grid.grid_size)
+    blk_sizes = Array{NTuple{D, Int}, D}(undef, grid.grid_size)
     tot_blk_cells = 0
     for blk in all_blocks(grid)
         logs[blk.pos] = solver_state(blk).blk_logs
@@ -28,7 +28,7 @@ function collect_logs(grid::BlockGrid{T}) where {T}
     mean_blk_cells = tot_blk_cells / prod(grid.grid_size)
     mean_vars_per_cell = length(main_vars())
     data_type_size = sizeof(T)
-    return BlockGridLog(logs, blk_sizes, grid.threads_logs, ghosts(grid), mean_blk_cells, mean_vars_per_cell, data_type_size)
+    return BlockGridLog{D}(logs, blk_sizes, grid.threads_logs, ghosts(grid), mean_blk_cells, mean_vars_per_cell, data_type_size)
 end
 
 

@@ -4,6 +4,28 @@ struct EmptyParams <: BackendParams end
 
 
 """
+    StepsRanges{D}
+
+Holds indexing information for all steps of the solver.
+
+Domains are stored as block corner offsets: blocks can have different sizes, but always the same
+amount of ghost cells, therefore the iteration domain is determined from the dimensions of the block.
+The first field is the offset from the bottom left corner to the first cell, the second is the
+offset from the top right corner to the last cell of the domain.
+"""
+mutable struct StepsRanges{D}
+    direction       :: Axis.T  # Direction along which to apply each step
+    real_domain     :: NTuple{2, Dims{D}}
+    full_domain     :: NTuple{2, Dims{D}}
+    EOS             :: NTuple{2, Dims{D}}
+    fluxes          :: NTuple{2, Dims{D}}
+    cell_update     :: NTuple{2, Dims{D}}
+    advection       :: NTuple{2, Dims{D}}
+    projection      :: NTuple{2, Dims{D}}
+end
+
+
+"""
     ArmonParameters(; options...)
 
 The parameters and current state of the solver.
@@ -57,8 +79,8 @@ Lock all memory pages using `mlock` to RAM.
     use_threading = true, use_simd = true
 
 Switches for [`CPU_HP`](@ref) kernels.
-`use_threading` enables [`@threaded`](@ref) for outer loops.
-`use_simd` enables [`@simd_loop`](@ref) for inner loops.
+`use_threading` enables multithreading for outer loops.
+`use_simd` enables vectorisation for inner loops
 
 
     use_gpu = false
@@ -69,6 +91,12 @@ Enables the use of `KernelAbstractions.jl` kernels.
     use_kokkos = false
 
 Use kernels for `Kokkos.jl`.
+
+
+    use_inbounds = true
+
+Ensures that all array accesses in kernels are done without any bounds checking.
+Disabling this might prevent vectorisation and many compiler optimisations. 
 
 
     use_cache_blocking = true
@@ -192,8 +220,8 @@ Data type for all variables. Should be an `AbstractFloat`.
     test = :Sod, domain_size = nothing, origin = nothing
 
 `test` is the test case name to use:
- - `:Sod`: Sod shock tube test
- - `:Sod_y`: Sod shock tube test along the Y axis
+ - `:Sod`/`:Sod_x`: Sod shock tube test along the X axis
+ - `:Sod_y`/`:Sod_z`: Sod shock tube test along the Y or Z axis
  - `:Sod_circ`: Circular Sod shock tube test (centered in the domain)
  - `:Bizarrium`: Bizarrium test, similar to the Sod shock tube but with a special equation of state
  - `:Sedov`: Sedov blast-wave test (centered in the domain, reaches the border at `t=1` by default)
@@ -215,40 +243,23 @@ after initialization).
 print anything.
 
 
-    output_dir = ".", output_file = "output"
+    io_format = :csv, output_file = "./output", io_options = (;),
 
-`joinpath(output_dir, output_file)` will be path to the output file.
-
-
-    write_output = false, write_ghosts = false
-
-`write_output=true` will write all `saved_vars()` to the output file.
-If `write_ghosts=true`, ghost cells will also be included.
+Write the resulting data to `output_file` using `io_format` (either `:csv` or `:hdf5`).
+`io_options` are specific to the format.
 
 
-    write_slices = false
+    write_output = false, write_freq = 0
 
-Will write all `saved_vars()` to 3 output files, one for the middle X row, another for the middle
-Y column, and another for the diagonal. If `write_ghosts=true`, ghost cells will also be included.
-
-
-    output_precision = nothing
-
-Numbers are saved with `output_precision` digits of precision. Defaults to enough numbers for an
-exact decimal representation.
-
-
-    animation_step = 0
-
-If `animation_step ≥ 1`, then every `animation_step` cycles, variables will be saved as with
-`write_output=true`.
+`write_output=true` will write all `saved_vars()` to the `output_file`.
+If `write_freq ≥ 1`, then the file is written every `write_freq` cycles.
 
 
     compare = false, is_ref = false, comparison_tolerance = 1e-10
 
 If `compare=true`, then at every sub step of each iteration of the solver all variables will:
- - (`is_ref=false`) be compared with a reference file found in `output_dir`
- - (`is_ref=true`) be saved to a reference file in `output_dir`
+ - (`is_ref=false`) be compared with a reference file found with the prefix `output_file`
+ - (`is_ref=true`) be saved to a reference file with the prefix `output_file`
 When comparing, a relative `comparison_tolerance` (the `rtol` kwarg of `isapprox`) is accepted
 between values.
 
@@ -264,7 +275,7 @@ An error is thrown otherwise. Accepts a relative `comparison_tolerance`.
 If `return_data=true`, then in the [`SolverStats`](@ref) returned by [`armon`](@ref), the `data`
 field will contain the [`BlockGrid`](@ref) used by the solver.
 """
-mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
+mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams, KtContext <: KernelsToolkit.KernelContext}
     # Test problem type, riemann solver and solver scheme
     test::TestCase
     riemann_scheme::RiemannScheme
@@ -274,15 +285,15 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
 
     # Domain parameters
     nghost::Int
-    N::NTuple{2, Int}
-    N_origin::NTuple{2, Int}  # Position of the first cell in the global domain
-    domain_size::NTuple{2, Flt_T}
-    origin::NTuple{2, Flt_T}
+    N::NTuple{Dim, Int}
+    N_origin::NTuple{Dim, Int}  # Position of the first cell in the global domain
+    domain_size::NTuple{Dim, Flt_T}
+    origin::NTuple{Dim, Flt_T}
     cfl::Flt_T
     Dt::Flt_T
     cst_dt::Bool
     dt_on_even_cycles::Bool
-    steps_ranges::Vector{StepsRanges}
+    steps_ranges::Vector{StepsRanges{Dim}}
 
     # Bounds
     maxtime::Flt_T
@@ -290,13 +301,12 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
 
     # Output
     silent::Int
-    output_dir::String
+    io_format::Symbol
+    io_options::Dict{Symbol, Any}
+    io_writer::Any
     output_file::String
     write_output::Bool
-    write_ghosts::Bool
-    write_slices::Bool
-    output_precision::Int
-    animation_step::Int
+    write_freq::Int
     measure_time::Bool
     timer::TimerOutput
     time_async::Bool
@@ -316,12 +326,13 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     async_cycle::Bool
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
-    block_size::NTuple{2, Int}
+    block_size::NTuple{Dim, Int}
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
     lock_memory::Bool
     busy_wait_limit::Int
+    kernel_ctx::KtContext
 
     # MPI
     use_MPI::Bool
@@ -329,12 +340,12 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     rank::Int
     root_rank::Int
     proc_size::Int
-    proc_dims::NTuple{2, Int}
+    proc_dims::NTuple{Dim, Int}
     global_comm::MPI.Comm
     cart_comm::MPI.Comm
-    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
-    neighbours::Dict{Side.T, Int}  # Ranks of the neighbours of this process
-    global_grid::NTuple{2, Int}  # Dimensions of the global grid
+    cart_coords::NTuple{Dim, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
+    neighbours::Neighbours{Int32, Dim}  # Ranks of the neighbours of this process
+    global_grid::NTuple{Dim, Int}  # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
 
@@ -349,7 +360,8 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     function ArmonParameters(; data_type = Float64, N = (10, 10), options...)
         device, options = get_device(; options...)
 
-        params = new{data_type, typeof(device), Any}()
+        dim = length(N)
+        params = new{data_type, dim, typeof(device), Any, KernelsToolkit.KernelContext}()
         params.N = N
         params.device = device
 
@@ -379,7 +391,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
         # TODO: this is ugly, but allows to circumvent a circular dependency between `init_device`,
         # `ArmonParameters` and the Kokkos backend of `@generic_kernel`: this way we can access the
         # index type from the `@generated` function without relying on external functions.
-        complete_params = new{data_type, typeof(device), typeof(params.backend_options)}()
+        complete_params = new{data_type, dim, typeof(device), typeof(params.backend_options), typeof(params.kernel_ctx)}()
         for field in fieldnames(typeof(params))
             setfield!(complete_params, field, getfield(params, field))
         end
@@ -405,15 +417,15 @@ function get_device(; device = :CUDA, options...)
 end
 
 
-function init_MPI(params::ArmonParameters;
-    use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing, gpu_aware = true,
+function init_MPI(params::ArmonParameters{<:Any, Dim};
+    use_MPI = true, P = ntuple(Returns(1), Dim), reorder_grid = true, global_comm = nothing, gpu_aware = true,
     options...
-)
+) where {Dim}
     global_comm = something(global_comm, MPI.COMM_WORLD)
     params.global_comm = global_comm
 
-    if length(P) != length(params.N)
-        solver_error(:config, "Mismatched dimensions: expected a grid of $(length(N)) processes, got: $(length(P))")
+    if length(P) != Dim
+        solver_error(:config, "Mismatched dimensions: expected a grid of $Dim processes, got: $(length(P))")
     end
 
     params.use_MPI = use_MPI
@@ -439,25 +451,16 @@ function init_MPI(params::ArmonParameters;
         params.cart_comm = C_COMM
         params.cart_coords = Tuple(MPI.Cart_coords(C_COMM))
 
-        # TODO: dimension agnostic
-        params.neighbours = Dict(
-            Side.Left   => MPI.Cart_shift(C_COMM, 0, -1)[2],
-            Side.Right  => MPI.Cart_shift(C_COMM, 0,  1)[2],
-            Side.Bottom => MPI.Cart_shift(C_COMM, 1, -1)[2],
-            Side.Top    => MPI.Cart_shift(C_COMM, 1,  1)[2]
-        )
+        params.neighbours = Neighbours(Dim) do axis, side
+            return MPI.Cart_shift(C_COMM, Int(axis) - 1, first_side(side) ? -1 : 1)[2]
+        end
     else
         params.rank = 0
         params.proc_size = 1
-        params.proc_dims = ntuple(Returns(1), length(params.N))
+        params.proc_dims = ntuple(Returns(1), Dim)
         params.cart_comm = global_comm
-        params.cart_coords = ntuple(Returns(0), length(params.N))
-        params.neighbours = Dict(
-            Side.Left   => MPI.PROC_NULL,
-            Side.Right  => MPI.PROC_NULL,
-            Side.Bottom => MPI.PROC_NULL,
-            Side.Top    => MPI.PROC_NULL
-        )
+        params.cart_coords = ntuple(Returns(0), Dim)
+        params.neighbours = Neighbours(Returns(MPI.PROC_NULL), Dim)
     end
 
     params.root_rank = 0
@@ -470,6 +473,7 @@ end
 function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
     use_gpu = false, use_kokkos = false,
+    use_inbounds = true,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
     workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
@@ -496,24 +500,34 @@ function init_device(params::ArmonParameters;
 
     if !use_cache_blocking
         if use_gpu
-            # The literal block size for GPU kernels
-            block_size = something(block_size, 1024)
+            # The literal GPU block size for GPU kernels
+            block_size = something(block_size, (1024,))
         else
             # Disable cache blocking by using an empty block size
-            block_size = (0, 0)
+            block_size = ntuple(Returns(0), ndims(params))
         end
     elseif isnothing(block_size)
         # TODO: Estimate the optimal block size, given the solver's stencils
         if !use_gpu
-            block_size = (64, 64)
+            # Default is 4096 cells per block on CPU
+            if     ndims(params) == 1  block_size = (4096,)
+            elseif ndims(params) == 2  block_size = (64, 64)
+            elseif ndims(params) == 3  block_size = (16, 16, 16)
+            elseif ndims(params) == 4  block_size = (8, 8, 8, 8)
+            elseif ndims(params) == 6  block_size = (4, 4, 4, 4, 4)
+            else   solver_error(:config, "no default `block_size` in $(ndims(params))-dimensions on CPU")
+            end
         else
-            # TODO: GPU block size ?? 1024? but how?
-            block_size = (32, 32)
+            # Default on GPU is to use one whole grid
+            if     ndims(params) == 1  block_size = (1024,)
+            elseif ndims(params) == 2  block_size = (32, 32)
+            elseif ndims(params) == 3  block_size = (10, 10, 10)
+            else   solver_error(:config, "no default `block_size` in $(ndims(params))-dimensions on GPU")
+            end
         end
     end
 
-    length(block_size) > 2 && solver_error(:config, "Expected `block_size` to contain up to 2 elements, got: $block_size")
-    params.block_size = tuple(block_size..., ntuple(Returns(1), 2 - length(block_size))...)
+    params.block_size = block_size
 
     if !(workload_distribution in (:simple, :scotch, :sorted_scotch, :weighted_sorted_scotch))
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
@@ -521,9 +535,29 @@ function init_device(params::ArmonParameters;
     params.workload_distribution = workload_distribution
     params.distrib_params = distrib_params
 
-    numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
+    numa_ok = !Sys.iswindows() && NUMA.numa_available()
+    numa_aware && !numa_ok && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
     params.lock_memory = lock_memory
+
+    # TODO: rewrite `create_device` and `init_backend` to initialize `kernel_ctx` instead (+remove DeviceParams and Device?)
+    opts = KernelsToolkit.ContextOption[]
+    use_inbounds  && push!(opts, KernelsToolkit.Inbounds())
+    use_fast_math && push!(opts, KernelsToolkit.FastMath())
+    params.kernel_ctx = if params.device isa CPU_HP
+        if params.use_threading && !params.use_cache_blocking
+            threading_macro = use_std_lib_threads ? Threads.var"@threads" : Polyester.var"@batch"
+            push!(opts, KernelsToolkit.MultiThreading(threading_macro))
+        end
+        params.use_simd && push!(opts, KernelsToolkit.Simd(true))
+        KernelsToolkit.context(KernelsToolkit.CPU, opts...)
+    elseif params.device isa KernelAbstractions.Backend
+        push!(opts, KernelsToolkit.KA_Device(params.device))
+        push!(opts, KernelsToolkit.KA_GroupSize(params.block_size))
+        KernelsToolkit.context(KernelsToolkit.KA_Context, opts...)
+    else
+        solver_error(:config, "cannot create kernel context from $(params.device)")
+    end
 
     return options
 end
@@ -559,7 +593,7 @@ function init_profiling(params::ArmonParameters;
         end
 
         if estimated_blk_log_size == 0
-            sweep_count = length(split_axes(params.axis_splitting, data_type(params), 1))
+            sweep_count = length(split_axes(params.axis_splitting, data_type(params), ndims(params), 1))
             estimated_blk_log_size = min(params.maxcycle, 1000) * sweep_count
         end
         params.estimated_blk_log_size = estimated_blk_log_size
@@ -645,18 +679,17 @@ function init_test(params::ArmonParameters{T};
     end
 
     if isnothing(domain_size)
-        domain_size = default_domain_size(test_type)
+        domain_size = default_domain_size(test_type, ndims(params))
     end
     params.domain_size = Tuple(T.(domain_size))
 
     if isnothing(origin)
-        origin = default_domain_origin(test_type)
+        origin = default_domain_origin(test_type, ndims(params))
     end
     params.origin = Tuple(T.(origin))
 
     if isnothing(test)
-        Δx = params.domain_size ./ params.N
-        test = create_test(Δx, test_type)
+        test = create_test(params, test_type)
     end
     params.test = test
     params.maxcycle = maxcycle
@@ -698,28 +731,26 @@ end
 
 
 function init_output(params::ArmonParameters{T};
-    silent = 0, output_dir = ".", output_file = "output",
-    write_output = false, write_ghosts = false, write_slices = false, output_precision = nothing,
-    animation_step = 0,
+    silent = 0,
+    io_format = :csv, output_file = "./output", io_options = (;),
+    write_output = false, write_freq = 0,
     compare = false, is_ref = false, comparison_tolerance = 1e-10,
     check_result = false, return_data = false,
     options...
 ) where {T}
-    if isnothing(output_precision)
-        output_precision = T == Float64 ? 17 : 9  # Exact decimal output by default
-    end
-
     params.silent = silent
-    params.output_dir = output_dir
+
+    params.io_format = io_format
+    params.io_options = Dict(pairs(io_options))
+    params.io_writer = nothing  # initialized only when needed
     params.output_file = output_file
     params.write_output = write_output
-    params.write_ghosts = write_ghosts
-    params.write_slices = write_slices
-    params.output_precision = output_precision
-    params.animation_step = animation_step
+    params.write_freq = write_output ? write_freq : 0
+
     params.compare = compare
     params.is_ref = is_ref
     params.comparison_tolerance = comparison_tolerance
+
     params.check_result = check_result
     params.return_data = return_data
 
@@ -784,7 +815,7 @@ function print_parameter(io::IO, pad::Int, name::String, value; nl=true, suffix=
 end
 
 
-function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
+function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, CPU_HP}) where {Dim}
     print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
     if p.use_threading
         println(io, " ($(Threads.nthreads()) $(use_std_lib_threads ? "standard " : "")thread",
@@ -796,7 +827,7 @@ function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
 end
 
 
-function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU})
+function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, Dim, CPU}) where {Dim}
     print_parameter(io, pad, "GPU", true, nl=false)
     println(io, ": KA.jl's CPU backend (block size: ", join(p.block_size, '×'), ")")
 end
@@ -806,6 +837,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
     print_device_info(io, pad, p)
+    print_parameter(io, pad, "dimension", ndims(p))
     print_parameter(io, pad, "blocking", p.use_cache_blocking ? (p.async_cycle ? "async" : "sync") : false, nl=false)
     if p.use_cache_blocking && p.async_cycle
         print(io, ", distribution: ", p.workload_distribution)
@@ -853,12 +885,9 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     print_parameter(io, pad, "verbosity", p.silent)
     print_parameter(io, pad, "check result", p.check_result)
 
+    print_parameter(io, pad, "file I/O", p.write_output ? p.io_format : "none")
     if p.write_output || p.compare
-        print_parameter(io, pad, "write output", p.write_output, nl=false)
-        print(io, " (precision: $(p.output_precision) digits)")
-        println(io, p.write_ghosts ? "with ghosts" : "")
         print_parameter(io, pad, "to", "'$(p.output_file)'")
-        p.write_slices && print_parameter(io, pad, "write slices", p.write_slices)
         if p.compare
             print_parameter(io, pad, "compare", p.compare, nl=false)
             println(io, ", ", p.is_ref ? "as reference" : "with $(p.comparison_tolerance) of tolerance")
@@ -882,7 +911,7 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     if p.use_MPI
         print_parameter(io, pad, "coords", join(p.cart_coords, "×"), nl=false)
         print(io, " (rank: ", p.rank, "/", p.proc_size-1, ")")
-        neighbours_list = filter(≠(MPI.PROC_NULL) ∘ last, p.neighbours) |> collect .|> first
+        neighbours_list = filter(s -> has_neighbour(p, s), sides_of(ndims(p)))
         neighbours_str = join(neighbours_list, ", ", " and ") |> lowercase
         print(io, ", with $(neighbour_count(p)) neighbour", neighbour_count(p) != 1 ? "s" : "")
         println(io, neighbour_count(p) > 0 ? " on the " * neighbours_str : "")
@@ -900,6 +929,8 @@ end
 print_parameters(p::ArmonParameters) = print_parameters(stdout, p)
 Base.show(io::IO, p::ArmonParameters) = print_parameters(io::IO, p::ArmonParameters)
 
+Base.ndims(::ArmonParameters{<:Any, Dim}) where {Dim} = Dim
+
 
 """
     memory_info(params)
@@ -908,7 +939,7 @@ The total and free memory the current process can store on the `params.device`.
 """
 function memory_info(params::ArmonParameters)
     mem_info = device_memory_info(params.device)
-    # TODO: MPI support
+    # TODO: MPI support (think about shared resources!)
     return mem_info
 end
 
@@ -937,8 +968,8 @@ data_type(::ArmonParameters{T}) where T = T
 neighbour_at(params::ArmonParameters, side::Side.T) = params.neighbours[side]
 has_neighbour(params::ArmonParameters, side::Side.T) = params.neighbours[side] ≠ MPI.PROC_NULL
 
-neighbour_count(params::ArmonParameters) = count(≠(MPI.PROC_NULL), values(params.neighbours))
-neighbour_count(params::ArmonParameters, dir::Axis.T) = count(≠(MPI.PROC_NULL), neighbour_at.(params, sides_along(dir)))
+neighbour_count(params::ArmonParameters) = count(s -> has_neighbour(params, s), sides_of(ndims(p)))
+neighbour_count(params::ArmonParameters, dir::Axis.T) = count(s -> has_neighbour(params, s), sides_along(dir))
 
 
 # Default copy method
@@ -982,17 +1013,19 @@ end
 #
 
 function compute_steps_ranges(params::ArmonParameters)
-    params.steps_ranges = collect(compute_steps_ranges.(instances(Axis.T), params.nghost, Ref(params.projection_scheme)))
+    params.steps_ranges = collect(compute_steps_ranges.(
+        axes_of(ndims(params)), params.nghost, Ref(params.projection_scheme), Ref(Val(ndims(params)))
+    ))
 end
 
-function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme)
+function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme, ::Val{Dim}) where {Dim}
     # Extra cells to compute in each step for the projection
     extra_FLX = stencil_width(projection)
     extra_UP = stencil_width(projection)
 
     # Real domain
-    bl_corner = (0, 0)  # Bottom-Left corner offset
-    tr_corner = (0, 0)  # Top-Right   corner offset
+    bl_corner = ntuple(Returns(0), Dim)  # Bottom-Left corner offset
+    tr_corner = ntuple(Returns(0), Dim)  # Top-Right   corner offset
     real_range = (bl_corner, tr_corner)
     real_domain = real_range
 
@@ -1002,23 +1035,21 @@ function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionS
     # Steps ranges, computed so that there is no need for an extra BC step before the projection
     EOS = real_range  # The BC overwrites any changes to the ghost cells right after
 
-    if axis == Axis.X
-        # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes
-        fluxes_bl  = (extra_FLX, 0); fluxes_tr  = (extra_FLX+1, 0)
-        cell_up_bl = (extra_UP,  0); cell_up_tr = (extra_UP,    0)
-        advec_bl   = (0,         0); advec_tr   = (1,           0)
-    else
-        fluxes_bl  = (0, extra_FLX); fluxes_tr  = (0, extra_FLX+1)
-        cell_up_bl = (0, extra_UP ); cell_up_tr = (0, extra_UP   )
-        advec_bl   = (0, 0        ); advec_tr   = (0, 1          )
-    end
+    # Offests from each corner for each step.
+    # Fluxes are computed between 'i-s' and 'i', we need one more cell on the right to have all fluxes.
+    fluxes_bl  = bl_corner .- offset_to(axis, Dim, extra_FLX)
+    fluxes_tr  = tr_corner .+ offset_to(axis, Dim, extra_FLX+1)
+    cell_up_bl = bl_corner .- offset_to(axis, Dim, extra_UP)
+    cell_up_tr = tr_corner .+ offset_to(axis, Dim, extra_UP)
+    advec_bl   = bl_corner .- offset_to(axis, Dim, 0)
+    advec_tr   = tr_corner .+ offset_to(axis, Dim, 1)
 
-    fluxes      = (bl_corner .- fluxes_bl,  tr_corner .+ fluxes_tr )
-    cell_update = (bl_corner .- cell_up_bl, tr_corner .+ cell_up_tr)
-    advection   = (bl_corner .- advec_bl,   tr_corner .+ advec_tr  )
+    fluxes      = (fluxes_bl,  fluxes_tr )
+    cell_update = (cell_up_bl, cell_up_tr)
+    advection   = (advec_bl,   advec_tr  )
     projection  = real_range
 
-    return StepsRanges(
+    return StepsRanges{Dim}(
         axis, real_domain, full_domain,
         EOS, fluxes, cell_update, advection, projection
     )
@@ -1028,11 +1059,11 @@ end
 # Synchronisation
 #
 
-function Base.wait(::ArmonParameters{<:Any, <:Union{CPU, CPU_HP}})
+function Base.wait(::ArmonParameters{<:Any, Dim, <:Union{CPU, CPU_HP}}) where {Dim}
     # CPU backends are synchronous
 end
 
 
-function Base.wait(params::ArmonParameters{<:Any, <:GPU})
+function Base.wait(params::ArmonParameters{<:Any, Dim, <:GPU}) where {Dim}
     KernelAbstractions.synchronize(params.device)
 end

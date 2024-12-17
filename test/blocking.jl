@@ -14,6 +14,7 @@
         )
         ref_params = get_reference_params(:Sod, Float64; N, block_size, nghost)
         grid = Armon.BlockGrid(ref_params)
+        dim = ndims(grid)
 
         @testset "Grid" begin
             if prod(block_size) > 0
@@ -48,7 +49,7 @@
                 @test all_cell_count  == prod(N .+ 2*ref_params.nghost)
             end
 
-            total_mem = all_cell_count * sizeof(Float64) * length(Armon.block_vars())
+            total_mem = all_cell_count * sizeof(Float64) * Armon.num_arrays_per_cell(ndims(grid))
             remote_blocks_overhead = sum(sizeof.(grid.remote_blocks))
             device_memory, host_memory = Armon.memory_required(ref_params)
             @test total_mem == device_memory
@@ -62,15 +63,16 @@
                         @test blk.neighbour.neighbour == blk
                     else
                         opposite_side = Armon.side_from_offset(Tuple(blk.pos) .- Tuple(blk.neighbour.pos))
-                        @test blk.neighbour.neighbours[Int(opposite_side)] == blk
+                        @test blk.neighbour.neighbours[opposite_side] == blk
                     end
                 else
-                    for (side, neighbour) in zip(instances(Armon.Side.T), blk.neighbours)
+                    for side in Armon.sides_of(dim)
+                        neighbour = blk.neighbours[side]
                         if neighbour isa Armon.RemoteTaskBlock
                             @test neighbour.neighbour == blk
                         else 
                             opposite_side = Armon.opposite_of(side)
-                            @test neighbour.neighbours[Int(opposite_side)] == blk
+                            @test neighbour.neighbours[opposite_side] == blk
                         end
                     end
                 end
@@ -156,9 +158,9 @@ end
             @test ghost_ok   == length(real_cells)
         end
 
-        @testset "$side domain" for side in instances(Armon.Side.T)
+        @testset "$side domain" for side in Armon.sides_of(ndims(bsize))
             border = Armon.border_domain(bsize, side)
-            expected_size = Armon.real_size_along(bsize, Armon.next_axis(Armon.axis_of(side)))
+            expected_size = Armon.real_size_along(bsize, Armon.next_axis(Armon.axis_of(side), ndims(bsize)))
             @test length(border) == expected_size
             if Armon.axis_of(side) == Armon.Axis.X
                 @test size(border) == (1, expected_size)

@@ -47,6 +47,8 @@ end
 
 function read_sub_domain_from_global_domain_file!(params::ArmonParameters, data::BlockGrid, file::IO)
     # TODO: use HDF5 for this
+    # TODO: dimension agnostic
+    # TODO: replace by HDF5 (this also means that we need to check if `HDF5.has_parallel() == true`, and abort otherwise)
 
     # Ranges of the global domain
     global_cols = 1:params.global_grid[2]
@@ -200,9 +202,10 @@ end
 function test_neighbour_coords(P, global_comm)
     ref_params = ref_params_for_sub_domain(:Sod, Float64, P; global_comm)
     coords = ref_params.cart_coords
+    dim = length(P)
 
     all_ok = true
-    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+    for (coord, axis) in zip(coords, Armon.axes_of(ndims(dim))),
             side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -211,7 +214,7 @@ function test_neighbour_coords(P, global_comm)
                       dest=neighbour_rank, source=neighbour_rank)
         neighbour_coords = tuple(neighbour_coords...)
 
-        expected_coords = coords .+ Armon.offset_to(side)
+        expected_coords = coords .+ Armon.offset_to(side, dim)
         @test expected_coords == neighbour_coords
         if expected_coords != neighbour_coords
             all_ok = false
@@ -230,7 +233,7 @@ function dump_neighbours(P, proc_in_grid, global_comm)
     coords = ref_params.cart_coords
     neighbour_coords = Dict{Armon.Side.T, Tuple{Int, Int}}()
 
-    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+    for (coord, axis) in zip(coords, Armon.axes_of(ndims(ref_params))),
             side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -248,7 +251,7 @@ function dump_neighbours(P, proc_in_grid, global_comm)
     end
 
     println("[$(ref_params.rank)]: $(coords)")
-    for side in instances(Armon.Side.T)
+    for side in Armon.sides_of(ndims(ref_params))
         if Armon.has_neighbour(ref_params, side)
             neighbour_rank = Armon.neighbour_at(ref_params, side)
             @printf(" - %6s: [%2d] = %6s (expected: %6s)",
@@ -293,9 +296,9 @@ end
 
 function positions_along(grid::BlockGrid, side::Armon.Side.T)
     axis = Armon.axis_of(side)
-    side_pos  = ifelse.(side in Armon.first_sides(), 1, grid.grid_size)
-    first_pos = ifelse.(instances(Armon.Axis.T) .== axis, side_pos, 1)
-    last_pos  = ifelse.(instances(Armon.Axis.T) .== axis, side_pos, grid.grid_size)
+    side_pos  = ifelse.(Armon.first_sides(side), 1, grid.grid_size)
+    first_pos = ifelse.(Armon.axes_of(ndims(grid)) .== axis, side_pos, 1)
+    last_pos  = ifelse.(Armon.axes_of(ndims(grid)) .== axis, side_pos, grid.grid_size)
     return CartesianIndex(first_pos):CartesianIndex(last_pos)
 end
 
@@ -314,7 +317,7 @@ function test_halo_exchange(P, global_comm)
     end
 
     total_diff = 0
-    for (coord, axis) in zip(coords, instances(Armon.Axis.T)),
+    for (coord, axis) in zip(coords, Armon.axes_of(ndims(block_grid))),
             side in (iseven(coord) ? Armon.sides_along(axis) : reverse(Armon.sides_along(axis)))
         Armon.has_neighbour(ref_params, side) || continue
         neighbour_rank = Armon.neighbour_at(ref_params, side)
@@ -329,8 +332,8 @@ function test_halo_exchange(P, global_comm)
                 Armon.host_to_device!(blk)
 
                 # Halo exchange, but with one neighbour at a time
-                remote_blk = blk.neighbours[Int(side)]
-                @root_test length(domain) * length(Armon.comm_vars()) == length(remote_blk.send_buf.data)
+                remote_blk = blk.neighbours[side]
+                @root_test length(domain) * Armon.num_arrays_per_comm(ndims(block_grid)) == length(remote_blk.send_buf.data)
                 if !Armon.start_exchange(ref_params, blk, remote_blk, side)
                     MPI.Waitall(remote_blk.requests)
                     @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
@@ -349,10 +352,7 @@ function test_halo_exchange(P, global_comm)
         global_diff_count = MPI.Allreduce(total_diff, MPI.SUM, global_comm)
         if global_diff_count > 0
             p_str = join(P, '×')
-            Armon.write_sub_domain_file(
-                ref_params, block_grid, "xchg_$(p_str)";
-                no_msg=true, all_ghosts=true, vars=(:x, :y, :ρ)
-            )
+            Armon.write_sub_domain_file(ref_params, block_grid, "xchg_$(p_str)"; ghosts=true, vars=(:x, :y, :ρ))
         end
     end
 
@@ -389,8 +389,8 @@ function test_reference(prefix, comm, test, type, P; kwargs...)
         if global_diff_count > 0 && diff_count >= 0
             prefix *= isempty(prefix) ? "" : "_"
             p_str = join(P, '×')
-            Armon.write_sub_domain_file(ref_params, data, "$(prefix)test_$(test)_$(type)_$(p_str)"; no_msg=true)
-            Armon.write_sub_domain_file(ref_params, ref_data, "$(prefix)ref_$(test)_$(type)_$(p_str)"; no_msg=true)
+            Armon.write_sub_domain_file(ref_params, data, "$(prefix)test_$(test)_$(type)_$(p_str)")
+            Armon.write_sub_domain_file(ref_params, ref_data, "$(prefix)ref_$(test)_$(type)_$(p_str)")
         end
     end
 

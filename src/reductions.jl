@@ -1,35 +1,33 @@
 
-@inline @fast function dtCFL_kernel_reduction(u::T, v::T, c::T, mask::T, dx::T, dy::T) where T
+@kernel_function function dtCFL_kernel_reduction(u::NTuple{D, T}, c::T, mask::T, Δx::NTuple{D, T}) where {D, T}
     # We need the absolute value of the divisor since the result of the max can be negative,
     # because of some IEEE 754 non-compliance since fast math is enabled when compiling this code
     # for GPU, e.g.: `@fastmath max(-0., 0.) == -0.`, while `max(-0., 0.) == 0.`
-    # If the mask is 0, then: `dx / -0.0 == -Inf`, which will then make the result incorrect.
-    return min(
-        dx / abs(max(abs(u + c), abs(u - c)) * mask),
-        dy / abs(max(abs(v + c), abs(v - c)) * mask)
-    )
+    # If the mask is 0, then: `Δx / -0.0 == -Inf`, which will then make the result incorrect.
+    return minimum(Δx ./ abs.(max.(abs.(u .+ c), abs.(u .- c)) .* mask))
 end
 
 
-@inline @fast function dtCFL_kernel_reduction(u::T, v::T, c::T, dx::T, dy::T) where T
+@kernel_function function dtCFL_kernel_reduction(u::NTuple{D, T}, c::T, Δx::NTuple{D, T}) where {D, T}
     # Mask-less version
-    return min(
-        dx / abs(max(abs(u + c), abs(u - c))),
-        dy / abs(max(abs(v + c), abs(v - c)))
-    )
+    return minimum(Δx ./ abs.(max.(abs.(u .+ c), abs.(u .- c))))
 end
 
 
-@fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2, T}) where {T}
+@inbounds function dtCFL_kernel(params::ArmonParameters{T, Dim, CPU_HP}, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{Dim, T}) where {T, Dim}
     # CPU reduction
-    (; u, v, c) = block_device_data(blk)
-    range = block_domain_range(blk.size, state.steps_ranges.real_domain)
+    blk_data = block_device_data(blk)
+    c = blk_data.scalar_vars.c
+    u = blk_data.dim_vars.u
+    domain = block_domain_range(blk.size, state.steps_ranges.real_domain)
 
+    # TODO: use KernelsToolkit for this
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
         res = typemax(T)
-        for j in range.col, i in range.row .+ (j - 1)
-            cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], Δx...)
+        for I in domain
+            i = real_lin_position(blk.size, I)
+            cell_dt = dtCFL_kernel_reduction(get_tuple(u, i), c[i], Δx)
             res = min(res, cell_dt)
         end
         return res
@@ -38,11 +36,14 @@ end
         threads_res = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
         threads_res .= typemax(T)
 
-        @threaded for j in range.col
+        # Split all axes but the last one among all threads. This is a primitive way of
+        # splitting the work while still allowing vectorisation.
+        @threaded for j in CartesianIndices(axes(domain)[1:end-1])
             tid = Threads.threadid()
             res = threads_res[tid]
-            for i in range.row .+ (j - 1)
-                cell_dt = dtCFL_kernel_reduction(u[i], v[i], c[i], Δx...)
+            for I in view(domain, Tuple(j)..., :)
+                i = real_lin_position(blk.size, I)
+                cell_dt = dtCFL_kernel_reduction(get_tuple(u, i), c[i], Δx)
                 res = min(res, cell_dt)
             end
             threads_res[tid] = res
@@ -54,18 +55,20 @@ end
 
 
 @generic_kernel function dtCFL_kernel(
-    u::V, v::V, c::V, res::V, bsize::BlockSize, dx::T, dy::T
-) where {T, V <: AbstractArray{T}}
-    i = @index_2D_lin()
-    mask = T(!is_ghost(bsize, i))
-    res[i] = dtCFL_kernel_reduction(u[i], v[i], c[i], mask, dx, dy)
+    u::NTuple{D, V}, c::V, res::V, bsize::BlockSize{D}, Δx::NTuple{D, T}
+) where {T, V <: AbstractArray{T}, D}
+    i = @kt_i()
+    I = to_real_position(bsize, @kt_I())
+    mask = T(!is_ghost(bsize, I))  # valid only since `I` is an index in the whole domain
+    res[i] = dtCFL_kernel_reduction(get_tuple(u, i), c[i], mask, Δx)
 end
 
 
-function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2})
+function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{Dim, T}) where {T, Dim}
     # GPU generic reduction
-    range = block_domain_range(blk.size, state.steps_ranges.full_domain)
-    blk_data = block_device_data(blk)
+    domain = block_domain_range(blk.size, state.steps_ranges.full_domain)
+    data = block_device_data(blk)
+    u = data.dim_vars.u
 
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction result. This is inefficient but can
@@ -73,17 +76,20 @@ function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTas
         # We avoid filling the whole array with `typemax(T)` by applying the kernel on the whole
         # array (`full_domain`) and by using `is_ghost(i)` as a mask.
         # TODO: There may be some synchronization issues with oneAPI.jl.
-        dtCFL_kernel(params, blk_data, range, blk_data.work_1, blk.size, Δx...)
+        # TODO: use cartesian subviews to remove the need of a mask?
+        (; c, work_1) = data.scalar_vars
+        dtCFL_kernel(u, c, work_1, blk.size, Δx; ctx=params.kernel_ctx, domain)
         wait(params)
-        return reduce(min, blk_data.work_1)
+        return reduce(min, work_1)
     else
         # Direct reduction, which depends on a pre-computed `mask`
-        lin_range = first(range):last(range)  # Reduce on a 1D range
-        c_v    = @view blk_data.c[lin_range]
-        u_v    = @view blk_data.u[lin_range]
-        v_v    = @view blk_data.v[lin_range]
-        mask_v = @view blk_data.mask[lin_range]
-        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, Δx...)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
+        # TODO: measure performance with a cartisan subview (which can avoid the mask)
+        lin_domain = LinearIndices(domain)
+        lin_range = first(lin_domain):last(lin_domain)  # Reduce on a 1D range
+        c_v    = @view data.c[lin_range]
+        mask_v = @view data.mask[lin_range]
+        u_v    = view.(u, Ref(lin_range))
+        return mapreduce(dtCFL_kernel_reduction, min, u_v, c_v, mask_v, Δx)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
     end
 end
 
@@ -199,7 +205,7 @@ function next_time_step(params::ArmonParameters, state::SolverState, grid::Block
 end
 
 
-@inline @fast function conservation_vars_kernel_reduction(ρ::T, E::T, mask::T) where T
+@kernel_function function conservation_vars_kernel_reduction(ρ::T, E::T, mask::T) where T
     return (
         ρ * mask,     # Mass
         ρ * E * mask  # Energy
@@ -207,7 +213,7 @@ end
 end
 
 
-@inline @fast function conservation_vars_kernel_reduction(ρ::T, E::T) where T
+@kernel_function function conservation_vars_kernel_reduction(ρ::T, E::T) where T
     # Mask-less version
     return (
         ρ,     # Mass
@@ -216,16 +222,18 @@ end
 end
 
 
-@fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
+@inbounds @fastmath function conservation_vars(params::ArmonParameters{T, Dim, CPU_HP}, blk::LocalTaskBlock) where {T, Dim}
     # CPU reduction
-    (; ρ, E) = block_device_data(blk)
-    range = block_domain_range(blk.size, blk.state.steps_ranges.real_domain)
+    ρ, E = var_arrays(blk, (:ρ, :E))
+    domain = block_domain_range(blk.size, blk.state.steps_ranges.real_domain)
 
+    # TODO: use KernelsToolkit
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
         res_mass = zero(T)
         res_energy = zero(T)
-        for j in range.col, i in range.row .+ (j - 1)
+        for I in domain
+            i = real_lin_position(blk.size, I)
             (res_mass, res_energy) = (res_mass, res_energy) .+ conservation_vars_kernel_reduction(ρ[i], E[i])
         end
     else
@@ -235,11 +243,12 @@ end
         threads_mass   .= 0
         threads_energy .= 0
 
-        @threaded for j in range.col
+        @threaded for j in CartesianIndices(axes(domain)[1:end-1])
             tid = Threads.threadid()
             thread_mass = threads_mass[tid]
             thread_energy = threads_energy[tid]
-            for i in range.row .+ (j - 1)
+            for I in view(domain, Tuple(j)..., :)
+                i = real_lin_position(blk.size, I)
                 cell_mass, cell_energy = conservation_vars_kernel_reduction(ρ[i], E[i])
                 thread_mass += cell_mass
                 thread_energy += cell_energy
@@ -262,30 +271,35 @@ end
 @generic_kernel function conservation_vars(
     ρ::V, E::V, res_mass::V, res_energy::V, bsize::BlockSize
 ) where {V}
-    i = @index_2D_lin()
-    mask = eltype(V)(!is_ghost(bsize, i))
+    i = @kt_i()
+    I = to_real_position(bsize, @kt_I())
+    mask = eltype(V)(!is_ghost(bsize, I))  # valid only since `I` is an index in the whole domain
     (res_mass[i], res_energy[i]) = conservation_vars_kernel_reduction(ρ[i], E[i], mask)
 end
 
 
 function conservation_vars(params::ArmonParameters{T}, blk::LocalTaskBlock) where {T}
     # GPU generic reduction
-    range = block_domain_range(blk.size, blk.state.steps_ranges.full_domain)
-    blk_data = block_device_data(blk)
+    domain = block_domain_range(blk.size, blk.state.steps_ranges.full_domain)
+    data = block_device_data(blk)
 
+    # TODO: use KernelsToolkit
+    # TODO: measure performance with cartisan subviews (which can avoid the mask and iterating on the full block)
     if params.use_two_step_reduction
         # Use a temporary array to store the partial reduction results.
         # Same comments as for `dtCFL_kernel`.
-        conservation_vars(params, blk_data, range, blk_data.work_1, blk_data.work_2, blk.size)
+        (; ρ, E, work_1, work_2) = data.scalar_vars
+        conservation_vars(ρ, E, work_1, work_2, blk.size; ctx=params.kernel_ctx, domain)
         wait(params)
         identity2(a, b) = (a, b)
-        total_mass, total_energy = mapreduce(identity2, min, blk_data.work_1, blk_data.work_2;
-            init=(zero(T), zero(T)))
+        total_mass, total_energy = mapreduce(identity2, min, work_1, work_2; init=(zero(T), zero(T)))
     else
-        lin_range = first(range):last(range)
-        ρ_v    = @view blk_data.ρ[lin_range]
-        E_v    = @view blk_data.E[lin_range]
-        mask_v = @view blk_data.mask[lin_range]
+        # TODO: measure performance with a cartisan subview (which can avoid the mask)
+        lin_domain = LinearIndices(domain)
+        lin_range = first(lin_domain):last(lin_domain)
+        ρ_v    = @view data.ρ[lin_range]
+        E_v    = @view data.E[lin_range]
+        mask_v = @view data.mask[lin_range]
         total_mass, total_energy = mapreduce(conservation_vars_kernel_reduction, .+, ρ_v, E_v, mask_v;
             init=(zero(T), zero(T)))
     end

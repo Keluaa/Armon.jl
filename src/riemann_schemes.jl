@@ -31,12 +31,11 @@ end
 
 
 @generic_kernel function acoustic!(
-    s::Int, uˢ_::V, pˢ_::V,
-    ρ::V, uₐ::V, p::V, c::V
+    s::Int, uˢ::V, pˢ::V,
+    ρ::V, u::V, p::V, c::V
 ) where V
-    u = uₐ  # `u` or `v` depending on the current axis
-    i = @index_2D_lin()
-    uˢ_[i], pˢ_[i] = acoustic_Godunov(
+    i = @kt_i()
+    uˢ[i], pˢ[i] = acoustic_Godunov(
         ρ[i], ρ[i-s], c[i], c[i-s],
         u[i], u[i-s], p[i], p[i-s]
     )
@@ -44,22 +43,21 @@ end
 
 
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGodunov)
-    range = block_domain_range(blk.size, state.steps_ranges.fluxes)
-    blk_data = block_device_data(blk)
-    u = state.axis == Axis.X ? blk_data.u : blk_data.v
+    domain = block_domain_range(blk.size, state.steps_ranges.fluxes)
     s = stride_along(blk.size, state.axis)
-    return acoustic!(params, blk_data, range, s, blk_data.uˢ, blk_data.pˢ, u)
+    data = block_device_data(blk)
+    (; ρ, p, c, uˢ, pˢ) = data.scalar_vars
+    uₐ = blk_data.dim_vars.u[state.axis]
+    acoustic!(s, uˢ, pˢ, ρ, uₐ, p, c; ctx=params.kernel_ctx, domain)
 end
 
 
 @generic_kernel function acoustic_GAD!(
     s::Int, dt::T, dx::T,
-    uˢ::V, pˢ::V, ρ::V, uₐ::V, p::V, c::V,
+    uˢ::V, pˢ::V, ρ::V, u::V, p::V, c::V,
     lim::LimiterType
 ) where {T, V <: AbstractArray{T}, LimiterType <: Limiter}
-    i = @index_2D_lin()
-
-    u = uₐ  # `u` or `v` depending on the current axis
+    i = @kt_i()
 
     # First order acoustic solver on the left cell
     uˢ_i₋, pˢ_i₋ = acoustic_Godunov(
@@ -105,11 +103,15 @@ end
 
 
 function numerical_fluxes!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::RiemannGAD)
-    range = block_domain_range(blk.size, state.steps_ranges.fluxes)
-    blk_data = block_device_data(blk)
-    u = state.axis == Axis.X ? blk_data.u : blk_data.v
+    domain = block_domain_range(blk.size, state.steps_ranges.fluxes)
     s = stride_along(blk.size, state.axis)
-    return acoustic_GAD!(params, blk_data, range, s, state.dt, state.dx, u, state.riemann_limiter)
+    data = block_device_data(blk)
+    (; ρ, p, c, uˢ, pˢ) = data.scalar_vars
+    uₐ = data.dim_vars.u[state.axis]
+    acoustic_GAD!(
+        s, state.dt, state.dx, uˢ, pˢ, ρ, uₐ, p, c, state.riemann_limiter;
+        ctx=params.kernel_ctx, domain
+    )
 end
 
 
