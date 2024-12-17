@@ -374,6 +374,7 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
         end
 
         if write_freq != 0 && (global_dt.cycle - 1) % write_freq == 0
+            device_to_host!(data)
             wait(params)
             write_sub_domain_file(params, grid, params.output_file)
         end
@@ -449,6 +450,11 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
+    if isnothing(params.io_writer) && params.write_freq > 0 && supports_temporal_data(format_from_name(params.io_format))
+        # When writing multiple times to the same file, initialize the output file only once
+        params.io_writer = domain_writer(params.io_format, params.output_file, params, grid; params.io_options...)
+    end
+
     if params.check_result || params.silent <= 1
         @section "Conservation variables" begin
             params.initial_mass, params.initial_energy = conservation_vars(params, data) 
@@ -493,11 +499,16 @@ function armon(params::ArmonParameters{T}) where T
         params.log_blocks ? collect_logs(data) : nothing
     )
 
-    if params.return_data || params.write_output
-        device_to_host!(data)  # No-op if the host is the device
+    if params.write_output
+        # Only write the final state if it hasn't been already (with `write_freq > 0`)
+        if (params.write_freq == 0 || (data.global_dt.cycle - 1) % params.write_freq != 0)
+            device_to_host!(data)
+            write_sub_domain_file(params, data, params.output_file)
+        end
+        params.write_freq > 0 && close(params.io_writer)
+    elseif params.return_data
+        device_to_host!(data) 
     end
-
-    params.write_output && write_sub_domain_file(params, data, params.output_file)
 
     if is_root && params.measure_time && params.silent < 3 && !isinteractive()
         show(params.timer)

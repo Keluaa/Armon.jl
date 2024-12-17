@@ -49,6 +49,15 @@ function file_extension end
 
 
 """
+    format_from_name(name::Symbol)
+    format_from_name(::Val{name})
+
+The [`AbstractSolverIO`](@ref) type associated with that name.
+"""
+format_from_name(name::Symbol) = format_from_name(Val(name))
+
+
+"""
     domain_writer(
         format::Union{Symbol, Type{<:AbstractSolverIO}}, file,
         params::ArmonParameters, grid::BlockGrid;
@@ -140,9 +149,13 @@ Write `grid` to `file_name` with the given `format` (defaults to `params.io_form
 `options` are specific to the format.
 """
 function write_sub_domain_file(format, params::ArmonParameters, grid::BlockGrid, file_name::AbstractString; options...)
-    writer = domain_writer(format, file_name, params, grid; params.io_options..., options...)
-    write_domain_to_file(writer, params, grid)
-    close(writer)
+    if isnothing(params.io_writer)
+        writer = domain_writer(format, file_name, params, grid; params.io_options..., options...)
+        write_domain_to_file(writer, params, grid)
+        close(writer)
+    else
+        write_domain_to_file(params.io_writer, params, grid)
+    end
     return grid
 end
 

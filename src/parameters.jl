@@ -303,6 +303,7 @@ mutable struct ArmonParameters{Flt_T, Dim, Device, DeviceParams, KtContext <: Ke
     silent::Int
     io_format::Symbol
     io_options::Dict{Symbol, Any}
+    io_writer::Any
     output_file::String
     write_output::Bool
     write_freq::Int
@@ -741,6 +742,7 @@ function init_output(params::ArmonParameters{T};
 
     params.io_format = io_format
     params.io_options = Dict(pairs(io_options))
+    params.io_writer = nothing  # initialized only when needed
     params.output_file = output_file
     params.write_output = write_output
     params.write_freq = write_output ? write_freq : 0
