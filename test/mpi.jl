@@ -48,6 +48,7 @@ end
 function read_sub_domain_from_global_domain_file!(params::ArmonParameters, data::BlockGrid, file::IO)
     # TODO: use HDF5 for this
     # TODO: dimension agnostic
+    # TODO: replace by HDF5 (this also means that we need to check if `HDF5.has_parallel() == true`, and abort otherwise)
 
     # Ranges of the global domain
     global_cols = 1:params.global_grid[2]
