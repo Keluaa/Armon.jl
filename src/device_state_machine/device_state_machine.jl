@@ -174,14 +174,14 @@ macro tiled_2D_iter(step, step_call)
     return esc(quote
         for tile_iter_idx_y in 1:tile_count[2], tile_iter_idx_x in 1:tile_count[1]
             # Compute everything from `tile_iter_idx`, in order to minimize the amount of
-            # memory dependancies across loop iterations.
+            # live variables across loop iterations.
             thread_pos = @index(Local, NTuple)
-            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, bsize, Val($step))
+            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, block.size, Val($step))
             if in_bounds
                 idx = (;
                     idx = 0,
                     lin_1D = 0,
-                    lin_2D = lin_position(block.bsize, I)
+                    lin_2D = lin_position(block.size, I)
                 )
                 $step_call
             end
@@ -191,7 +191,7 @@ end
 
 
 @kernel cpu=false function tiled_block_iter(
-    grid_ptr::Ref{DeviceBlockGrid}, block_ptr::Ref{DeviceLocalBlock},
+    grid_ptr::Ref{<:DeviceBlockGrid}, block_ptr::Ref{<:DeviceLocalBlock},
     state::BasicSolverState, queue::DeviceStepQueue,
     ::Val{wrap_tile}, ::Val{tile_count}
 ) where {wrap_tile, tile_count}
@@ -237,7 +237,7 @@ end
 
         elseif step == SolverStep.Fluxes
             @tiled_2D_iter :fluxes begin
-                s = stride_along(block.bsize, state.axis)
+                s = stride_along(block.size, state.axis)
                 uₐ = state.axis == Axis.X ? data.u : data.v
                 if state.schemes.riemann_scheme isa RiemannGodunov
                     @sub_kernel_call idx acoustic!(s, data.uˢ, data.pˢ, data.ρ, uₐ, data.p, data.c)
@@ -252,14 +252,14 @@ end
 
         elseif step == SolverStep.CellUpdate
             @tiled_2D_iter :cell_update begin
-                s = stride_along(block.bsize, state.axis)
+                s = stride_along(block.size, state.axis)
                 uₐ = state.axis == Axis.X ? data.u : data.v
                 @sub_kernel_call idx cell_update!(s, state.dx, state.dt, data.uˢ, data.pˢ, data.ρ, uₐ, data.E)
             end
 
         elseif step == SolverStep.RemapAdvection
             @tiled_2D_iter :advection begin
-                s = stride_along(block.bsize, state.axis)
+                s = stride_along(block.size, state.axis)
                 if state.schemes.projection_scheme isa EulerProjection
                     @sub_kernel_call idx advection_first_order!(
                         s, state.dt,
@@ -277,7 +277,7 @@ end
 
         elseif step == SolverStep.RemapProjection
             @tiled_2D_iter :projection begin
-                s = stride_along(block.bsize, state.axis)
+                s = stride_along(block.size, state.axis)
                 @sub_kernel_call idx euler_projection!(
                     s, state.dx, state.dt, data.uˢ, data.ρ, data.u, data.v, data.E,
                     data.work_1, data.work_2, data.work_3, data.work_4
@@ -288,7 +288,7 @@ end
         @synchronize()
     end
 
-    if @index(Global, Cartesian) == CartesianIndex(1, 1)
+    if @index(Global, Cartesian) == oneunit(CartesianIndex{2})
         # If `last_step_completed`, then we want to place ourselfves to the step after the last one.
         # In case it was the last step in the queue, then `is_done(queue)` becomes `true`.
         queue.status[2] = step_idx + last_step_completed
@@ -327,12 +327,18 @@ function process_queue!(queue::DeviceStepQueue, params::ArmonParameters, state::
         # TODO: cudaFuncSetCacheConfig(cudaFuncCachePreferL1)
         #   => may help, especially if there is register spilling (maybe?)
 
-        @apply_device_block dev_blk_ptr = pointer(grid.device_grid, blk.pos) begin
-            tiled_block_iter_func(
-                pointer(grid.device_grid_ref), dev_blk_ptr, basic_state, queue,
-                Val(wrap_tile), Val(tile_count)
-            )
+        if blk.size isa StaticBSize
+            blk_idx = block_idx(grid, blk.pos)
+            dev_blk_ptr = pointer(grid.device_grid.blocks, blk_idx)
+        elseif blk.size isa DynamicBSize
+            blk_idx = edge_block_idx(grid, blk.pos)
+            dev_blk_ptr = pointer(grid.device_grid.edge_blocks, blk_idx)
         end
+
+        tiled_block_iter_func(
+            pointer(grid.device_grid_ref), dev_blk_ptr, basic_state, queue,
+            Val(wrap_tile), Val(tile_count)
+        )
     else
         state_machine_func = state_machine_kernel(queue.device, params.workgroup_size)
         # TODO: the ndrange is quite important, the current choice is maybe sub-optimal since it includes all ghost cells

@@ -108,7 +108,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     if params.use_tiled_state_machine
         # `dev_block_grid` is the `DeviceBlockGrid` object manipulable only from the host
         dev_block_grid = DeviceBlockGrid(
-            T, params.device, static_size, DynamicBSize{ghost},
+            eltype(blocks), eltype(edge_blocks), eltype(remote_blocks), params.device,
             (; grid=grid_size, static_grid=static_sized_grid, real_cells=cell_size, edge=edge_size),
             (; static=static_sized_block_count, edge=dyn_sized_block_count, remote=grid_perimeter)
         )
@@ -949,8 +949,8 @@ function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, D, H, B, Ghost
     print_parameter(io, pad, "remote buffers", "stored on the $remote_dev_str")
     print_parameter(io, pad, "device", grid.device)
     print_parameter(io, pad, "device array", D)
-    print_parameter(io, pad, "host array", D == H ? "same as device" : H; nl=false)
-    print_parameter(io, pad, "device mirror", !isnothing(grid.device_grid))
+    print_parameter(io, pad, "host array", D == H ? "same as device" : H)
+    print_parameter(io, pad, "device mirror", !isnothing(grid.device_grid); nl=false)
 end
 
 

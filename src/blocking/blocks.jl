@@ -6,8 +6,8 @@ Abstract block used for cache blocking.
 """
 abstract type TaskBlock{V <: AbstractArray} end
 
-array_type(::TaskBlock{V}) where {V} = V
-Base.eltype(::TaskBlock{V}) where {V} = eltype(V)
+array_type(::ObjOrType{TaskBlock{V}}) where {V} = V
+Base.eltype(::ObjOrType{TaskBlock{V}}) where {V} = eltype(V)
 
 
 """

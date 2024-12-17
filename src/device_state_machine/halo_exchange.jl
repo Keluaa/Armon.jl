@@ -161,11 +161,11 @@ function device_border_exchange(
     # to perform the exchange.
     tid = @index(Local, Linear)
     if tid == 1
-        interface_idx = block.interfaces_idx[Int(side_1)]
+        interface_idx = block.interfaces_idx[Int(state.axis)][1]
         block_status_idx = block.base_status_idx + Int(side_1)
         xchg_state[1], xchg_state[2] = interface_exchange!(grid.interfaces, interface_idx, block_status_idx)
     elseif tid == 2
-        interface_idx = block.interfaces_idx[Int(side_2)]
+        interface_idx = block.interfaces_idx[Int(state.axis)][2]
         block_status_idx = block.base_status_idx + Int(side_2)
         xchg_state[3], xchg_state[4] = interface_exchange!(grid.interfaces, interface_idx, block_status_idx)
     else
@@ -187,20 +187,19 @@ function device_border_exchange(
             begin
                 # Uniformize all block sizes to `DynamicBSize` to reduce the amount of combinasions
                 # to compile for.
-                neighbour_bsize = block_size(neighbour_blk.size)
-                neighbour_blk.data, DynamicBSize(block_size(neighbour_bsize), ghosts(neighbour_bsize))
+                neighbour_blk.data, DynamicBSize(block_size(neighbour_blk.size), ghosts(neighbour_blk.size))
             end)
 
             device_block_exchange(
                 KernelAbstractions.@context(),
-                comm_vars(block.data), block.bsize,
+                comm_vars(block.data), block.size,
                 comm_vars(neighbour_data), neighbour_size,
                 state.axis, side
             )
         else
             # Exchange with a remote block, or a global boundary
             remote_pos = block.pos + CartesianIndex(offset_to(side))
-            remote_idx = grid.index_map[remote_pos + one(CartesianIndex{2})]
+            remote_idx = grid.index_map[remote_pos + oneunit(CartesianIndex{2})]
             remote_blk = @inbounds grid.remote_blocks[remote_idx]
 
             if remote_blk.exists
@@ -211,7 +210,7 @@ function device_border_exchange(
                     device_block_packing(
                         KernelAbstractions.@context(),
                         remote_blk.buffer, comm_vars(block.data),
-                        block.bsize, side, Val(true)
+                        block.size, side, Val(true)
                     )
                     # TODO: how to trigger the communication?
                 else
@@ -232,29 +231,29 @@ function device_border_exchange(
                 device_block_packing(
                     KernelAbstractions.@context(),
                     packed_array, comm_vars(block.data),
-                    block.bsize, side, Val(false)
+                    block.size, side, Val(false)
                 )
 
                 # TODO: when do we mark the exchange as completed?
                 #  => what about another solver step, which does all of that?
             else
                 # Global domain boundary condition
-                u_factor, v_factor = boundary_condition(test, side)
-                factors = (
+                u_factor, v_factor = boundary_condition(state.schemes.test_case, side)
+                factors = (;
                     # TODO: this is not ideal, if `boundary_condition` could do the transformation
                     #   for us it would be better
-                    ρ = 1,
-                    u = u_factor,
-                    v = v_factor,
-                    E = 1,
-                    p = 1,
-                    c = 1,
-                    g = 1,
+                    ρ = eltype(block)(1),
+                    u = eltype(block)(u_factor),
+                    v = eltype(block)(v_factor),
+                    E = eltype(block)(1),
+                    p = eltype(block)(1),
+                    c = eltype(block)(1),
+                    g = eltype(block)(1),
                 )
                 device_boundary_condition(
                     KernelAbstractions.@context(),
-                    comm_vars(block.data), factors,
-                    block.bsize, state.axis, side
+                    comm_vars(block.data), Tuple(factors),
+                    block.size, state.axis, side
                 )
             end
         end

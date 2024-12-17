@@ -6,10 +6,10 @@ Mirror of a [`LocalTaskBlock`](@ref) on the device (GPU).
 
 The structure can be entirely stored and manipulated from the device.
 """
-struct DeviceLocalBlock{D <: AbstractArray, Size <: BlockSize}
+struct DeviceLocalBlock{D <: AbstractArray, Size <: BlockSize} <: TaskBlock{D}
     size            :: Size
     pos             :: CartesianIndex{2}          # position in the grid
-    interfaces_idx  :: NTuple{2, NTuple{2, Int}}  # indexes of the block's interfaces (per axis, then per side)
+    interfaces_idx  :: NTuple{2, NTuple{2, Int}}  # indexes of the block's interfaces (per axis, then per side) TODO: replace this by `Neighbours`
     base_status_idx :: Int                        # index of the status of the first side of the block
     data            :: BlockData{D}
 end
@@ -17,7 +17,7 @@ end
 Adapt.@adapt_structure DeviceLocalBlock
 
 
-function DeviceLocalBlock(block::LocalTaskBlock{D, <:Any, Size}, grid_size, device) where {D, Size}
+function DeviceLocalBlock(block::LocalTaskBlock, grid_size, device)
     base_status_idx = base_block_interface_status_index(grid_size, block.pos)
     interfaces_idx = ntuple(2) do i
         axis = instances(Axis.T)[i]
@@ -31,7 +31,7 @@ function DeviceLocalBlock(block::LocalTaskBlock{D, <:Any, Size}, grid_size, devi
     # Since arrays are owned by the host `block`, they cannot be GC'ed.
     kernel_data = Adapt.adapt(device_converter(device), block.device_data)
 
-    return DeviceLocalBlock{D, Size}(
+    return DeviceLocalBlock(
         block.size, block.pos, interfaces_idx, base_status_idx, kernel_data
     )
 end
@@ -45,7 +45,7 @@ Mirror of a [`RemoteTaskBlock`](@ref) on the device (GPU).
 The communication logic isn't present on the device, as it is intrinsically the host's job: MPI or
 NCCL (and others) communication are all initiated from a host call.
 """
-struct DeviceRemoteBlock{B <: AbstractArray}
+struct DeviceRemoteBlock{B <: AbstractArray} <: TaskBlock{B}
     pos       :: CartesianIndex{2}
     exists    :: Bool  # `false` if there is no remote block, and it a border of a global domain
     on_device :: Bool
@@ -91,9 +91,9 @@ struct DeviceBlockGrid{
     BS <: StaticBSize{<:Any, Ghost},
     IndexMap <: AbstractArray{UInt32, 2},
     Interfaces <: GridInterfaces,
-    SB_Container <: AbstractArray{DeviceLocalBlock{DeviceArray, BS}},
-    EB_Container <: AbstractArray{DeviceLocalBlock{DeviceArray, DynamicBSize{Ghost}}},
-    RB_Container <: AbstractArray{DeviceRemoteBlock{DeviceArray}}
+    SB_Container <: AbstractVector{DeviceLocalBlock{DeviceArray, BS}},
+    EB_Container <: AbstractVector{DeviceLocalBlock{DeviceArray, DynamicBSize{Ghost}}},
+    RB_Container <: AbstractVector{DeviceRemoteBlock{DeviceArray}}
 } <: AbstractBlockGrid{T, Ghost, BS, Device}
     # Same fields as for `BlockGrid`
     grid_size         :: NTuple{2, Int}
@@ -125,26 +125,39 @@ grid_sizes(grid::DeviceBlockGrid) =
 
 
 function DeviceBlockGrid(
-    ::Type{T}, device::Device, static_size::StaticBSize, dyn_size_t::Type{<:DynamicBSize},
-    grid_sizes, num_blocks
-) where {T, Device}
-    device_array = device_array_type(device)
+    ::Type{StaticBlock}, ::Type{EdgeBlock}, ::Type{RemoteBlock},
+    device::Device, grid_sizes, num_blocks
+) where {
+    T, D <: AbstractArray{T}, H <: AbstractArray{T},
+    StaticSize <: StaticBSize, DynSize <: DynamicBSize,
+    StaticBlock <: LocalTaskBlock{D, H, StaticSize},
+    EdgeBlock   <: LocalTaskBlock{D, H, DynSize},
+    RemoteBlock <: RemoteTaskBlock,
+    Device
+}
+    # We `adapt_structure` from host-compatible device types to device-compatible device types:
+    # therefore the types are different. Using `return_type` to get the new types is the easiest
+    # way (think about the edge-case where there is no block of some kind).
+    dev_blk_type        = Core.Compiler.return_type(DeviceLocalBlock,  Tuple{StaticBlock, typeof(grid_sizes.grid), Device})
+    dev_edge_blk_type   = Core.Compiler.return_type(DeviceLocalBlock,  Tuple{EdgeBlock,   typeof(grid_sizes.grid), Device})
+    dev_remote_blk_type = Core.Compiler.return_type(DeviceRemoteBlock, Tuple{RemoteBlock, Device})
 
-    SB_Container = device_array{DeviceLocalBlock{device_array, typeof(static_size)}, 1}
-    EB_Container = device_array{DeviceLocalBlock{device_array, dyn_size_t}, 1}
-    RB_Container = device_array{DeviceRemoteBlock{device_array}, 1}
+    device_array = device_array_type(device)
+    SB_Container = device_array{dev_blk_type, 1}
+    EB_Container = device_array{dev_edge_blk_type, 1}
+    RB_Container = device_array{dev_remote_blk_type, 1}
 
     IndexMap = device_array{UInt32, 2}
-    index_map = IndexMap(undef, grid_sizes.grid .+ 1)
+    index_map = IndexMap(undef, grid_sizes.grid .+ 2)  # remote blocks are included in the map: 1 on each side
 
     interfaces = GridInterfaces(grid_sizes.grid, device)
 
-    dev_blocks = SB_Container(undef, size(num_blocks.static))
-    dev_edge_blocks = EB_Container(undef, size(num_blocks.edge))
-    dev_remote_blocks = RB_Container(undef, size(num_blocks.remote))
+    dev_blocks = SB_Container(undef, num_blocks.static)
+    dev_edge_blocks = EB_Container(undef, num_blocks.edge)
+    dev_remote_blocks = RB_Container(undef, num_blocks.remote)
 
     return DeviceBlockGrid{
-        T, D, Device, ghosts(static_size), typeof(static_size), IndexMap, typeof(interfaces),
+        T, array_type(dev_blk_type), Device, ghosts(StaticSize), StaticSize, IndexMap, typeof(interfaces),
         SB_Container, EB_Container, RB_Container
     }(
         grid_sizes.grid, grid_sizes.static_grid, grid_sizes.real_cells, grid_sizes.edge,
@@ -155,29 +168,32 @@ end
 
 
 function init_device_block_grid!(device_grid::DeviceBlockGrid, host_grid::AbstractBlockGrid)
+    sizes = grid_sizes(host_grid)
+    (; device) = device_grid
+
     # Working on device memory without a kernel is annoying: we do everything on the host then copy
     # to the device. The alternative of initializing directly on the device is not possible as most
     # host data structures are mutable or `!isbitstype`, and therefore cannot be sent on the device.
     host_index_map = zeros(UInt32, size(device_grid.index_map))
-    host_blocks = Vector{eltype(device_grid.blocks)}(undef, size(device_grid.blocks))
-    host_edge_blocks = Vector{eltype(device_grid.edge_blocks)}(undef, size(device_grid.edge_blocks))
+    host_blocks        = Vector{eltype(device_grid.blocks)}(undef,        size(device_grid.blocks))
+    host_edge_blocks   = Vector{eltype(device_grid.edge_blocks)}(undef,   size(device_grid.edge_blocks))
     host_remote_blocks = Vector{eltype(device_grid.remote_blocks)}(undef, size(device_grid.remote_blocks))
 
     # Local blocks
     for (idx, blk) in enumerate(host_grid.blocks)
         host_index_map[blk.pos + one(CartesianIndex{2})] = idx
-        host_blocks[idx] = DeviceLocalBlock(blk, sizes.grid, dev)
+        host_blocks[idx] = DeviceLocalBlock(blk, sizes.grid, device)
     end
 
     for (idx, blk) in enumerate(host_grid.edge_blocks)
         host_index_map[blk.pos + one(CartesianIndex{2})] = idx
-        host_edge_blocks[idx] = DeviceLocalBlock(blk, sizes.grid, dev)
+        host_edge_blocks[idx] = DeviceLocalBlock(blk, sizes.grid, device)
     end
 
     # Remote blocks
     for (idx, blk) in enumerate(host_grid.remote_blocks)
         host_index_map[blk.pos + one(CartesianIndex{2})] = idx
-        host_edge_blocks[idx] = DeviceRemoteBlock(blk, dev)
+        host_remote_blocks[idx] = DeviceRemoteBlock(blk, device)
     end
 
     copyto!(device_grid.index_map, host_index_map)
@@ -190,6 +206,8 @@ end
 
 
 function put_block_grid_on_device(grid::DeviceBlockGrid)
+    # TODO: test if all arrays are still alive after a `GC.gc(true)`
+
     # `kernel_grid` is a device-code compatible version of `grid`, itself a copy of
     # a `BlockGrid` on the device's memory
     kernel_grid = Adapt.adapt(device_converter(grid.device), grid)
@@ -247,15 +265,15 @@ macro apply_device_block(grid_get_expr, expr)
     end
 
     return esc(quote
-        kind = block_kind($grid, $pos)
-        block_lin_idx = $grid.index_map[$pos + one(CartesianIndex{2})]
+        kind = $block_kind($grid, $pos)
+        block_lin_idx = $grid.index_map[$pos + oneunit(CartesianIndex{2})]
         if kind === :static
             $blk = $get_block
             $expr
         elseif kind === :edge
             $blk = $get_edge_block
             $expr
-        else kind === :remote
+        elseif kind === :remote
             error("unexpected index to a remote block")
         end
     end)

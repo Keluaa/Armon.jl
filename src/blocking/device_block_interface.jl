@@ -64,10 +64,10 @@ function reset!(interfaces::GridInterfaces)
 end
 
 
-function block_interface_index(grid_size::Dims{D}, block_pos::Dims{D}, side::Side.T) where {D}
+function block_interface_index(grid_size::Dims{D}, block_pos::CartesianIndex{D}, side::Side.T) where {D}
     if side in first_sides()
         # The previous block along the side's axis stores the interface.
-        block_pos = block_pos .- offset_to(axis_of(side))
+        block_pos = block_pos - CartesianIndex(offset_to(axis_of(side)))
         side = opposite_of(side)  # Since it is the opposite block of the interface, it is the opposite side
     end
 
@@ -85,7 +85,7 @@ function block_interface_index(grid_size::Dims{D}, block_pos::Dims{D}, side::Sid
 end
 
 
-function base_block_interface_status_index(grid_size::Dims{D}, block_pos::Dims{D}) where {D}
+function base_block_interface_status_index(grid_size::Dims{D}, block_pos::CartesianIndex{D}) where {D}
     # Each status is unique to each block: there is `prod(grid_size) * 2 * D` statuses in total
     blk_idx = (LinearIndices(grid_size)[block_pos] - 1) * 2D  # 0-index
     # Then `blk_idx + Int(side)` would give the index of a side's status in `GridInterfaces.statuses`
