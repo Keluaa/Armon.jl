@@ -602,6 +602,7 @@ buffers_on_device(::ObjOrType{BlockGrid{<:Any, D, H, B}}) where {D, H, B} = D ==
 
 function reset!(grid::BlockGrid, params::ArmonParameters)
     reset!(grid.global_dt, params, prod(grid.grid_size))
+    !isnothing(grid.device_grid) && reset!(grid.device_grid)
     foreach(empty!, grid.threads_logs)
     for blk in all_blocks(grid)
         reset!(blk)

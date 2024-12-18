@@ -48,8 +48,8 @@ end
 
 # can_run_on_device(::Union{CPU, CPU_HP}, step::SolverStep.T) = true
 function can_run_on_device(device, step::SolverStep.T)
-    # Not on GPU (yet): NewCycle, TimeStep, InitTimeStep, NewSweep, Exchange, EndCycle, ErrorState
-    return step in (SolverStep.EOS, SolverStep.Fluxes, SolverStep.CellUpdate, SolverStep.RemapAdvection, SolverStep.RemapProjection)
+    # Not on GPU (yet): NewCycle, TimeStep, InitTimeStep, NewSweep, EndCycle, ErrorState
+    return step in (SolverStep.EOS, SolverStep.Exchange, SolverStep.Fluxes, SolverStep.CellUpdate, SolverStep.RemapAdvection, SolverStep.RemapProjection)
 end
 
 
@@ -160,11 +160,14 @@ function block_state_machine(params::ArmonParameters, grid::BlockGrid, blk::Loca
         new_state = SolverStep.Exchange
 
     elseif blk_state == SolverStep.Exchange
-        must_wait = !is_done(queue) || block_ghost_exchange(params, state, blk)
-        if must_wait
-            stop_processing = true
-        else
+        step_queued, step_executed = planify_step!(queue, params, state, blk, blk_state)
+        if step_executed || (params.use_gpu && can_run_on_device(params.device, blk_state))
+            # When running on the device, we schedule the next steps even if we couldn't complete
+            # the exchange.
             new_state = SolverStep.Fluxes
+        else
+            # We must wait for other blocks to be ready before this step can be completed
+            stop_processing = true
         end
 
     elseif blk_state == SolverStep.Fluxes

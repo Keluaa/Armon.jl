@@ -107,6 +107,14 @@ function device_block_exchange(
         var₁ = @inbounds vars₁[i_var]
         var₂ = @inbounds vars₂[i_var]
 
+        # TODO: we might need to make loads and stores to the other block as atomic operations, as
+        # they might be cached in an another SM. This would also mean that if the other block is on
+        # another SM and doesn't do the exchange, then its up-to-date data might not be flushed and
+        # we might read old data instead. This is very bad, but fixable by flushing the data before
+        # marking the block as ready. By adding more steps to the exchange sequence, we might be
+        # able to make it so that only the block which doesn't do the exchange flushes its data, but
+        # this might not be more performant as more steps means more dancing around and kernel
+        # launches, etc...
         # TODO: inbounds
         var₂[ghost_idx₂] = var₁[real_idx₁]
         var₁[ghost_idx₁] = var₂[real_idx₂]
@@ -175,9 +183,11 @@ function device_border_exchange(
 
     KernelAbstractions.@synchronize()
 
-    for (side, (is_done_idx, do_xchg_idx)) in zip((side_1, side_2), ((1, 2), (3, 4)))
-        # Only do the border operations if they are not `is_done` and this block will `do_xchg`
-        (xchg_state[is_done_idx] || !xchg_state[do_xchg_idx]) && continue
+    for (side, do_xchg_idx) in zip((side_1, side_2), (2, 4))
+        # Only do the border operations if this block will `do_xchg`
+
+
+        !xchg_state[do_xchg_idx] && continue
 
         neighbour_pos = block.pos + CartesianIndex(offset_to(side))
         if in_grid(neighbour_pos, grid.grid_size)

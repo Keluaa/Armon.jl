@@ -102,10 +102,11 @@ function interface_exchange!(interfaces::GridInterfaces, interface_idx, block_st
         # or a global boundary.
         # Those two can always be done since they do not depend on another local block.
         interfaces.statuses[block_status_idx] = DeviceBlockInterfaceStatus.Done  # "do it only once"
-        return blk_status != DeviceBlockInterfaceStatus.Done, true
+        return true, blk_status != DeviceBlockInterfaceStatus.Done
 
     elseif blk_status == DeviceBlockInterfaceStatus.NotReady
-        int_state = Atomix.@atomic :monotonic interfaces.states[interface_idx]
+        # TODO: simple atomic loads are not supported, so we use an add
+        int_state = (Atomix.@atomic :monotonic interfaces.states[interface_idx] += 0)
         if int_state > DeviceBlockInterfaceState.BothReady
             # The previous exchange isn't completed: we must wait for the other block to acknowledge
             # it and reset the interface.
@@ -153,7 +154,8 @@ function interface_exchange!(interfaces::GridInterfaces, interface_idx, block_st
     elseif blk_status == DeviceBlockInterfaceStatus.DoingExchange
         # This is reached only when the exchange is completed by the current block.
         # TODO: no need for a acknowledge for this style of exchange protocol right?
-        Atomix.@atomic interfaces.states[interface_idx] = DeviceBlockInterfaceState.ExchangeDone
+        # TODO: simple atomic stores are not supported, so we use an atomic swap instead
+        Atomix.@atomicswap interfaces.states[interface_idx] = DeviceBlockInterfaceState.ExchangeDone
         interfaces.statuses[block_status_idx] = DeviceBlockInterfaceStatus.Done
         return true, false
 

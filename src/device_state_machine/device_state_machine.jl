@@ -159,13 +159,14 @@ end
 
 
 function thread_position_to_block_index(thread_pos, tile_iter_idx, state, wrap_tile, bsize, ::Val{step}) where {step}
-    tile_idx = thread_pos .+ tile_iter_idx .* wrap_tile
+    block_idx = thread_pos .+ tile_iter_idx .* wrap_tile
 
-    # `corners` are offsets, and `I` would be an index in the real cells of the block
+    # `corners` are offsets to the first and last real cell
+    # `I` is an index in the real and ghost cells of the block (the first real cell is at (1, 1))
     corners = getfield(state.steps_ranges[Int(state.axis)], step)
-    I = tile_idx .+ corners[1]
+    I = block_idx .- ghosts(bsize)
 
-    in_bounds = all(I .< real_block_size(bsize) .+ corners[2])
+    in_bounds = all(corners[1] .+ 1 .≤ I .≤ real_block_size(bsize) .+ corners[2])
     return I, in_bounds
 end
 
@@ -176,7 +177,7 @@ macro tiled_2D_iter(step, step_call)
             # Compute everything from `tile_iter_idx`, in order to minimize the amount of
             # live variables across loop iterations.
             thread_pos = @index(Local, NTuple)
-            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x, tile_iter_idx_y), state, wrap_tile, block.size, Val($step))
+            I, in_bounds = thread_position_to_block_index(thread_pos, (tile_iter_idx_x - 1, tile_iter_idx_y - 1), state, wrap_tile, block.size, Val($step))
             if in_bounds
                 idx = (;
                     idx = 0,

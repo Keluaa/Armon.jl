@@ -222,6 +222,11 @@ function put_block_grid_on_device(grid::DeviceBlockGrid)
 end
 
 
+function reset!(grid::DeviceBlockGrid)
+    reset!(grid.interfaces)
+end
+
+
 function block_kind(grid::DeviceBlockGrid, pos::CartesianIndex)
     if in_grid(pos, grid.static_sized_grid)
         return :static
