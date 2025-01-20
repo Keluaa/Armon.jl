@@ -203,31 +203,48 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         end
     end
 
-    # Initialize all block neighbours references and exchanges
-    for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
-        left_idx   = idx + CartesianIndex(offset_to(Side.Left))
-        right_idx  = idx + CartesianIndex(offset_to(Side.Right))
-        bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom))
-        top_idx    = idx + CartesianIndex(offset_to(Side.Top))
+    try
+        # Initialize all block neighbours references and exchanges
+        for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
+            left_idx   = idx + CartesianIndex(offset_to(Side.Left))
+            right_idx  = idx + CartesianIndex(offset_to(Side.Right))
+            bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom))
+            top_idx    = idx + CartesianIndex(offset_to(Side.Top))
 
-        this_block   = block_at(grid, idx)
-        left_block   = block_at(grid, left_idx)
-        right_block  = block_at(grid, right_idx)
-        bottom_block = block_at(grid, bottom_idx)
-        top_block    = block_at(grid, top_idx)
-        this_block.neighbours = Neighbours{TaskBlock}((left_block, right_block, bottom_block, top_block))
+            this_block   = block_at(grid, idx)
+            left_block   = block_at(grid, left_idx)
+            right_block  = block_at(grid, right_idx)
+            bottom_block = block_at(grid, bottom_idx)
+            top_block    = block_at(grid, top_idx)
+            this_block.neighbours = Neighbours{TaskBlock}((left_block, right_block, bottom_block, top_block))
 
-        # Blocks sharing a side must share the same `BlockInterface`
-        this_block.exchanges = Neighbours{BlockInterface}((
-            isdefined(left_block,   :exchanges) ? left_block.exchanges[Int(Side.Right)] : BlockInterface(),
-            isdefined(right_block,  :exchanges) ? right_block.exchanges[Int(Side.Left)] : BlockInterface(),
-            isdefined(bottom_block, :exchanges) ? bottom_block.exchanges[Int(Side.Top)] : BlockInterface(),
-            isdefined(top_block,    :exchanges) ? top_block.exchanges[Int(Side.Bottom)] : BlockInterface(),
-        ))
+            # Blocks sharing a side must share the same `BlockInterface`
+            this_block.exchanges = Neighbours{BlockInterface}((
+                isdefined(left_block,   :exchanges) ? left_block.exchanges[Int(Side.Right)] : BlockInterface(),
+                isdefined(right_block,  :exchanges) ? right_block.exchanges[Int(Side.Left)] : BlockInterface(),
+                isdefined(bottom_block, :exchanges) ? bottom_block.exchanges[Int(Side.Top)] : BlockInterface(),
+                isdefined(top_block,    :exchanges) ? top_block.exchanges[Int(Side.Bottom)] : BlockInterface(),
+            ))
 
-        for blk in this_block.neighbours
-            blk isa RemoteTaskBlock || continue
-            blk.neighbour = this_block
+            for blk in this_block.neighbours
+                blk isa RemoteTaskBlock || continue
+                blk.neighbour = this_block
+            end
+        end
+    catch e
+        !(e isa UndefRefError) && rethrow(e)
+        # In case some threads where not running for some reason when initializing blocks, some of
+        # them will remain unassigned. This can happen if Polyester.jl was previously interrupted
+        # in a parallel region, and threads need to be reset.
+        unassigned_blocks      = count(i -> !isassigned(grid.blocks,      i), eachindex(grid.blocks))
+        unassigned_edge_blocks = count(i -> !isassigned(grid.edge_blocks, i), eachindex(grid.edge_blocks))
+        if unassigned_blocks + unassigned_edge_blocks > 0
+            Polyester.reset_threads!()
+            error("$unassigned_blocks blocks and $unassigned_edge_blocks \
+                edge blocks are unassigned, this is likely a multi-threading problem.\n\
+                Call `Polyester.reset_threads!()` if using Polyester.jl, as it may solve the issue.")
+        else
+            rethrow(e)
         end
     end
 
