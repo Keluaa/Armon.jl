@@ -43,8 +43,12 @@ Adapt.@adapt_structure GridInterfaces
 
 
 function GridInterfaces(grid_size::Dims{D}, device) where {D}
-    interface_count   = prod(grid_size .- 1) * 1D  # 1 per axis per block, excluding the last row and column
-    block_sides_count = prod(grid_size) * 2D  # 2 sides per axis. For simplicity, include also sides with no neighbours
+    block_sides_count = prod(grid_size) * 2D  # 2 sides per axis. For simplicity, includes also sides with no neighbours
+    interface_count = sum(1:D) do d
+        grid_size[d] == 1 && return 0
+        int_grid = ntuple(D) do i; ifelse(i == d, grid_size[i] - 1, grid_size[i]) end
+        return prod(int_grid)
+    end
 
     array_type     = device_array_type(device)
     int_state      = array_type{DeviceBlockInterfaceState.T}(undef, interface_count)
@@ -67,19 +71,31 @@ end
 function block_interface_index(grid_size::Dims{D}, block_pos::CartesianIndex{D}, side::Side.T) where {D}
     if side in first_sides()
         # The previous block along the side's axis stores the interface.
-        block_pos = block_pos - CartesianIndex(offset_to(axis_of(side)))
+        block_pos = block_pos + CartesianIndex(offset_to(side))
         side = opposite_of(side)  # Since it is the opposite block of the interface, it is the opposite side
     end
 
-    if !(block_pos in CartesianIndices(grid_size .- 1))
-        return -1  # An interface to a remote block (or a global boundary)
+    if block_pos ∉ CartesianIndices(grid_size) || (block_pos + CartesianIndex(offset_to(side))) ∉ CartesianIndices(grid_size)
+        return -1  # An interface to (or from) a remote block (or a global boundary)
     end
 
-    # Block at `(n, m)` stores the Right and Top interfaces: as many interfaces as dimensions.
-    # Since we use the `grid_size`, interfaces with remote blocks are not stored here.
-    side_idx = Int(axis_of(side))  # 1-index
-    blk_idx = (LinearIndices(grid_size .- 1)[block_pos] - 1) * D  # 0-index
-    int_idx = blk_idx + side_idx  # 1-index
+    # Interfaces are stored contiguously by axis: all along X then all along Y.
+    dim_idx = Int(axis_of(side))
+    int_idx = 0
+    for d in 1:D
+        # `int_grid` is the grid of interfaces along axis `d`.
+        # Each block stores the Right (or Top) interface, therefore the last blocks of the grid
+        # along `d` will have no interface assigned, hence the interface grid is one block shorter
+        # in that direction.
+        int_grid = ntuple(D) do i; ifelse(i == d, grid_size[i] - 1, grid_size[i]) end
+        if d == dim_idx
+            # We know `block_pos` must be in `int_grid` because of the checks above
+            int_idx += @inbounds LinearIndices(int_grid)[block_pos]
+            break
+        else
+            int_idx += prod(int_grid)
+        end
+    end
 
     return int_idx
 end
@@ -106,7 +122,7 @@ function interface_exchange!(interfaces::GridInterfaces, interface_idx, block_st
 
     elseif blk_status == DeviceBlockInterfaceStatus.NotReady
         # TODO: simple atomic loads are not supported, so we use an add
-        int_state = (Atomix.@atomic :monotonic interfaces.states[interface_idx] += 0)
+        int_state = (Atomix.@atomic interfaces.states[interface_idx] += 0)
         if int_state > DeviceBlockInterfaceState.BothReady
             # The previous exchange isn't completed: we must wait for the other block to acknowledge
             # it and reset the interface.
@@ -114,9 +130,9 @@ function interface_exchange!(interfaces::GridInterfaces, interface_idx, block_st
         end
 
         # Mark this block as ready
-        old = (Atomix.@atomic interfaces.states[interface_idx] += DeviceBlockInterfaceState.T(1))
+        new = (Atomix.@atomic interfaces.states[interface_idx] += DeviceBlockInterfaceState.T(1))
         # TODO: replace this `if` in case there is problems
-        if old == DeviceBlockInterfaceState.NotReady
+        if new == DeviceBlockInterfaceState.OneReady
             # It is certain that the other block isn't ready, no need to attempt the CAS
             interfaces.statuses[block_status_idx] = DeviceBlockInterfaceStatus.WaitForExchange
             return false, false

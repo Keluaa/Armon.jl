@@ -127,4 +127,34 @@ function __init__()
     )))
 end
 
+
+# TODO: this is temporary type-piracy in order to support `@atomicswap`
+# See this issue: https://github.com/JuliaConcurrent/Atomix.jl/issues/49
+@inline function Armon.Atomix.modify!(ref::Armon.Atomix.IndexableRef{<:CUDA.CuDeviceArray}, op::OP, x, order) where {OP}
+    x = convert(eltype(ref), x)
+    ptr = Armon.Atomix.pointer(ref)
+    begin
+        old = if op === (+)
+            CUDA.atomic_add!(ptr, x)
+        elseif op === (-)
+            CUDA.atomic_sub!(ptr, x)
+        elseif op === (&)
+            CUDA.atomic_and!(ptr, x)
+        elseif op === (|)
+            CUDA.atomic_or!(ptr, x)
+        elseif op === xor
+            CUDA.atomic_xor!(ptr, x)
+        elseif op === min
+            CUDA.atomic_min!(ptr, x)
+        elseif op === max
+            CUDA.atomic_max!(ptr, x)
+        elseif op === Armon.Atomix.right
+            CUDA.atomic_xchg!(ptr, x)
+        else
+            error("not implemented")
+        end
+    end
+    return old => op(old, x)
+end
+
 end

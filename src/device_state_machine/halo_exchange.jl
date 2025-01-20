@@ -186,7 +186,6 @@ function device_border_exchange(
     for (side, do_xchg_idx) in zip((side_1, side_2), (2, 4))
         # Only do the border operations if this block will `do_xchg`
 
-
         !xchg_state[do_xchg_idx] && continue
 
         neighbour_pos = block.pos + CartesianIndex(offset_to(side))
@@ -206,6 +205,14 @@ function device_border_exchange(
                 comm_vars(neighbour_data), neighbour_size,
                 state.axis, side
             )
+
+            if tid == 1
+                # Mark the exchange as done
+                # To limit register pressure we recompute the interface indices
+                interface_idx = block.interfaces_idx[Int(state.axis)][side in first_sides() ? 1 : 2]
+                block_status_idx = block.base_status_idx + Int(side)
+                interface_exchange!(grid.interfaces, interface_idx, block_status_idx)
+            end
         else
             # Exchange with a remote block, or a global boundary
             remote_pos = block.pos + CartesianIndex(offset_to(side))
