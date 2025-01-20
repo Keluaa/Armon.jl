@@ -8,11 +8,70 @@ import AMDGPU: ROCBackend
 
 Armon.create_device(::Val{:ROCM}) = ROCBackend()
 Armon.device_array_type(::ROCBackend) = AMDGPU.ROCArray
+Armon.device_converter(::ROCBackend) = AMDGPU.Runtime.Adaptor()
+
+
+mutable struct ROCThreadInfo <: Armon.ThreadInfo
+    tid    :: Int
+    device :: AMDGPU.HIPDevice
+    stream :: AMDGPU.HIPStream
+end
+
+
+function Armon.init_backend(params::ArmonParameters, ::ROCBackend; options...)
+    device = AMDGPU.device()
+    for tid in 1:params.nthreads
+        stream = AMDGPU.HIPStream()
+        params.threads_info[tid] = ROCThreadInfo(tid, device, stream)
+    end
+
+    params.backend_options = Armon.EmptyParams()
+    return options
+end
+
+
+function Armon.setup_task_for_device(params::ArmonParameters{<:Any, <:ROCBackend}, tid)
+    # AMDGPU.jl automatically creates a new stream when using its API in a new task.
+    # We want to reuse the streams across tasks in order to track them easily, especially when
+    # viewing GPU activity.
+    thread_info::ROCThreadInfo = Armon.thread_info(params, tid)
+    AMDGPU.device!(thread_info.device)
+    AMDGPU.stream!(thread_info.stream)
+    return
+end
+
+
+Armon.create_kernel_event(::ROCBackend) = AMDGPU.HIPEvent(ADMGPU.stream(); do_record=false, timing=false)
+Armon.put_kernel_event(::ROCBackend, event) = AMDGPU.record(event)
+Armon.query_kernel_event(::ROCBackend, event) = AMDGPU.isdone(event)
+
+
+function Base.wait(params::ArmonParameters{<:Any, <:ROCBackend}, tid)
+    thread_info::ROCThreadInfo = Armon.thread_info(params, tid)
+    AMDGPU.synchronize(thread_info.stream)
+    return
+end
+
+
+function Armon.lock_pages(::ROCBackend, ptr::Ptr, len)
+    len == 0 && return
+    AMDGPU.HIP.hipHostRegister(ptr, len, AMDGPU.HIP.hipHostRegisterMapped)
+    return
+end
+
+
+function Armon.unlock_pages(::ROCBackend, ptr::Ptr, len)
+    len == 0 && return
+    AMDGPU.HIP.hipHostUnregister(ptr)
+    return
+end
 
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:ROCBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": ROCm (block size: ", join(p.block_size, '×'), ")")
+    device = first(p.threads_info).device
+    println(io, ": ROCm, workgroup size: ", join(p.workgroup_size, '×'), ", ",
+        p.nthreads, " streams, device n°", AMDGPU.device_id(device))
 end
 
 

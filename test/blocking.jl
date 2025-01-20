@@ -308,8 +308,8 @@ end
         !weighted && @test maximum(distrib_count) ≤ expected_max_workload
         !weighted && @test sum(abs.(distrib_count .- expected_workload)) == expected_remainder
 
-        blk_grid = Armon.block_grid_from_workload(grid_size, distrib)
-        @test count(==(0), blk_grid) == 0  # All blocks are assigned to a thread
+        workload_grid = Armon.thread_workload_to_grid(grid_size, distrib)
+        @test count(==(0), workload_grid) == 0  # All blocks are assigned to a thread
     end
 
     @testset "Simple" begin

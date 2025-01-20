@@ -27,11 +27,42 @@ Device to use. Supported values:
  - `:CPU`: `KernelAbstractions.jl` CPU multithreading (using the standard `Threads.jl`)
 
 
+    nthreads = Threads.nthreads()
+
+Number of threads to use (`:CPU_HP` and `:CPU` backends only).
+Only the first `nthreads` Julia threads will be used.
+Defaults to all available threads.
+
+
     use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing
 
 MPI config. The MPI domain will be a process grid of size `P`.
 `global_comm` is the global communicator to use, defaults to `MPI.COMM_WORLD`.
 `reorder_grid` is passed to `MPI.Cart_create`.
+
+
+    comm_model = :async_safe, comm_model_kwargs = (;)
+
+Controls which communication model is used for remote exchanges.
+[`Communications.communication_model`](@ref) is used when `comm_model` is a `Symbol`, and `comm_model_kwargs`
+are the options for the model.
+
+
+    reduc_model = nothing, reduc_model_kwargs = (;)
+
+Same as for `comm_model` and `comm_model_kwargs`, but for global reduction operations.
+When `reduc_model` is `nothing`, `comm_model` is used instead.
+
+
+    thread_split_comm = false
+
+Duplicates (with `MPI_Comm_dup`) the cartesian communicator for each thread, so that each use separate
+communicators, which can help with performance and reliability (MPI implementations will always have
+some trouble with `MPI_THREADS_MULTIPLE`...).
+It can also improve the usage of NICs if there is multiple of them per node.
+Furthermore, enabling this makes the solver compliant with Intel MPI's `MPI_THREAD_SPLIT`, which can
+improve performance even further if it is enabled by setting the env var `I_MPI_THREAD_SPLIT` to `1`.
+If `false`, all threads use the same communicator.
 
 
     gpu_aware = true
@@ -47,9 +78,10 @@ chunk of memory.
 This effectively enforces the *first-touch* policy, instead of blindly relying on it.
 
 
-    lock_memory = false
+    lock_memory = use_gpu
 
-Lock all memory pages using `mlock` to RAM.
+Lock/pin all host memory pages using `mlock` to RAM, or using the GPU's special pinning function.
+This is mandatory when using a GPU, as copies with the host cannot be asynchronous without this.
 
 
 ## Kernels
@@ -61,9 +93,10 @@ Switches for [`CPU_HP`](@ref) kernels.
 `use_simd` enables [`@simd_loop`](@ref) for inner loops.
 
 
-    use_gpu = false
+    use_gpu = false, workgroup_size = (32, 32)
 
-Enables the use of `KernelAbstractions.jl` kernels.
+`use_gpu=true` enables the use of `KernelAbstractions.jl` kernels.
+`workgroup_size` is the size of the workgroups (or "blocks" in the CUDA terminology).
 
 
     use_kokkos = false
@@ -82,10 +115,10 @@ and therefore memory throughput.
 Apply all steps of the solver to all blocks asynchronously, fully taking advantage of cache blocking.
 
 
-    block_size = 1024
+    block_size = (64, 64)
 
-Size of blocks for cache blocking. Can be a tuple. If `use_cache_blocking == false`, this option
-only controls the size of GPU blocks.
+Size of 2D blocks for cache blocking. Ghost cells are included in this size: with 4 ghost cells on
+each size, the default size of 64x64 would have 56x56 real cells per block.
 
 
     use_two_step_reduction = false
@@ -93,6 +126,18 @@ only controls the size of GPU blocks.
 Reduction kernels (`dtCFL_kernel` and `conservation_vars`) use some optimizations to perform the
 reduction in a single step. It might cause issues on some GPU backends: a more "gentle" approach
 could avoid those by doing it in two steps.
+
+
+    use_step_queue = use_gpu, step_queue_capacity = 100
+
+If `use_step_queue == true`, then the solver steps are put into a queue before being executed.
+This allows schedule mulitple steps on the GPU in the same kernel, reusing cached memory and
+therefore greatly improving performance.
+While it is also supported on the CPU, the default is to not use a queue and execute the steps
+immediately.
+The `step_queue_capacity` is the maximum number of steps that can be put on the queue. Greater
+numbers can increase the lifetime of a GPU kernel, but with a greater overhead when sending the
+steps to the device.
 
 
     workload_distribution = :simple
@@ -283,6 +328,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     cst_dt::Bool
     dt_on_even_cycles::Bool
     steps_ranges::Vector{StepsRanges}
+    device_steps_ranges::AbstractArray{StepsRanges}
 
     # Bounds
     maxtime::Flt_T
@@ -314,9 +360,15 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     use_cache_blocking::Bool
     use_two_step_reduction::Bool
     async_cycle::Bool
+    nthreads::Int
     device::Device  # A KernelAbstractions.Backend, Kokkos.ExecutionSpace or CPU_HP
     backend_options::DeviceParams
+    threads_info::Vector{ThreadInfo}
     block_size::NTuple{2, Int}
+    workgroup_size::NTuple{2, Int}  # GPU workgroup size (the block size in CUDA terminology)
+    use_step_queue::Bool
+    step_queue_capacity::Int
+    use_tiled_state_machine::Bool
     workload_distribution::Symbol
     distrib_params::Dict{Symbol, Any}
     numa_aware::Bool
@@ -326,17 +378,22 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
     # MPI
     use_MPI::Bool
     is_root::Bool
-    rank::Int
-    root_rank::Int
-    proc_size::Int
-    proc_dims::NTuple{2, Int}
-    global_comm::MPI.Comm
-    cart_comm::MPI.Comm
-    cart_coords::NTuple{2, Int}  # Coordinates of this process in the cartesian grid (0-indexed)
+    rank::Int                      # Rank of the current process in `cart_comm`
+    root_rank::Int                 # Rank of the root process in `cart_comm`
+    proc_size::Int                 # Number of processes (size of `global_comm` and `cart_comm`)
+    proc_dims::NTuple{2, Int}      # Dimensions of the cartesian grid of processes
+    cart_coords::NTuple{2, Int}    # Coordinates of this process in the cartesian grid (0-indexed)
     neighbours::Dict{Side.T, Int}  # Ranks of the neighbours of this process
-    global_grid::NTuple{2, Int}  # Dimensions of the global grid
+    global_grid::NTuple{2, Int}    # Dimensions of the global grid
     reorder_grid::Bool
     gpu_aware::Bool
+    # MPI Communicators
+    global_comm::MPI.Comm          # Process world of the whole solver
+    cart_comm::MPI.Comm            # Cartesian topology on top of the process world, use `thread_comms` instead
+    thread_split_comm::Bool        # If all communicators in `thread_comms` are duplicates or copies (idem for `comm_models`)
+    thread_comms::Vector{MPI.Comm} # Duplicates (or copies) of `cart_comm`, see `thread_split_comm`
+    comm_models::Vector{AbstractCommunicationModel}  # Communication model for each thread (associated with `thread_comms[i]`)
+    reduc_model::AbstractCommunicationModel  # Reduction model associated with `thread_comms[1]`, to be used only by the main thread (tid 1)
 
     # Tests & Comparison
     compare::Bool
@@ -350,7 +407,7 @@ mutable struct ArmonParameters{Flt_T, Device, DeviceParams}
         device, options = get_device(; options...)
 
         params = new{data_type, typeof(device), Any}()
-        params.N = N
+        params.N = Tuple(N)
         params.device = device
 
         # Each initialization step consumes the options it needs. At the end no option should remain.
@@ -407,13 +464,17 @@ end
 
 function init_MPI(params::ArmonParameters;
     use_MPI = true, P = (1, 1), reorder_grid = true, global_comm = nothing, gpu_aware = true,
+    comm_model = :async, comm_model_kwargs = (;),
+    reduc_model = nothing, reduc_model_kwargs = (;),
+    thread_split_comm = false,
     options...
 )
     global_comm = something(global_comm, MPI.COMM_WORLD)
     params.global_comm = global_comm
 
+    P = Tuple(P)
     if length(P) != length(params.N)
-        solver_error(:config, "Mismatched dimensions: expected a grid of $(length(N)) processes, got: $(length(P))")
+        solver_error(:config, "Mismatched dimensions: expected a grid of $(length(params.N))-D processes, got: $(length(P))")
     end
 
     params.use_MPI = use_MPI
@@ -460,6 +521,69 @@ function init_MPI(params::ArmonParameters;
         )
     end
 
+    params.thread_split_comm = thread_split_comm && use_MPI
+    if params.thread_split_comm
+        # Each thread use a separate communicator. This allows the underlying MPI implementation to
+        # avoid any global locks for many operations, if it is aware of it that is.
+        # Currently the whole solver should be MPI_THREADS_MULTIPLE compliant, but we can go further,
+        # as all threads create, test and wait on their own requests: they are never shared by multiple
+        # threads. Some optimization experiments showed that sharing requests causes more problems
+        # than what performance gains are worth for.
+        # Intel MPI introduces a thread-level stronger than MPI_THREADS_MULTIPLE: MPI_THREAD_SPLIT.
+        # The solver can be made MPI_THREAD_SPLIT compliant by using a single communicator per thread,
+        # and setting the env var `I_MPI_THREAD_SPLIT` to `1`.
+        # See https://www.intel.com/content/www/us/en/docs/mpi-library/developer-guide-linux/2021-13/mpi-thread-split-programming-model.html
+        # for more.
+        # Note: there is also the condition that the same threads communicate with each other, which
+        # affects deeply how we distribute blocks among threads. See `workload_distribution.jl` for more.
+        params.thread_comms = map(1:Threads.nthreads()) do tid
+            # Note: MPI_Comm_dup is a blocking collective operation
+            thread_comm = MPI.Comm_dup(params.cart_comm)
+
+            # The `thread_id=tid-1` is only useful for Intel MPI's MPI_THREAD_SPLIT feature, as
+            # otherwise it cannot detect which thread is which (explicit model).
+            thread_info = MPI.Info(:thread_id => string(tid-1))
+            MPI.API.MPI_Comm_set_info(thread_comm, thread_info)
+            # Note: no need to keep `thread_info` alive, as its data is copied to `thread_comm` by MPI
+
+            return thread_comm
+        end
+    else
+        # All threads use the same communicator
+        params.thread_comms = fill(params.cart_comm, Threads.nthreads())
+    end
+
+    # Communication model initialisation
+    # Use the communicator of the main thread for the reduction model and basic error checking.
+    main_comm_model = Communications.communication_model(comm_model, params.thread_comms[1]; comm_model_kwargs...)
+    if !Communications.supports_point_to_point(main_comm_model)
+        solver_error(:config, "`comm_model` of type $(typeof(main_comm_model)) does not support point-to-point operations")
+    end
+
+    if isnothing(reduc_model)
+        reduc_model = main_comm_model  # Same model for exchanges and reductions
+    else
+        reduc_model = Communications.communication_model(reduc_model, params.thread_comms[1]; reduc_model_kwargs...)
+    end
+
+    if !Communications.supports_collectives(reduc_model)
+        solver_error(:config, "`reduc_model` of type $(typeof(reduc_model)) does not support collective operations")
+    end
+    params.reduc_model = reduc_model
+
+    # Repeat the communicator model for each thread if needed.
+    # TODO: it is possible to have different communication models for each threads, e.g. one for
+    #   processes on the local node, another for remote processes. Is it interesting performance-wise?
+    #   How to initialize this properly?
+    if params.thread_split_comm
+        params.comm_models = map(1:Threads.nthreads()) do tid
+            tid == 1 && return main_comm_model
+            return Communications.communication_model(comm_model, params.thread_comms[tid]; comm_model_kwargs...)
+        end
+    else
+        params.comm_models = fill(main_comm_model, Threads.nthreads())
+    end
+
     params.root_rank = 0
     params.is_root = params.rank == params.root_rank
 
@@ -469,10 +593,12 @@ end
 
 function init_device(params::ArmonParameters;
     use_threading = true, use_simd = true,
-    use_gpu = false, use_kokkos = false,
+    use_gpu = false, use_kokkos = false, workgroup_size = (32, 32),
+    nthreads = Threads.nthreads(),
+    use_step_queue = use_gpu, step_queue_capacity = 100, use_tiled_state_machine = false,
     block_size = nothing, use_cache_blocking = true, async_cycle = false,
     use_two_step_reduction = false,
-    workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = false,
+    workload_distribution = :simple, distrib_params = Dict(), numa_aware = true, lock_memory = use_gpu,
     busy_wait_limit = 100,
     options...
 )
@@ -485,7 +611,7 @@ function init_device(params::ArmonParameters;
     params.async_cycle = async_cycle
     params.busy_wait_limit = max(busy_wait_limit, 1)
 
-    if use_cache_blocking && use_threading && params.use_MPI
+    if use_cache_blocking && use_threading && params.use_MPI && nthreads > 1
         thread_level = MPI.Query_thread()
         if thread_level < MPI.THREAD_MULTIPLE
             solver_error(:config, "Using multithreading with cache blocking requires MPI to be \
@@ -494,26 +620,25 @@ function init_device(params::ArmonParameters;
         end
     end
 
-    if !use_cache_blocking
-        if use_gpu
-            # The literal block size for GPU kernels
-            block_size = something(block_size, 1024)
-        else
-            # Disable cache blocking by using an empty block size
-            block_size = (0, 0)
+    if use_threading
+        if !(1 ≤ nthreads ≤ Threads.nthreads())
+            solver_error(:config, "`nthreads` must be between 1 and `Threads.nthreads()`, got: $nthreads")
         end
+        params.nthreads = nthreads
+    else
+        params.nthreads = 1
+    end
+    params.threads_info = Vector{ThreadInfo}(undef, params.nthreads)
+
+    params.block_size = if !use_cache_blocking
+        # Disable cache blocking by using an empty block size
+        (0, 0)
     elseif isnothing(block_size)
         # TODO: Estimate the optimal block size, given the solver's stencils
-        if !use_gpu
-            block_size = (64, 64)
-        else
-            # TODO: GPU block size ?? 1024? but how?
-            block_size = (32, 32)
-        end
+        (64, 64)
+    else
+        block_size
     end
-
-    length(block_size) > 2 && solver_error(:config, "Expected `block_size` to contain up to 2 elements, got: $block_size")
-    params.block_size = tuple(block_size..., ntuple(Returns(1), 2 - length(block_size))...)
 
     if !(workload_distribution in (:simple, :scotch, :sorted_scotch, :weighted_sorted_scotch))
         solver_error(:config, "Invalid workload distribution: $(workload_distribution)")
@@ -521,9 +646,20 @@ function init_device(params::ArmonParameters;
     params.workload_distribution = workload_distribution
     params.distrib_params = distrib_params
 
+    # Default workgroup size: use the maximum of 1024 threads per workgroup
+    params.workgroup_size = workgroup_size
+    params.use_tiled_state_machine = use_tiled_state_machine
+
+    params.use_step_queue = use_step_queue
+    params.step_queue_capacity = max(1, step_queue_capacity)
+
     numa_aware && !NUMA.numa_available() && solver_error(:config, "this system does not support NUMA, use `numa_aware=false`")
     params.numa_aware = numa_aware
+
     params.lock_memory = lock_memory
+    if !params.lock_memory && use_gpu isa GPU
+        solver_error(:config, "host memory locking/pinning is required to allow asynchronous device<->host copies")
+    end
 
     return options
 end
@@ -735,44 +871,25 @@ end
 
 
 """
-    create_device(::Val{:device_name})
-
-Create a device object from its name.
-
-Default devices:
- - `:CPU`: the CPU backend of `KernelAbstractions.jl`
- - `:CPU_HP`: `Polyester.jl` multithreading
-
-Extensions:
- - `:Kokkos`: the default `Kokkos.jl` device
- - `:CUDA`: the `CUDA.jl` backend of `KernelAbstractions.jl`
- - `:ROCM`: the `AMDGPU.jl` backend of `KernelAbstractions.jl`
-"""
-function create_device end
-
-
-create_device(::Val{:CPU}) = CPU()
-create_device(::Val{:CPU_HP}) = CPU_HP()
-
-
-"""
     init_backend(params::ArmonParameters, ::Dev; options...)
 
 Initialize the backend corresponding to the `Dev` device returned by `create_device` using
-`options`. Set the `params.backend_options` field.
+`options`. Set the `params.backend_options` field, as well as all `ThreadInfo` in `params.thread_info`.
 
 It must return `options`, with the backend-specific options removed.
 """
-function init_backend(params::ArmonParameters, ::Dev; options...) where {Dev}
-    params.backend_options = EmptyParams()
-    return options
-end
+function init_backend(params::ArmonParameters, dev::Union{CPU_HP, CPU}; options...)
+    if dev isa CPU
+        # The CPU backend of KernelAbstractions can be useful in some cases for debugging, but isn't
+        # optimized for performance.
+        params.is_root && @warn "`use_gpu=true` but the device is set to the CPU. \
+                                Therefore no kernel will run on a GPU." maxlog=1
+    end
 
+    for tid in 1:params.nthreads
+        params.threads_info[tid] = CPUThreadInfo(tid)
+    end
 
-function init_backend(params::ArmonParameters, ::CPU; options...)
-    # The CPU backend of KernelAbstractions can be useful in some cases for debugging
-    params.is_root && @warn "`use_gpu=true` but the device is set to the CPU. \
-                              Therefore no kernel will run on a GPU." maxlog=1
     params.backend_options = EmptyParams()
     return options
 end
@@ -785,11 +902,6 @@ end
 
 
 function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU_HP})
-    print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
-    if p.use_threading
-        println(io, " ($(Threads.nthreads()) $(use_std_lib_threads ? "standard " : "")thread",
-            Threads.nthreads() != 1 ? "s" : "", ")")
-    end
     print_parameter(io, pad, "use_simd", p.use_simd)
     print_parameter(io, pad, "use_gpu", false)
     print_parameter(io, pad, "use_kokkos", false)
@@ -798,14 +910,20 @@ end
 
 function print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, CPU})
     print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": KA.jl's CPU backend (block size: ", join(p.block_size, '×'), ")")
+    println(io, ": KA.jl's CPU backend (workgroup size: ", join(p.workgroup_size, '×'), ")")
 end
 
 
 function print_parameters(io::IO, p::ArmonParameters; pad = 20)
     println(io, "Armon parameters:")
     print_parameter(io, pad, "data_type", data_type(p))
+    print_parameter(io, pad, "multithreading", p.use_threading, nl=!p.use_threading)
+    if p.use_threading
+        println(io, " ($(p.nthreads) $(use_std_lib_threads ? "standard " : "")thread",
+            p.nthreads != 1 ? "s" : "", ")")
+    end
     print_device_info(io, pad, p)
+    print_parameter(io, pad, "tiled state mach", p.use_tiled_state_machine)
     print_parameter(io, pad, "blocking", p.use_cache_blocking ? (p.async_cycle ? "async" : "sync") : false, nl=false)
     if p.use_cache_blocking && p.async_cycle
         print(io, ", distribution: ", p.workload_distribution)
@@ -817,7 +935,28 @@ function print_parameters(io::IO, p::ArmonParameters; pad = 20)
         print(io, ", relying on first touch policy")
     end
     println(io)
-    print_parameter(io, pad, "MPI", p.use_MPI)
+    print_parameter(io, pad, "MPI", p.use_MPI, nl=false)
+    if p.use_MPI
+        println(io, ", MPI ", MPI.Get_version(), ", library:")
+        println(io, pad, pad, MPI.Get_library_version())
+    else
+        println(io)
+    end
+    print_parameter(io, pad, "exchange model", first(p.comm_models), nl=false)
+    if p.thread_split_comm
+        println(io, ", one communicator per thread")
+    else
+        println(io, ", one communicator for all threads")
+    end
+    reduc_model = p.reduc_model == first(p.comm_models) ? "same as the exchange model" : p.reduc_model
+    print_parameter(io, pad, "reduction model", reduc_model)
+
+    print_parameter(io, pad, "step queue", p.use_step_queue, nl=false)
+    if p.use_step_queue
+        println(io, ", capacity: ", p.step_queue_capacity)
+    else
+        println(io)
+    end
 
     println(io, " ", "─" ^ (pad*2+2))
 
@@ -902,31 +1041,6 @@ Base.show(io::IO, p::ArmonParameters) = print_parameters(io::IO, p::ArmonParamet
 
 
 """
-    memory_info(params)
-
-The total and free memory the current process can store on the `params.device`.
-"""
-function memory_info(params::ArmonParameters)
-    mem_info = device_memory_info(params.device)
-    # TODO: MPI support
-    return mem_info
-end
-
-
-"""
-    device_memory_info(device)
-
-The total and free memory on the device, in bytes.
-"""
-function device_memory_info(::Union{CPU_HP, CPU})
-    return (
-        total = UInt64(Sys.total_physical_memory()),
-        free  = UInt64(Sys.free_physical_memory())
-    )
-end
-
-
-"""
     data_type(::ArmonParameters{T})
 
 Get `T`, the type used for numbers by the solver
@@ -945,10 +1059,6 @@ neighbour_count(params::ArmonParameters, dir::Axis.T) = count(≠(MPI.PROC_NULL)
 function Base.copy(p::ArmonParameters{T}) where T
     return ArmonParameters([getfield(p, k) for k in fieldnames(ArmonParameters{T})]...)
 end
-
-
-host_array_type(::D) where D = Array
-device_array_type(::D) where D = Array
 
 
 function alloc_host_kwargs(params::ArmonParameters)
@@ -983,6 +1093,9 @@ end
 
 function compute_steps_ranges(params::ArmonParameters)
     params.steps_ranges = collect(compute_steps_ranges.(instances(Axis.T), params.nghost, Ref(params.projection_scheme)))
+    # Upload the step_ranges to the device
+    # TODO: use constant memory?
+    params.device_steps_ranges = device_array_type(params.device)(params.steps_ranges)
 end
 
 function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionScheme)
@@ -1022,17 +1135,4 @@ function compute_steps_ranges(axis::Axis.T, ghosts::Int, projection::ProjectionS
         axis, real_domain, full_domain,
         EOS, fluxes, cell_update, advection, projection
     )
-end
-
-#
-# Synchronisation
-#
-
-function Base.wait(::ArmonParameters{<:Any, <:Union{CPU, CPU_HP}})
-    # CPU backends are synchronous
-end
-
-
-function Base.wait(params::ArmonParameters{<:Any, <:GPU})
-    KernelAbstractions.synchronize(params.device)
 end

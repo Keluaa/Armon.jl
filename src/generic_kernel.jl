@@ -130,7 +130,7 @@ function make_simd_threaded_loop(expr::Expr; threading=:dynamic, simd=:dynamic, 
 
     return quote
         let __loop_range = $loop_range, __loop_length = length(__loop_range),
-                __total_iter = length(__loop_range), __num_threads = Threads.nthreads(),
+                __total_iter = length(__loop_range), __num_threads = params.nthreads,
                 # Equivalent to __total_iter ÷ __num_threads
                 __batch = convert(Int, cld(__total_iter, __num_threads))::Int,
                 __first_i = first(__loop_range),
@@ -644,6 +644,52 @@ function make_kokkos_kernel_call(func_name, cpu_kernel_def, is_V_in_where, loop_
 end
 
 
+"""
+    @sub_kernel_call(idx, call_expr)
+
+`call_expr` should be a call to a `@generic_kernel`.
+Then this kernel will be executed as a normal function call inside the current GPU kernel,
+for a single index: `idx`.
+
+This is only valid on GPU.
+
+```julia
+@generic_kernel function kernel_a(a, b, c)
+    i = @index_2D_lin()
+    a[i] = b[i] * c[i] + π
+end
+
+@kernel cpu=false function complex_kernel(a, b, c, ranges_info)
+    i = @index(Global, Linear)
+    idx = (; idx = ..., lin_1D = ..., lin_2D = ...)
+    @sub_kernel_call idx kernel_a(a, b, c)
+end
+```
+"""
+macro sub_kernel_call(idx, call_expr)
+    if !isexpr(call_expr, :call)
+        err_str = "not a function call: " * string(call_expr)
+        return esc(:(error($err_str)))
+    end
+
+    func_name = isexpr(call_expr.args[1], :.) ? call_expr.args[1].args[2].value : call_expr.args[1]
+    kernel_name = Symbol(string(func_name) * "_kernel")
+
+    if isexpr(call_expr.args[1], :.)
+        call_expr.args[1].args[2].value = kernel_name
+    else
+        call_expr.args[1] = kernel_name
+    end
+
+    insert!(call_expr.args, 2, :($KernelAbstractions.@context))
+    insert!(call_expr.args, 3, idx)
+
+    # TODO: inlining seems to decrease performance... to investigate
+    # return esc(Expr(:macrocall, Base.var"@inline", __source__, call_expr))
+    return esc(call_expr)
+end
+
+
 function transform_kernel(func::Expr)
     def = splitdef(func)
     func_name = def[:name]
@@ -816,9 +862,32 @@ function transform_kernel(func::Expr)
     end
 
     setup_gpu_call = quote
-        gpu_kernel_func = $kernel_func_name(params.device, params.block_size)
+        gpu_kernel_func = $kernel_func_name(params.device, params.workgroup_size)
         ndrange = ($gpu_ndrange, 1, 1)
     end
+
+    # -- GPU function (to be called from another GPU kernel) --
+
+    gpu_f_def = deepcopy(def)
+
+    # Indexes are replaced by a NamedTuple placed in the function arguments
+    index_arg = gensym(:I)
+
+    gpu_f_def[:body], _, _, _, _ = kernel_body_pass!(gpu_f_def[:body], Dict(
+        :lin_1D => quote $index_arg.lin_1D end,
+        :lin_2D => quote $index_arg.lin_2D end,
+        :iter_idx => quote $index_arg.idx end
+    ), :GPU)
+
+    # Adding the KernelAbstractions context to the arguments allows to use some device-side functions,
+    # as well as disambiguate this kernel function from the other kernel methods.
+    ka_ctx_sym = @macroexpand KernelAbstractions.@context()
+    pushfirst!(gpu_f_def[:args],
+        :($ka_ctx_sym::KernelAbstractions.CompilerMetadata),
+        :($index_arg::@NamedTuple{idx::Int, lin_1D::Int, lin_2D::Int})
+    )
+
+    gpu_f_block = combinedef(gpu_f_def)
 
     # -- Wrapping function --
 
@@ -924,6 +993,7 @@ function transform_kernel(func::Expr)
         $(cpu_block)
         $(kokkos_block)
         $(gpu_block)
+        $(gpu_f_block)
         $(main_block)
     end
 

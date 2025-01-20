@@ -284,12 +284,6 @@ mutable struct BlockInterface
 end
 
 
-include("blocks.jl")
-include("workload_distribution.jl")
-include("block_grid.jl")
-include("interface.jl")
-
-
 """
     @iter_blocks for blk in grid
         # body...
@@ -297,6 +291,9 @@ include("interface.jl")
 
 Applies the body of the for-loop in to all blocks of the `grid`. Threads iterate over the blocks they
 are assigned to via `grid.threads_workload`.
+
+All GPU operations are scheduled on the streams of each thread. All streams are synchronized after
+all of the thread's blocks have been parsed.
 """
 macro iter_blocks(expr)
     !Base.isexpr(expr, :for) && error("expected for-loop")
@@ -305,9 +302,9 @@ macro iter_blocks(expr)
     body = expr.args[2]
 
     return esc(quote
-        threads_count = params.use_threading ? Threads.nthreads() : 1
-        $Armon.@threaded :outside_kernel for _ in 1:threads_count
+        $Armon.@threaded :outside_kernel for _ in 1:params.nthreads
             tid = Threads.threadid()
+            setup_task_for_device(params, tid)
             thread_blocks_idx = $grid_var.threads_workload[tid]
             for blk_pos in thread_blocks_idx
                 # One path for each type of block to avoid runtime dispatch
@@ -321,9 +318,27 @@ macro iter_blocks(expr)
                     end
                 end
             end
+            wait(params, tid)
         end
     end)
 end
+
+
+abstract type AbstractBlockGrid{T, Ghost, Size <: StaticBSize, Device} end
+
+Base.eltype(::ObjOrType{AbstractBlockGrid{T}}) where {T} = T
+ghosts(::ObjOrType{AbstractBlockGrid{<:Any, Ghost}}) where {Ghost} = Ghost
+block_size(::ObjOrType{AbstractBlockGrid{<:Any, G, BS}}) where {G, BS} = BS
+static_block_size(grid::ObjOrType{AbstractBlockGrid}) = block_size(block_size(grid))
+real_block_size(grid::ObjOrType{AbstractBlockGrid}) = real_block_size(block_size(grid))
+
+
+include("blocks.jl")
+include("workload_distribution.jl")
+include("device_block_interface.jl")
+include("device_block_grid.jl")
+include("block_grid.jl")
+include("interface.jl")
 
 
 """

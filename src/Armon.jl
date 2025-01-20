@@ -12,22 +12,32 @@ using Preferences
 using EnumX
 using Scotch
 
+import Adapt
+import Atomix
+
 export ArmonParameters, BlockGrid, SolverStats, armon, data_type, memory_required
 export device_to_host!, host_to_device!
 
 # Forward declarations
+abstract type ThreadInfo end
+abstract type AbstractStepQueue{Device} end
 abstract type Limiter end
 abstract type RiemannScheme end
 abstract type ProjectionScheme end
 abstract type SplittingMethod end
 
 include("utils.jl")
+
+include("communications/communications.jl")
+using .Communications
+
 include("numa_utils.jl")
 include("domain_ranges.jl")
 include("tests.jl")
 include("parameters.jl")
 include("solver_state.jl")
 include("profiling.jl")
+include("device.jl")
 include("generic_kernel.jl")
 include("blocking/blocking.jl")
 include("kernels.jl")
@@ -39,6 +49,8 @@ include("axis_splitting.jl")
 include("halo_exchange.jl")
 include("io.jl")
 include("logging.jl")
+include("step_queue.jl")
 include("solver.jl")
+include("device_state_machine/device_state_machine.jl")
 
 end

@@ -93,13 +93,13 @@ Domains are stored as block corner offsets: blocks can have different sizes, but
 amount of ghost cells, therefore the iteration domain is determined from the dimensions of the block.
 The first field is the offset to the first cell, the second is the offset to the last cell.
 """
-mutable struct StepsRanges
-    direction       :: Axis.T
-    real_domain     :: NTuple{2, Dims{2}}
-    full_domain     :: NTuple{2, Dims{2}}
-    EOS             :: NTuple{2, Dims{2}}
-    fluxes          :: NTuple{2, Dims{2}}
-    cell_update     :: NTuple{2, Dims{2}}
-    advection       :: NTuple{2, Dims{2}}
-    projection      :: NTuple{2, Dims{2}}
+struct StepsRanges
+    direction   :: Axis.T
+    real_domain :: NTuple{2, Dims{2}}
+    full_domain :: NTuple{2, Dims{2}}
+    EOS         :: NTuple{2, Dims{2}}
+    fluxes      :: NTuple{2, Dims{2}}
+    cell_update :: NTuple{2, Dims{2}}
+    advection   :: NTuple{2, Dims{2}}
+    projection  :: NTuple{2, Dims{2}}
 end

@@ -1,10 +1,10 @@
 
-function sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
+function sort_blocks_by_perimeter_first!(threads_workload, workload_grid, grid_size)
     function is_block_at_thread_perimeter(blk_pos, tid)
         for side in instances(Side.T)  # TODO: replace by `sides_of(length(blk_pos))`
             neighbour_pos = blk_pos + CartesianIndex(offset_to(side))
             !in_grid(neighbour_pos, grid_size) && return true
-            blk_grid[neighbour_pos] != tid && return true
+            workload_grid[neighbour_pos] != tid && return true
         end
         return false
     end
@@ -51,19 +51,29 @@ end
 
 
 """
-    block_grid_from_workload(grid_size, threads_workload)
+    thread_workload_to_grid(grid_size, threads_workload)
 
 Convenience function to convert a `threads_workload` (result of [`thread_workload_distribution`](@ref))
-into an `Array` of `grid_size`, with each element assigned to the `tid` given by the distribution.
+into an `Array{Int}` of `grid_size`, with each element assigned to the `tid` given by the distribution.
 
+Then from the position of a block, `workload_grid[blk_pos]` would be the thread assigned to the block.
 This makes it easy to visualize the efficiency of the distribution.
+
+Unassigned blocks have their respective element set to `0`.
 """
-function block_grid_from_workload(grid_size, threads_workload)
-    blk_grid = zeros(Int, grid_size)
+function thread_workload_to_grid(grid_size, threads_workload)
+    workload_grid = zeros(Int, grid_size)
     for (tid, thread_workload) in enumerate(threads_workload)
-        blk_grid[thread_workload] .= tid
+        workload_grid[thread_workload] .= tid
     end
-    return blk_grid
+    return workload_grid
+end
+
+
+function thread_workload_from_grid(thread_count, workload_grid)
+    return map(1:thread_count) do tid
+        return findall(==(tid), workload_grid)
+    end
 end
 
 
@@ -143,11 +153,61 @@ function partition_cost(parts, grid_size, partition)
 end
 
 
+function scotch_graph_part_fixed(graph, parts, initial_partition, args...; repart=false)
+    # There is a bug/weird behaviour with `SCOTCH_graphPartFixed` (and others) where fixed vertices
+    # are treated as if they didn't exist, yet SCOTCH still checks that their values are between `0`
+    # and `parts`. Therefore only the subgraph of non-fixed vertices is partitioned into `parts`.
+    # To work around this, we suppose that the parts in fixed vertices are complete, and do the
+    # partitioning for `parts - "fixed parts"` instead.
+    # Because of the constraint that fixed vertices should be between `0` and `parts`, we fix them
+    # all to `0` and correct their value afterward.
+    initial_partition_parts = Set{Scotch.SCOTCH_Num}()
+    partition::Vector{Scotch.SCOTCH_Num} = map(initial_partition) do part
+        part == -1 && return part
+        push!(initial_partition_parts, part)
+        return 0
+    end
+
+    actual_parts = parts - length(initial_partition_parts)
+    if actual_parts == 0
+        # No partititoning to do: avoid calling SCOTCH since I don't know if it would work
+    elseif repart
+        partition = Scotch.graph_repart(graph, actual_parts, partition, args...; partition, fixed=true)
+    else
+        partition = Scotch.graph_part(graph, actual_parts, args...; partition, fixed=true)
+    end
+
+    # Map from `sub_graph part index` to `whole graph part index`
+    # Since part numbers of the fixed vertices can be any value from `0` to `parts`, we need to
+    # transform the newly mapped vertices to a part index which isn't used by the fixed vertices.
+    part_mapping = Vector{Scotch.SCOTCH_Num}(undef, actual_parts)
+    next_part = 0
+    for i in 1:actual_parts
+        while next_part in initial_partition_parts
+            next_part += 1
+        end
+        part_mapping[i] = next_part
+        next_part += 1
+    end
+
+    for (i, (p, init_p)) in enumerate(zip(partition, initial_partition))
+        if init_p == -1
+            partition[i] = part_mapping[p + 1]
+        else
+            partition[i] = initial_partition[i]
+        end
+    end
+
+    return partition
+end
+
+
 """
     scotch_grid_partition(
         threads, grid_size;
         strategy=:default, workload_tolerance=0, repart=false, retries=10, weighted=false,
-        static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0
+        static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0,
+        initial_partition=nothing
     )
 
 Split `grid_size` to the `threads`.
@@ -161,19 +221,30 @@ Giving a few blocks of margin (e.g. at least `1/prod(grid_size)`) is preferrable
 In this case all parameters of the grid must be present: `static_sized_grid`, `block_size`,
 `remainder_block_size` and `ghosts` must be given (obtained with e.g. [`grid_dimensions`](@ref)).
 
+`initial_partition` is the initial partition containing pre-assigned vertices. `-1` is
+for movable vertices, while other values are fixed vertices (0-indexed).
+
 The partitioning is random, hence results may vary. To counterbalance this, giving `retries > 0` will
 repeat the partitioning `retries` times and keep the best one.
 """
 function scotch_grid_partition(
     graph::Scotch.Graph, strat::Scotch.Strat, threads, grid_size;
-    repart=false, retries=10, weighted=false
+    repart=false, retries=10, weighted=false, initial_partition=nothing
 )
-    partition = Scotch.graph_part(graph, threads, strat)
+    if isnothing(initial_partition)
+        partition = Scotch.graph_part(graph, threads, strat)
+    else
+        partition = scotch_graph_part_fixed(graph, threads, initial_partition, strat)
+    end
 
     if repart
         cost_factor = 1.0
         costs = partition_cost(threads, grid_size, partition)
-        partition = Scotch.graph_repart(graph, threads, partition, cost_factor, costs, strat)
+        if isnothing(initial_partition)
+            partition = Scotch.graph_repart(graph, threads, partition, cost_factor, costs, strat)
+        else
+            partition = scotch_graph_part_fixed(graph, threads, initial_partition, cost_factor, costs, strat; repart=true)
+        end
     end
 
     threads_workload = map(1:threads) do tid
@@ -190,7 +261,7 @@ function scotch_grid_partition(
         best_eveness   = weighted ? workload_eveness(best_workload, block_weights, grid_size) : workload_eveness(best_workload)
         best_perimeter = total_workload_perimeter(best_workload)
         for _ in 1:retries
-            new_threads_workload = scotch_grid_partition(graph, strat, threads, grid_size; repart, retries=0, weighted)
+            new_threads_workload = scotch_grid_partition(graph, strat, threads, grid_size;repart, retries=0, weighted, initial_partition)
             new_threads_workload == best_workload && continue
 
             new_eveness = weighted ? workload_eveness(new_threads_workload, block_weights, grid_size) : workload_eveness(new_threads_workload)
@@ -211,10 +282,222 @@ function scotch_grid_partition(
 end
 
 
+function side_workload_constraints(partition, side, grid_size::NTuple{N, Int}) where {N}
+    # Build the constraints for the sub-domain along `side`
+
+    # Build an iterator for all elements along `side`
+    # The iterator should behave the same as the one on the receive side.
+    # TODO: better dimension agnosticity?
+    axis = Int(axis_of(side))
+    ax_pos = side in first_sides() ? 1 : grid_size[axis]
+    side_iter = CartesianIndices(Tuple(
+        ifelse.(1:N .== axis, Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))
+    ))
+    side_root = first(side_iter)  # transferred block positions are relative to this corner
+
+    side_constraints = Vector{Tuple{CartesianIndex{N}, Scotch.SCOTCH_Num}}()
+    side_size = prod(grid_size) ÷ grid_size[axis]
+    sizehint!(side_constraints, side_size)
+
+    for (tid, workload) in enumerate(partition)
+        isdisjoint(workload, side_iter) && continue
+        # This thread has blocks on the side of the grid: add all blocks to the constraints.
+        # While we could only transfer those on the edge, passing whole groups gives make things
+        # easier for SCOTCH, which will not have to handle incomplete groups.
+        # From what I could see, having incomplete groups in constraints gives low quality output,
+        # with some disjoint groups and uneven workloads, no matter the amount of retries.
+        for blk_pos in workload
+            rel_blk_pos = blk_pos - side_root
+            if rel_blk_pos[axis] != 0
+                # Since we are sending relative block positions to the other side, we need to mirror
+                # the axis of the side (X for left and right, etc...): this way the other side can
+                # use all positions directly.
+                rel_blk_pos = CartesianIndex(Tuple(ifelse.(1:N .== axis, Tuple(-rel_blk_pos), Tuple(rel_blk_pos))))
+            end
+            push!(side_constraints, (rel_blk_pos, tid - 1))  # tid-1 as SCOTCH uses 0-indices
+        end
+    end
+
+    return side_constraints
+end
+
+
+function side_workload_constraints!(
+    initial_partition, side, grid_size::NTuple{N, Int},
+    side_constraints::Vector{Tuple{CartesianIndex{N}, Scotch.SCOTCH_Num}}
+) where {N}
+    # Update the `initial_partition` with the constraints from the sub-domain along `side`.
+    # Return the new partition and the fixed groups added to it.
+
+    # Build an iterator for all elements along `side`
+    # TODO: better dimension agnosticity?
+    axis = Int(axis_of(side))
+    ax_pos = side in first_sides() ? 1 : grid_size[axis]
+    side_iter = CartesianIndices(Tuple(
+        ifelse.(1:length(grid_size) .== axis, Ref(ax_pos:ax_pos), Base.OneTo.(grid_size))
+    ))
+    side_root = first(side_iter)  # transferred block positions are relative to this corner
+
+    fixed_groups = Set{Scotch.SCOTCH_Num}()
+    for (rel_blk_pos, tid) in side_constraints
+        blk_pos = rel_blk_pos + side_root
+
+        # The neighbouring sub-domain has no information about the dimensions of our block grid.
+        # This means it can send block positions which aren't part of our grid (this shouldn't
+        # concern blocks along the exact side).
+        !(blk_pos in CartesianIndices(grid_size)) && continue
+
+        initial_partition[LinearIndices(grid_size)[blk_pos]] = tid
+        push!(fixed_groups, tid)
+    end
+
+    return initial_partition, fixed_groups
+end
+
+
+function scotch_grid_matched_partition(grid_graph, strat, threads, grid_size, comm::MPI.Comm; kwargs...)
+    # The partitioning is global among the processes of the communicator.
+    # Neighbour processes will need the same threads associated with the blocks along sides they share.
+
+    # The first sub-domain does its partitioning as usual, and transmits all partitions of blocks on
+    # its sides to the neighbouring sub-domains. The transmitted block groups are taken as is by the
+    # neighbours, which only have to partition the blocks which aren't in those groups. Once done
+    # they transmit their new groups to the other neighbours, and the process repeats.
+    # This method is bad, and a better alternative would be to transmit only the blocks exactly on
+    # the edge of each sub-domain, and build the partitions using them as constraints. However, this
+    # isn't possible with SCOTCH, hence the variation of sending all groups who touch the edges.
+    # In very specific situations, it can lead to invalid matched partitions. Most of the time the
+    # partitions are of poor quality. However, this algorithm can handle sub-domains of different
+    # sizes.
+    # TODO: fix this by transmitting only the blocks on the edge, if there is a SCOTCH function to
+    # do what I want.
+
+    # The sub-domain at the center of the grid is the one which initiates the partitioning.
+    # We could also start from anywhere else, but the center is the most optimal one, as it is
+    # the barycenter of the grid: it minimizes the number of waits required to complete the
+    # whole partitioning.
+    cart_size, _, coords = MPI.Cart_get(comm)
+    center_pos = fld.(cart_size .- 1, 2)
+    is_center = all(center_pos .== coords)
+    dim = length(grid_size)
+
+    # Get the neighbours which we will communicate with
+    our_rank = MPI.Comm_rank(comm)
+    center_offset = coords .- center_pos
+    center_dist = sum(abs.(center_offset))
+    recv_neighbours = Pair{Side.T, Int}[]
+    send_neighbours = Pair{Side.T, Int}[]
+    for axis in 1:dim, (side, offset) in zip(sides_along(Axis.T(axis)), (-1, +1))
+        neighbour_rank = MPI.Cart_shift(comm, axis-1, offset)[2]
+        neighbour_rank == MPI.PROC_NULL && continue
+        neighbour_rank == our_rank && continue  # ignore communications with ourselves
+        # Send to ranks father to the center, receive from ranks closer to the center
+        rank_dist = sum(abs.(center_offset .+ offset_to(side)))
+        if rank_dist > center_dist
+            push!(send_neighbours, side => neighbour_rank)
+        else
+            push!(recv_neighbours, side => neighbour_rank)
+        end
+    end
+
+    if is_center
+        # The center domain has no constraints
+        partition = scotch_grid_partition(grid_graph, strat, threads, grid_size; kwargs...)
+    else
+        # Wait for the neighbours closer (Manhattan distance) to the center to communicate their
+        # edge partitions
+
+        # Get the number of constrained blocks each neighbour wants to send
+        reqs = MPI.MultiRequest(length(recv_neighbours))
+        side_constraints_sizes = Vector{Ref{Int}}(undef, 2*dim)
+        for (req, (side, rank)) in zip(reqs, recv_neighbours)
+            side_constraints_sizes[Int(side)] = Ref(-1)
+            MPI.Irecv!(side_constraints_sizes[Int(side)], comm, req; source=rank, tag=0)
+        end
+        MPI.Waitall(reqs)
+
+        # Receive all constrained blocks
+        constraints = Dict{Side.T, Vector{Tuple{CartesianIndex{dim}, Scotch.SCOTCH_Num}}}()
+        for (req, (side, rank)) in zip(reqs, recv_neighbours)
+            side_size = side_constraints_sizes[Int(side)][]
+            constraints[side] = valtype(constraints)(undef, side_size)
+            MPI.Irecv!(constraints[side], comm, req; source=rank, tag=1)
+        end
+        MPI.Waitall(reqs)
+
+        # Build the initial partition with the constraints of each neighbour
+        initial_partition = Vector{Scotch.SCOTCH_Num}(undef, prod(grid_size))
+        initial_partition .= -1  # all vertices have no constraints by default
+        fixed_groups = Set{Scotch.SCOTCH_Num}()
+        for (side, side_cstr) in constraints
+            _, side_groups = side_workload_constraints!(initial_partition, side, grid_size, side_cstr)
+            union!(fixed_groups, side_groups)
+        end
+
+        partition = scotch_grid_partition(grid_graph, strat, threads, grid_size; initial_partition, kwargs...)
+    end
+
+    # Send our edge partitions to the neighbours farther from the center
+    reqs = MPI.MultiRequest(2*length(send_neighbours))
+    for (i, (side, rank)) in enumerate(send_neighbours)
+        constraint = side_workload_constraints(partition, side, grid_size)
+
+        # Send the length and the data at once, but with a different tag to not anger the MPI gods
+        MPI.Isend(length(constraint), comm, reqs[2*i-1]; dest=rank, tag=0)
+        MPI.Isend(constraint, comm, reqs[2*i]; dest=rank, tag=1)
+    end
+
+    MPI.Waitall(reqs)  # Don't leave any requests incomplete
+    MPI.Barrier(comm)  # Just to be safe, maybe unneeded
+
+    return partition
+end
+
+
+function scotch_grid_matched_partition_mirror(grid_graph, strat, threads, grid_size, comm::MPI.Comm; kwargs...)
+    # The partitioning is global among the processes of the communicator.
+    # Neighbour processes will need the same threads associated with the blocks along sides they share.
+
+    # The sub-domain at the center of the grid is the one which initiates the partitioning.
+    # Once it partitioned its blocks, it broadcasts the whole partitioning to all sub-domains.
+    # Then the other-subdomains will mirror this partitioning so that its sides matches those of its
+    # neighbours.
+    # Sub-domains at an odd distance of the center along an axis will mirror the partitioning along
+    # the next axis.
+    # This requires all sub-domains to have the same size.
+    # This method is less general than the other one, but it is 100% reliable, faster, and doesn't
+    # have any problems with the quality of the resulting partitioning.
+
+    # We could also start from anywhere else, but I chose the center of the Cartesian topology.
+    cart_size, _, coords = MPI.Cart_get(comm)
+    center_pos = fld.(cart_size .- 1, 2)
+    center_rank = MPI.Cart_rank(comm, center_pos)
+    is_center = center_rank == MPI.Comm_rank(comm)
+
+    if is_center
+        partition = scotch_grid_partition(grid_graph, strat, threads, grid_size; kwargs...)
+        workload_grid = thread_workload_to_grid(grid_size, partition)
+        MPI.Bcast!(workload_grid, comm; root=center_rank)
+    else
+        workload_grid = zeros(Int, grid_size)
+        MPI.Bcast!(workload_grid, comm; root=center_rank)
+
+        # Reverse each axis if the offset is odd
+        center_offset = coords .- center_pos
+        mirrored_axes = ifelse.(isodd.(center_offset), reverse.(axes(workload_grid)), axes(workload_grid))
+
+        partition = thread_workload_from_grid(threads, @view workload_grid[mirrored_axes...])
+    end
+
+    return partition
+end
+
+
 function scotch_grid_partition(
     threads, grid_size;
     strategy=:default, workload_tolerance=0, weighted=false,
     static_sized_grid=nothing, block_size=nothing, remainder_block_size=nothing, ghosts=0,
+    match_neighbour_domains::Union{Bool, MPI.Comm}=false, matching_method=:mirror,
     kwargs...
 )
     # TODO: for larger grids, using graph coarsening might be necessary (+ it may help the solver to reach better solutions)
@@ -227,26 +510,37 @@ function scotch_grid_partition(
     # -> cores on the same NUMA         => dense graph + weight 2?
     # -> cores on the same socket       => dense graph + weight 4?
     # -> cores on the different sockets => dense graph + weight 8?
+
     strat = Scotch.strat_build(:graph_map; strategy, parts=threads, imbalance_ratio=Float64(workload_tolerance))
-    return scotch_grid_partition(graph, strat, threads, grid_size; weighted, kwargs...)
+
+    if match_neighbour_domains == false
+        return scotch_grid_partition(graph, strat, threads, grid_size; weighted, kwargs...)
+    elseif matching_method === :mirror
+        return scotch_grid_matched_partition_mirror(graph, strat, threads, grid_size, match_neighbour_domains; weighted, kwargs...)
+    else
+        return scotch_grid_matched_partition(graph, strat, threads, grid_size, match_neighbour_domains; weighted, kwargs...)
+    end
 end
 
 
 function thread_workload_distribution(params::ArmonParameters; threads=nothing, kwargs...)
-    thread_count = @something threads (params.use_threading ? Threads.nthreads() : 1)
+    thread_count = @something threads params.nthreads
     grid_size, static_sized_grid, remainder_block_size = grid_dimensions(params)
     simple = params.workload_distribution === :simple
     scotch = params.workload_distribution in (:scotch, :sorted_scotch, :weighted_sorted_scotch)
     perimeter_first = params.workload_distribution in (:sorted_scotch, :weighted_sorted_scotch)
+    match_neighbour_domains = params.thread_split_comm ? params.cart_comm : false
     merged_kw = merge(params.distrib_params, Dict(kwargs...))
     if params.workload_distribution === :weighted_sorted_scotch
         return thread_workload_distribution(thread_count, grid_size;
             simple, scotch, perimeter_first,
             weighted=true, static_sized_grid, block_size=params.block_size, remainder_block_size, ghosts=params.nghost,
-            merged_kw...
+            match_neighbour_domains, merged_kw...
         )
     else
-        return thread_workload_distribution(thread_count, grid_size; simple, scotch, perimeter_first, merged_kw...)
+        return thread_workload_distribution(thread_count, grid_size;
+            simple, scotch, perimeter_first, match_neighbour_domains, merged_kw...
+        )
     end
 end
 
@@ -255,7 +549,8 @@ end
     thread_workload_distribution(params::ArmonParameters; threads=nothing)
     thread_workload_distribution(
         threads::Int, grid_size::Tuple;
-        scotch=true, simple=false, perimeter_first=false, kwargs...
+        scotch=true, simple=false, perimeter_first=false, check=true, match_neighbour_domains=false,
+        kwargs...
     )
 
 Distribute each block in `grid_size` among the `threads`, as evenly as possible.
@@ -269,23 +564,66 @@ is used to better split the grid.
 If `perimeter_first == true`, the resulting distribution will have blocks sorted in way that will
 place neighbours of other threads' blocks first in the list.
 By doing so, communications between threads may be overlapped more frequently.
+
+If `check == true`, the resulting distribution is checked to ensure that all blocks are assigned to
+a thread exactly once.
+
+If `match_neighbour_domains == comm`, then we have an additional constraint: two neighbouring
+sub-domains must share the same distribution of blocks and threads on the side they share.
+The partitioning problem becomes global, and is resolved by starting from the center domain (without
+any constraints), which communicates the distribution on each side to its neighbours, becoming a
+partitioning constraint. They each solve their distribution, and the process continues until it
+reaches all sub-domains.
+`comm` is a cartesian `MPI.Comm`unicator, restraining the algorithm to ranks part of `comm` only.
+It is incompatible with the `simple == true`.
 """
 function thread_workload_distribution(
     threads::Int, grid_size::Tuple;
-    scotch=true, simple=false, perimeter_first=false, kwargs...
+    scotch=true, simple=false, perimeter_first=false, check=true, match_neighbour_domains=false,
+    kwargs...
 )
     if simple
+        if match_neighbour_domains != false
+            error("simple workload distribution is incompatible with `match_neighbour_domains`")
+        end
         threads_workload = simple_workload_distribution(threads, grid_size)
     elseif scotch
-        threads_workload = scotch_grid_partition(threads, grid_size; kwargs...)
-        if perimeter_first
-            blk_grid = block_grid_from_workload(grid_size, threads_workload)
-            sort_blocks_by_perimeter_first!(threads_workload, blk_grid, grid_size)
-        end
+        threads_workload = scotch_grid_partition(threads, grid_size; match_neighbour_domains, kwargs...)
     else
         error("unknown workload distribution, expected `simple == true` or `scotch == true`")
     end
+
+    if check || perimeter_first
+        workload_grid = thread_workload_to_grid(grid_size, threads_workload)
+    end
+    perimeter_first && sort_blocks_by_perimeter_first!(threads_workload, workload_grid, grid_size)
+    if check
+        check_workload(threads, threads_workload, workload_grid)
+        if match_neighbour_domains isa MPI.Comm
+            check_matched_distribution(workload_grid, match_neighbour_domains)
+        end
+    end
     return threads_workload
+end
+
+
+function check_workload(threads, threads_workload, workload_grid)
+    if length(threads_workload) != threads
+        error("invalid block distribution: expected $threads parts, got $(length(threads_workload))")
+    end
+
+    unassigned_blocks = count(==(0), workload_grid)
+    if unassigned_blocks > 0
+        plurial = unassigned_blocks > 0 ? "blocks are" : "block is"
+        error("invalid block distribution: $unassigned_blocks $plurial not assigned to a thread")
+    end
+
+    for (tid, workload) in enumerate(threads_workload), blk_pos in workload
+        workload_grid[blk_pos] == tid && continue
+        error("invalid block distribution: block $(Tuple(blk_pos)) is assigned to threads $(workload_grid[blk_pos]) and $tid")
+    end
+
+    return true
 end
 
 
@@ -332,4 +670,148 @@ function workload_eveness(threads_workload, block_weights, grid_size)
         uneveness += sum((block_weights[blk_indexes] .- mean_weight).^2)
     end
     return uneveness
+end
+
+
+function check_matched_distribution(workload_grid, comm::MPI.Comm; throw_error=true)
+    rank = MPI.Comm_rank(comm)
+    coords = MPI.Cart_coords(comm)
+    distrib_ok = true
+    total_errors = 0
+    for axis in 1:ndims(workload_grid)
+        # To avoid deadlocks the side checks must be correctly ordered
+        rank_dist = sum(coords)
+        side_order = sides_along(Axis.T(axis))
+        isodd(rank_dist) && (side_order = reverse(side_order))
+        for side in side_order
+            # TODO: better dimension agnostic with `first_side(side)`
+            other_rank = MPI.Cart_shift(comm, axis - 1, side in first_sides() ? -1 : +1)[2]
+
+            # Ignore periodic topologies when we are a neighbour to ourselves as we don't use MPI
+            # for communication in those cases.
+            other_rank ∈ (rank, MPI.PROC_NULL) && continue
+
+            # Get all elements along `side`
+            ax_pos = side in first_sides() ? 1 : size(workload_grid, axis)
+            side_iter = CartesianIndices(Tuple(
+                ifelse.(1:ndims(workload_grid) .== axis, Ref(ax_pos:ax_pos), axes(workload_grid))
+            ))
+
+            side_workload = vec(workload_grid[side_iter])
+            other_side_workload = similar(side_workload)
+
+            # Exchange the side's distribution with the neighbour
+            MPI.Sendrecv!(side_workload, other_side_workload, comm;
+                dest=other_rank, sendtag=0, source=other_rank, recvtag=0
+            )
+
+            # For the distribution to be correct, the threads assigned to the blocks on the side of
+            # both sub-domains must match.
+            diffs = count(((x, y),) -> x != y, zip(side_workload, other_side_workload))
+            total_errors += diffs
+            distrib_ok &= diffs == 0
+        end
+    end
+
+    distrib_ok = MPI.Allreduce(distrib_ok, &, comm)
+
+    if throw_error && !distrib_ok
+        error("mismatched distribution: $total_errors blocks are assigned different threads with the neighbouring ranks")
+    end
+
+    return distrib_ok
+end
+
+
+function write_workload_distribution(io::IO, workload_grid::Array{Int, N}, offset=zero(CartesianIndex{N})) where {N}
+    for (pos, tid) in pairs(IndexCartesian(), workload_grid)
+        # `x y thread_id`
+        join(io, Tuple(pos + offset), ' ')
+        println(io, ' ', tid)
+    end
+end
+
+
+"""
+    write_workload_distribution(
+        filename, params::ArmonParameters, workload_grid::Array{Int};
+        all_sub_domains=true, sub_domain_spacing=1, write_grid_size=true, with_comments=true
+    )
+    write_workload_distribution(filename, params, grid_size, threads_workload; kwargs...)
+    write_workload_distribution(filename, params, grid::BlockGrid; kwargs...)
+
+Write the assigned thread of each block of `grid` to `filename`.
+The format is `block_x block_y thread_id` per line.
+
+If `write_grid_size == true` the first line is the dimensions of the grid, including any spacing
+between sub-domains.
+
+If `all_sub_domains == true` then all MPI ranks write to the file, one at a time.
+This allows to store the whole block distribution of all blocks in the same file.
+
+Gnuplot (>= v6.0) can display the file using those commands (only for 2D grids):
+```gnuplot
+stats 'file.grid' u (mx=strcol(1),my=strcol(2)) every ::0:0:0:0 nooutput
+plot 'file.grid' skip 1 sparse matrix=(mx,my) origin=(1,1) with image
+```
+The first one reads the dimensions of the sparse grid from the first line of the file, the second
+does the display.
+
+Exactly `sub_domain_spacing` row/column are left blank to clearly separate sub-domains when
+viewing the file.
+"""
+function write_workload_distribution(
+    filename, params::ArmonParameters, workload_grid::Array{Int, N};
+    all_sub_domains=true, sub_domain_spacing=1, write_grid_size=true, with_comments=true
+) where {N}
+    grid_size = size(workload_grid)
+
+    # All ranks write their file in `write_dir`, then the root rank concatenates them all into `filename`
+    write_dir = params.is_root ? mktempdir() : nothing
+    write_dir = MPI.bcast(write_dir, params.cart_comm; root=params.root_rank)
+
+    # Format the temp file names so that they are concatenated in the right order each time.
+    padded_rank = lpad(string(params.rank), ndigits(params.proc_size), '0')
+    temp_file = joinpath(write_dir, padded_rank * ".grid")
+
+    open(temp_file, "w") do file
+        if params.is_root && write_grid_size
+            total_grid_size = grid_size .* params.proc_dims
+            total_grid_size = total_grid_size .+ (sub_domain_spacing .* (params.proc_dims .- 1))
+            join(file, total_grid_size, ' ')
+            println(file)
+        end
+
+        if all_sub_domains && params.use_MPI
+            if with_comments
+                params.is_root && println(file, "# Process grid: ", params.proc_dims)
+                println(file, "# Rank: ", params.cart_coords)
+            end
+
+            spacing = CartesianIndex(params.cart_coords) * sub_domain_spacing
+            offset = CartesianIndex(grid_size .* params.cart_coords)
+            offset = offset + spacing
+        else
+            offset = zero(CartesianIndex{N})
+        end
+
+        with_comments && println(file, "# Grid: ", grid_size)
+
+        write_workload_distribution(file, workload_grid, offset)
+    end
+
+    MPI.Barrier(params.cart_comm)
+
+    if params.is_root
+        cat_cmd = "cat $write_dir/*.grid > \"$filename\""
+        run(`bash -c $cat_cmd`)
+    end
+
+    return
+end
+
+
+function write_workload_distribution(filename, params::ArmonParameters, grid_size, threads_workload; kwargs...)
+    workload_grid = thread_workload_to_grid(grid_size, threads_workload)
+    return write_workload_distribution(filename, params, workload_grid; kwargs...)
 end

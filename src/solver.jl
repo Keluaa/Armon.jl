@@ -17,6 +17,9 @@ struct SolverStats
     solve_time::Float64  # in seconds
     cell_count::Int
     giga_cells_per_sec::Float64
+    cycle_time::Float64
+    fastest_cycle::Float64
+    slowest_cycle::Float64
     data::Union{Nothing, BlockGrid}
     timer::Union{Nothing, TimerOutput}
     grid_log::Union{Nothing, BlockGridLog}
@@ -43,8 +46,15 @@ macro checkpoint(step_label)
 end
 
 
+# can_run_on_device(::Union{CPU, CPU_HP}, step::SolverStep.T) = true
+function can_run_on_device(device, step::SolverStep.T)
+    # Not on GPU (yet): NewCycle, TimeStep, InitTimeStep, NewSweep, EndCycle, ErrorState
+    return step in (SolverStep.EOS, SolverStep.Exchange, SolverStep.Fluxes, SolverStep.CellUpdate, SolverStep.RemapAdvection, SolverStep.RemapProjection)
+end
+
+
 """
-    block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
+    block_state_machine(params::ArmonParameters, grid::BlockGrid, blk::LocalTaskBlock)
 
 Advances the [`SolverStep`](@ref) state of the `blk`, apply each step of the solver on the `blk`.
 This continues until the current cycle is done, or the block needs to wait for another block to do
@@ -55,16 +65,30 @@ Returns the new step of the block.
 If `SolverStep.NewCycle` is returned, the `blk` reached the end of the current cycle and will not
 progress any further until all other blocks have reached the same point.
 """
-function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
+function block_state_machine(params::ArmonParameters, grid::BlockGrid, blk::LocalTaskBlock)
     state = blk.state
+    queue = state.queue
     steps_completed = 0
     steps_vars = zero(UInt16)
     steps_var_count = 0
+
+    is_stopped = update_queue_status!(queue)
+    if !is_stopped
+        # The device is still processing the steps
+        return state.step
+    elseif !is_done(queue)
+        # The queue stopped since one step needed to wait for an external event (e.g. neighbouring
+        # block ready for an exchange, time step, etc...)
+        process_queue!(queue, params, state, grid, blk)
+        return state.step
+    end
+    empty!(queue)
 
     @label next_step
     blk_state = state.step
     new_state = blk_state
     stop_processing = false
+    step_queued = true
 
     #=
     Roughly equivalent to:
@@ -88,7 +112,7 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
     if blk_state == SolverStep.NewCycle
         if start_cycle(state)
             if state.global_dt.cycle == 0
-                update_EOS!(params, state, blk)
+                step_queued, _ = planify_step!(queue, params, state, blk, SolverStep.EOS)
             end
             new_state = SolverStep.TimeStep
         else
@@ -97,56 +121,77 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
             new_state = SolverStep.NewCycle
         end
 
-    elseif blk_state in (SolverStep.TimeStep, SolverStep.InitTimeStep)
+    elseif blk_state == SolverStep.TimeStep
         # If not given at config-time, the time step of the first cycle will be the same as the
         # second cycle, requiring all blocks to finish computing the time step before starting the
         # first cycle, hence the `InitTimeStep` state.
-        already_contributed = blk_state == SolverStep.InitTimeStep
-        must_wait = next_time_step(params, state, blk; already_contributed)
+        must_wait = !is_done(queue) || next_time_step(params, state, blk)
         if must_wait
             stop_processing = true
-            if state.dt == 0
-                new_state = SolverStep.InitTimeStep
-            end
         else
+            # At initialization, if the time step is 0, we must wait for next cycle's time step, which
+            # we use for the first cycle (then the 1st and 2nd cycles will have the same time step).
+            if state.dt == 0
+                stop_processing = true
+                new_state = SolverStep.InitTimeStep
+            else
+                new_state = SolverStep.NewSweep
+            end
+        end
+
+    elseif blk_state == SolverStep.InitTimeStep
+        if fetch_time_step(params, state, blk)
             new_state = SolverStep.NewSweep
+        else
+            stop_processing = true
         end
 
     elseif blk_state == SolverStep.NewSweep
-        if next_axis_sweep!(params, state)
+        if !is_done(queue)
+            stop_processing = true
+        elseif next_axis_sweep!(params, state)
             new_state = SolverStep.EndCycle
         else
             new_state = SolverStep.EOS
         end
 
     elseif blk_state == SolverStep.EOS
-        update_EOS!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.Exchange
 
     elseif blk_state == SolverStep.Exchange
-        must_wait = block_ghost_exchange(params, state, blk)
-        if must_wait
-            stop_processing = true
-        else
+        step_queued, step_executed = planify_step!(queue, params, state, blk, blk_state)
+        if step_executed || (params.use_gpu && can_run_on_device(params.device, blk_state))
+            # When running on the device, we schedule the next steps even if we couldn't complete
+            # the exchange.
             new_state = SolverStep.Fluxes
+        else
+            # We must wait for other blocks to be ready before this step can be completed
+            stop_processing = true
         end
 
     elseif blk_state == SolverStep.Fluxes
-        numerical_fluxes!(params, state, blk)
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.CellUpdate
 
     elseif blk_state == SolverStep.CellUpdate
-        cell_update!(params, state, blk)
-        new_state = SolverStep.Remap
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
+        new_state = SolverStep.RemapAdvection
 
-    elseif blk_state == SolverStep.Remap
-        projection_remap!(params, state, blk)
+    elseif blk_state == SolverStep.RemapAdvection
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
+        new_state = SolverStep.RemapProjection
+
+    elseif blk_state == SolverStep.RemapProjection
+        step_queued, _ = planify_step!(queue, params, state, blk, blk_state)
         new_state = SolverStep.NewSweep
 
     elseif blk_state == SolverStep.EndCycle
-        end_cycle!(state)
         stop_processing = true
-        new_state = SolverStep.NewCycle
+        if is_done(queue)
+            end_cycle!(state)
+            new_state = SolverStep.NewCycle
+        end
 
     else
         error("unknown state: $blk_state")
@@ -163,6 +208,8 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         steps_vars |= var_flags
         steps_var_count += count_ones(var_flags)
     end
+    !step_queued && !stop_processing && error("step could not be queued: ", blk_state)
+    stop_processing |= is_full(queue)
     !stop_processing && @goto next_step
 
     if params.log_blocks
@@ -175,35 +222,24 @@ function block_state_machine(params::ArmonParameters, blk::LocalTaskBlock)
         end
     end
 
+    process_queue!(queue, params, state, grid, blk)
     return new_state
 end
 
 
-function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, first_waiting_block::CartesianIndex, stop_count)
+function stop_busy_waiting(params::ArmonParameters, grid::BlockGrid, stop_count)
     wait_start = time_ns()
 
     # A safepoint might be needed in some cases as threads waiting for other threads
     # would never allocate and therefore might prevent the GC to run.
     GC.safepoint()
 
-    if params.use_MPI && !iszero(first_waiting_block)
-        # MPI_Wait on the `first_waiting_block`'s remote neighbour
-        blk = block_at(grid, first_waiting_block)
-        for neighbour in blk.neighbours
-            !(neighbour isa RemoteTaskBlock) && continue
-            MPI.Testall(neighbour.requests) && continue
-            # Only wait for a single side, expecting that once one is done, there is more work to do.
-            MPI.Waitall(neighbour.requests)
-            return time_ns() - wait_start, true
-        end
-    end
-
-    # Yield to the OS scheduler, incase some multithreading schenanigans are preventing us to
+    # Yield to the OS scheduler, in case some multithreading schenanigans are preventing us to
     # continue further (e.g. another process' thread is bound to the same core as this thread).
     # Wait twice as long as the previous time, starting from 2µs and up to 8ms
     µs_to_wait = 2^clamp(stop_count, 1, 13)
     Libc.systemsleep(µs_to_wait * 1e-6)  # this is `usleep` on Linux btw
-    return time_ns() - wait_start, false
+    return time_ns() - wait_start
 end
 
 
@@ -212,68 +248,82 @@ function solver_cycle_async(params::ArmonParameters, grid::BlockGrid, max_step_c
     # with a predefined repartition and device
 
     timeout = UInt(120e9)  # 120 sec  # TODO: should depend on the total workload, or be deactivatable
-    threads_count = params.use_threading ? Threads.nthreads() : 1
 
-    @threaded :outside_kernel for _ in 1:threads_count
+    @threaded :outside_kernel for _ in 1:params.nthreads
         # TODO: thread block iteration should be done along the current axis
 
         tid = Threads.threadid()
+        setup_task_for_device(params, tid)
         thread_blocks_idx = grid.threads_workload[tid]
+        can_advance_time_step = can_touch_global_mpi_time_step(params)
 
         t_start = time_ns()
         step_count = 0
         no_progress_count = 0
         total_wait_time = 0
-        total_mpi_waits = 0
         while step_count < max_step_count
             # Repeatedly parse through all blocks assigned to the current thread, each time advancing
             # them through the solver steps, until all of them are done with the cycle.
             all_finished_cycle = true
             no_progress = true
-            first_waiting_block = zero(eltype(thread_blocks_idx))
             for blk_pos in thread_blocks_idx
                 # One path for each type of block to avoid runtime dispatch
                 if in_grid(blk_pos, grid.static_sized_grid)
                     blk = grid.blocks[block_idx(grid, blk_pos)]
                     prev_state = blk.state.step
-                    new_state = block_state_machine(params, blk)
+                    new_state = block_state_machine(params, grid, blk)
                 else
                     blk = grid.edge_blocks[edge_block_idx(grid, blk_pos)]
                     prev_state = blk.state.step
-                    new_state = block_state_machine(params, blk)
+                    new_state = block_state_machine(params, grid, blk)
                 end
 
                 all_finished_cycle &= new_state == SolverStep.NewCycle
                 no_progress &= prev_state == new_state
-                if prev_state == new_state && iszero(first_waiting_block)
-                    first_waiting_block = blk_pos
-                end
             end
             step_count += 1
             all_finished_cycle && break
             no_progress_count += no_progress
 
+            if can_advance_time_step
+                # If `params.thread_split_comm`, then only the main thread can touch the MPI reduction
+                # for the time step. This means that the last thread to contribute to the local time
+                # step isn't always the one which will start the global reduction, hence this extra
+                # call to the time step state machine to start things early if possible. Otherwise
+                # it happens in `next_cycle!`.
+                advance_time_step_state!(params, grid.global_dt)
+            end
+
             if no_progress_count % params.busy_wait_limit == 0
                 # No block did any progress for more than `params.busy_wait_limit` calls to
-                # `block_state_machine`, to prevent deadlocks (caused by MPI or multithreading),
-                # we should stop busy waiting.
+                # `block_state_machine`, to identify deadlocks (caused by MPI or multithreading),
+                # we should limit how much busy waiting we can do.
                 if time_ns() - t_start > timeout
                     solver_error(:timeout, "cycle took too long in thread $tid")
                 end
                 stop_count = no_progress_count ÷ params.busy_wait_limit
-                wait_time, waited_for_mpi = stop_busy_waiting(params, grid, first_waiting_block, stop_count)
+                wait_time = stop_busy_waiting(params, grid, stop_count)
                 total_wait_time += wait_time
-                total_mpi_waits += waited_for_mpi
             end
         end
+
+        wait(params, tid)
 
         if params.log_blocks && !isempty(thread_blocks_idx)
             t_end = time_ns()
             stop_count = no_progress_count ÷ params.busy_wait_limit
             push_log!(grid, tid, ThreadLogEvent(
                 grid, tid, step_count, no_progress_count, stop_count,
-                total_mpi_waits, total_wait_time, t_end - t_start
+                0, total_wait_time, t_end - t_start
             ))
+        end
+
+        if can_advance_time_step && (tid == 1) && isempty(thread_blocks_idx)
+            # Unlike other threads, the main thread is always in charge of advancing the time step
+            # state and cycle count. In the rare case where the main thread has no blocks, we may get
+            # some deadlocks if we don't manually advance the state when other blocks must wait for
+            # the time step to be available in order to finish their work (e.g. at the first cycle).
+            loop_until_time_step_available(params, grid.global_dt)
         end
     end
 
@@ -326,6 +376,8 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
     reset!(grid, params)
     (; global_dt) = grid
 
+    cycles_time = zeros(Float64, params.maxcycle)
+
     total_cycles_time = 0.
     t1 = time_ns()
 
@@ -354,7 +406,9 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
 
         next_cycle!(params, global_dt)
 
-        total_cycles_time += time_ns() - cycle_start
+        cycle_time = time_ns() - cycle_start
+        total_cycles_time += cycle_time
+        cycles_time[global_dt.cycle] = cycle_time
 
         if is_root
             if silent <= 1
@@ -362,7 +416,7 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
                 current_mass, current_energy = conservation_vars(params, grid)
                 ΔM = abs(initial_mass - current_mass)     / initial_mass   * 100
                 ΔE = abs(initial_energy - current_energy) / initial_energy * 100
-                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#8.6g%%, |ΔE| = %#8.6g%%\n",
+                @printf("Cycle %4d: dt = %.18f, t = %.18f, |ΔM| = %#11.6g%%, |ΔE| = %#11.6g%%\n",
                     global_dt.cycle, global_dt.current_dt, global_dt.time, ΔM, ΔE)
             end
         elseif silent <= 1
@@ -399,7 +453,13 @@ function time_loop(params::ArmonParameters, grid::BlockGrid)
         end
     end
 
-    return global_dt.time, global_dt.current_dt, global_dt.cycle, 1 / grind_time, solve_time
+    if isempty(cycles_time)
+        fastest_cycle = slowest_cycle = zero(Float64)
+    else 
+        fastest_cycle, slowest_cycle = extrema(cycles_time)
+    end
+
+    return global_dt.time, global_dt.current_dt, global_dt.cycle, 1 / grind_time, solve_time, total_cycles_time, fastest_cycle, slowest_cycle
 end
 
 
@@ -462,7 +522,7 @@ function armon(params::ArmonParameters{T}) where T
         end
     end
 
-    final_time, dt, cycles, cells_per_sec, solve_time = time_loop(params, data)
+    final_time, dt, cycles, cells_per_sec, solve_time, cycle_time, fastest_cycle, slowest_cycle = time_loop(params, data)
 
     if params.check_result && is_conservative(params.test)
         @section "Conservation variables" begin
@@ -494,7 +554,8 @@ function armon(params::ArmonParameters{T}) where T
     end
 
     stats = SolverStats(
-        final_time, dt, cycles, solve_time / 1e9, prod(params.N), cells_per_sec,
+        final_time, dt, cycles, solve_time / 1e9, prod(params.N), cells_per_sec, cycle_time,
+        fastest_cycle, slowest_cycle,
         params.return_data ? data : nothing,
         params.measure_time ? flatten_sections(timer, ("Inner blocks", "Edge blocks")) : nothing,
         params.log_blocks ? collect_logs(data) : nothing

@@ -52,7 +52,7 @@ block_origin
 block_at
 block_size_at
 move_pages(::BlockGrid)
-lock_pages(::BlockGrid)
+lock_pages(device, ::BlockGrid)
 ```
 
 ### Block size and iteration
@@ -78,6 +78,7 @@ DomainRange
 ## Block states
 
 ```@docs
+SolverSchemes
 SolverState
 first_state
 SolverStep
@@ -89,11 +90,11 @@ block_state_machine
 ```@docs
 next_time_step
 GlobalTimeStep
-TimeStepState.WaitingForMPI
-TimeStepState.Done
-TimeStepState.Ready
-TimeStepState.DoingMPI
-TimeStepState.AllContributed
+TimeStepState.LocalReady
+TimeStepState.GlobalStart
+TimeStepState.GlobalInProgress
+TimeStepState.GlobalDone
+TimeStepState.AllDone
 ```
 
 ### Block exchanges
@@ -120,6 +121,7 @@ thread_workload_distribution
 simple_workload_distribution
 scotch_grid_partition
 block_grid_from_workload
+write_workload_distribution
 ```
 
 ## Device and backends
@@ -128,6 +130,9 @@ block_grid_from_workload
 CPU_HP
 create_device
 init_backend
+setup_task_for_device
+Base.wait(::ArmonParameters, ::Any)
+Base.wait(::ArmonParameters)
 device_memory_info
 memory_info
 memory_required
@@ -175,6 +180,6 @@ SolverException
 array_pages
 touch_pages
 move_pages(::Vector{Ptr{T}}, ::Any) where T
-lock_pages(::Ptr, ::Any)
+lock_pages(device, ::Ptr, ::Any)
 unlock_pages
 ```

@@ -7,6 +7,7 @@ Iterator over the memory pages (aligned to `PAGE_SIZE`) used by the array `A`.
 """
 function array_pages(A::Ptr{T}, A_length) where {T}
     page_size = NUMA.numa_pagesize()
+    A_length == 0 && return Ptr{T}(1):page_size:Ptr{T}(0)
     A_end = A + (A_length - 1) * sizeof(T)
     A -= UInt(A) % page_size  # Align to the first page
     return A:page_size:A_end
@@ -82,38 +83,41 @@ move_pages(A::DenseArray, target_node) = move_pages(array_pages(A), target_node)
 
 
 """
-    lock_pages(ptr, len)
-    lock_pages(pages::OrdinalRange{Ptr, Int})
-    lock_pages(A::DenseArray)
+    lock_pages(device, ptr, len)
+    lock_pages(device, pages::OrdinalRange{Ptr, Int})
+    lock_pages(device, A::DenseArray)
 
 Lock the `pages` ranging from `ptr` to `ptr+len` on the RAM, preventing the kernel from moving it
 around or putting it in swap memory.
+
+`device` may be a `KernelAbstractions.Backend` or `CPU_HP`: if the device is a CPU, `mlock` is used,
+otherwise the GPU's locking function is used.
 """
-function lock_pages(ptr::Ptr, len)
+function lock_pages(::Union{CPU, CPU_HP}, ptr::Ptr, len)
     ret = ccall(:mlock, Cint, (Ptr{Cvoid}, Csize_t), Ptr{Cvoid}(ptr), len)
     ret != 0 && error("mlock failed: $(Libc.errno())")
     return
 end
 
-lock_pages(pages::OrdinalRange{Ptr{T}, Int}) where {T} = lock_pages(first(pages), UInt(last(pages) - first(pages)))
-lock_pages(A::DenseArray) = lock_pages(array_pages(A))
+lock_pages(device, pages::OrdinalRange{Ptr{T}, Int}) where {T} = lock_pages(device, first(pages), UInt(last(pages) - first(pages)))
+lock_pages(device, A::DenseArray) = lock_pages(device, array_pages(A))
 
 
 """
-    unlock_pages(ptr, len)
-    unlock_pages(pages::OrdinalRange{Ptr, Int})
-    unlock_pages(A::DenseArray)
+    unlock_pages(device, ptr, len)
+    unlock_pages(device, pages::OrdinalRange{Ptr, Int})
+    unlock_pages(device, A::DenseArray)
 
 Unlock the `pages`, opposite of [`lock_pages`](@ref).
 """
-function unlock_pages(ptr, len)
+function unlock_pages(::Union{CPU, CPU_HP}, ptr, len)
     ret = ccall(:munlock, Cint, (Ptr{Cvoid}, Csize_t), Ptr{Cvoid}(ptr), len)
     ret != 0 && error("munlock failed: $(Libc.errno())")
     return
 end
 
-unlock_pages(pages::OrdinalRange{Ptr{T}, Int}) where {T} = unlock_pages(first(pages), UInt(last(pages) - first(pages)))
-unlock_pages(A::DenseArray) = unlock_pages(array_pages(A))
+unlock_pages(device, pages::OrdinalRange{Ptr{T}, Int}) where {T} = unlock_pages(device, first(pages), UInt(last(pages) - first(pages)))
+unlock_pages(device, A::DenseArray) = unlock_pages(device, array_pages(A))
 
 
 function volatile_touch(ptr::Ptr)

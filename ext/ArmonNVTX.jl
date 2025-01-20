@@ -8,6 +8,14 @@ const armon_domain = NVTX.Domain("Armon")
 const range_names = Dict{Symbol, NVTX.StringHandle}()
 
 
+function name_stream(stream, name::AbstractString)
+    # `stream` is a `CUDA.CuStream`
+    if NVTX.isactive()
+        ccall((:nvtxNameCuStreamA, NVTX.libnvToolsExt), Cvoid, (Ptr{Cvoid}, Cstring), stream.handle, name)
+    end
+end
+
+
 function NVTX_range_start(::ArmonParameters, name::Symbol)
     # More or less equivalent to NVTX.@range
     # Note that we do not check for NVTX.isactive(). For some reason Nsight Compute might not enable

@@ -8,11 +8,79 @@ import oneAPI: oneAPIBackend
 
 Armon.create_device(::Val{:oneAPI}) = oneAPIBackend()
 Armon.device_array_type(::oneAPIBackend) = oneAPI.oneArray
+Armon.device_adaptor(::oneAPIBackend) = oneAPI.KernelAdaptor()
+
+
+mutable struct oneAPIThreadInfo <: Armon.ThreadInfo
+    tid     :: Int
+    driver  :: oneAPI.ZeDriver
+    device  :: oneAPI.ZeDevice
+    context :: oneAPI.ZeContext
+    queue   :: oneAPI.ZeCommandQueue
+end
+
+
+function Armon.init_backend(params::ArmonParameters, ::oneAPIBackend; options...)
+    device = oneAPI.device()
+    driver = oneAPI.driver()
+    context = oneAPI.context()
+    # TODO: add a ZeEventPool, per device or driver
+    for tid in 1:params.nthreads
+        # TODO: defaults are `ordinal=1` and `index=1`, which indicate that two queues cannot execute
+        # simultanously: change to different numbers
+        # See https://oneapi-src.github.io/level-zero-spec/level-zero/latest/core/PROG.html#creation
+        # And https://github.com/JuliaGPU/oneAPI.jl/blob/master/lib/level-zero/cmdqueue.jl
+        queue = oneAPI.ZeCommandQueue(context, device)
+        params.threads_info[tid] = oneAPIThreadInfo(tid, driver, device, context, queue)
+    end
+
+    params.backend_options = Armon.EmptyParams()
+    return options
+end
+
+
+function Armon.setup_task_for_device(params::ArmonParameters{<:Any, <:oneAPIBackend}, tid)
+    # oneAPI.jl automatically creates a new stream when using its API in a new task.
+    # We want to reuse the streams across tasks in order to track them easily, especially when
+    # viewing GPU activity.
+    thread_info::oneAPIThreadInfo = Armon.thread_info(params, tid)
+    oneAPI.driver!(thread_info.driver)
+    oneAPI.device!(thread_info.device)
+    oneAPI.context!(thread_info.context)
+    # TODO: oneAPI.jl does not provide a `global_queue!`, most likely because it is a global queue,
+    # not a local queue... does this mean using multiple queues per device isn't supported?
+    task_local_storage((:ZeCommandQueue, thread_info.context, thread_info.device), thread_info.queue)
+    return
+end
+
+
+# TODO: see https://oneapi-src.github.io/level-zero-spec/level-zero/latest/core/PROG.html#events
+# TODO: see https://github.com/JuliaGPU/oneAPI.jl/blob/master/lib/level-zero/event.jl
+#      also https://github.com/JuliaGPU/oneAPI.jl/blob/master/lib/level-zero/cmdlist.jl
+# Armon.create_kernel_event(::oneAPIBackend) = oneAPI.oneL0.ZeEvent(pool, index)
+# Armon.put_kernel_event(::oneAPIBackend, event) = oneAPI.oneL0.record(event)
+# Armon.query_kernel_event(::oneAPIBackend, event) = CUDA.isdone(event)
+
+
+function Base.wait(params::ArmonParameters{<:Any, <:oneAPIBackend}, tid)
+    thread_info::oneAPIThreadInfo = Armon.thread_info(params, tid)
+    oneAPI.oneL0.synchronize(thread_info.queue)
+    return
+end
+
+
+# TODO: check if there is a concept of pinned memory in oneAPI => does this mean that memory copies cannot be asynchronous?
+Armon.lock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.lock_pages(Armon.CPU_HP(), ptr, len)
+Armon.unlock_pages(::oneAPIBackend, ptr::Ptr, len) = Armon.unlock_pages(Armon.CPU_HP(), ptr, len)
 
 
 function Armon.print_device_info(io::IO, pad::Int, p::ArmonParameters{<:Any, <:oneAPIBackend})
     Armon.print_parameter(io, pad, "GPU", true, nl=false)
-    println(io, ": oneAPI (block size: ", join(p.block_size, '×'), ")")
+    driver = first(p.threads_info).driver
+    device = first(p.threads_info).device
+    device_id = findfirst(==(device), oneAPI.devices(driver))
+    println(io, ": oneAPI, workgroup size: ", join(p.workgroup_size, '×'), ", ",
+        p.nthreads, " streams, device n°", device_id)
 end
 
 

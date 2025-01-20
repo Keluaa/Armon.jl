@@ -1,10 +1,14 @@
 
 using Printf
 using MPI
+using ThreadPinning
 
-MPI.Init(; threadlevel=:multiple)
+if !MPI.Initialized()
+    MPI.Init(; threadlevel=:multiple)
+end
+
 MPI.Barrier(MPI.COMM_WORLD)
-
+global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
 
 TEST_CUDA_MPI = if parse(Bool, get(ENV, "TEST_CUDA_MPI", "false"))
     import CUDA
@@ -157,12 +161,13 @@ macro MPI_test(comm, expr, kws...)
                 try
                     $expr
                 catch e
+                    # Print the error as a single string, to avoid interleaved messages
                     global_rank = MPI.Comm_rank(MPI.COMM_WORLD)
                     local_rank = MPI.Comm_rank(comm)
                     rank_str = "[$global_rank (local: $local_rank)] caught an error: "
                     err_str = "ERROR: " * sprint(showerror, e; context=stdout)
                     bt_str = sprint(Base.show_backtrace, catch_backtrace(); context=stdout)
-                    println(rank_str * "\n" * err_str * "\n" * bt_str)  # Print as single string, to avoid interleaved messages
+                    print(rank_str * "\n" * err_str * "\n" * bt_str * "\n")
                     MPI.Abort(MPI.COMM_WORLD, 1)  # Cannot recover in an MPI app
                 end
             end;
@@ -300,8 +305,8 @@ function positions_along(grid::BlockGrid, side::Armon.Side.T)
 end
 
 
-function test_halo_exchange(P, global_comm)
-    ref_params = ref_params_for_sub_domain(:DebugIndexes, Float64, P; N=(100, 100), global_comm)
+function test_halo_exchange(P, global_comm; opts...)
+    ref_params = ref_params_for_sub_domain(:DebugIndexes, Float64, P; N=(100, 100), global_comm, opts...)
     block_grid = BlockGrid(ref_params)
     coords = ref_params.cart_coords
 
@@ -330,11 +335,13 @@ function test_halo_exchange(P, global_comm)
 
                 # Halo exchange, but with one neighbour at a time
                 remote_blk = blk.neighbours[Int(side)]
-                @root_test length(domain) * length(Armon.comm_vars()) == length(remote_blk.send_buf.data)
-                if !Armon.start_exchange(ref_params, blk, remote_blk, side)
-                    MPI.Waitall(remote_blk.requests)
-                    @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
-                end
+                send_buffer = only(Armon.Communications.unsafe_send_buffer(remote_blk.comm_data))
+                @root_test length(domain) * length(Armon.comm_vars()) == length(send_buffer)
+
+                @test Armon.start_exchange(ref_params, blk, remote_blk, side)
+                Armon.Communications.wait_send_completed(remote_blk.comm_data)
+                Armon.Communications.wait_recv_completed(remote_blk.comm_data)
+                @test Armon.finish_exchange(ref_params, blk, remote_blk, side)
 
                 # Check if the received array was correctly pasted into our ghost domain
                 Armon.device_to_host!(blk)
@@ -360,6 +367,35 @@ function test_halo_exchange(P, global_comm)
 end
 
 
+function test_matched_distribution(P, global_comm, parts, grid_size)
+    ref_params = ref_params_for_sub_domain(:Sod, Float64, P; global_comm)
+    comm = ref_params.cart_comm
+
+    workload = Armon.thread_workload_distribution(
+        parts, grid_size;
+        scotch=true, simple=false, perimeter_first=false, check=true,
+        match_neighbour_domains=comm,
+    )
+    workload_grid = Armon.thread_workload_to_grid(grid_size, workload)
+
+    distrib_count = length.(workload)
+    @MPI_test comm sum(distrib_count) == prod(grid_size)
+
+    workload_grid = Armon.thread_workload_to_grid(grid_size, workload)
+    @MPI_test comm count(==(0), workload_grid) == 0  # All blocks are assigned to a thread
+
+    distrib_ok = Armon.check_matched_distribution(workload_grid, comm; throw_error=false)
+    @MPI_test comm distrib_ok
+
+    if WRITE_FAILED && !distrib_ok
+        p_str = join(P, '×')
+        gs_str = join(grid_size, '×')
+        file = "matched_distrib_P=$(p_str)_parts=$(parts)_gs=$(gs_str).grid"
+        Armon.write_workload_distribution(file, ref_params, workload_grid)
+    end
+end
+
+
 function test_reference(prefix, comm, test, type, P; kwargs...)
     ref_params = ref_params_for_sub_domain(test, type, P; N=(100, 100), global_comm=comm, kwargs...)
 
@@ -378,8 +414,10 @@ function test_reference(prefix, comm, test, type, P; kwargs...)
         diff_count, data, ref_data
     catch e
         # We cannot throw exceptions since it would create a deadlock
-        println("[$(MPI.Comm_rank(comm))] threw an exception:")
-        Base.showerror(stdout, e, catch_backtrace(); backtrace=true)
+        err_str = "[$(MPI.Comm_rank(comm))] threw an exception:\n"
+        err_str *= "ERROR: " * sprint(showerror, e; context=stdout) * "\n"
+        err_str *= sprint(Base.show_backtrace, catch_backtrace(); context=stdout) * "\n"
+        print(err_str)
         -1, nothing, nothing
     end
 
@@ -417,6 +455,51 @@ function test_conservation(test, P, N; maxcycle=10000, maxtime=10000, kwargs...)
 end
 
 
+function test_communication_model(
+    comm, P, comm_model_name, comm_model_kwargs,
+    use_threading, enough_processes, proc_in_grid
+)
+    comm_model = try
+        Armon.Communications.communication_model(comm_model_name; comm_model_kwargs...)
+    catch
+        # The model cannot be created (e.g. partitioned comms unsupported)
+        @test true skip=true
+        return
+    end
+    !Armon.supports_point_to_point(comm_model) && return
+
+    if comm_model isa Armon.Communications.NoCommunicationModel
+        # Since processes cannot communicate with each other, we restrict the test to only tests
+        # whose result does not depend on communications.
+        # Here we place ourselves in the case where we have 1 process along the X axis, with the Sod
+        # tube test: the result must be constant along the Y axis, therefore with communications or
+        # not, the result must be the same.
+        P[1] != 1 && return
+        test_cases = TEST_CASES_MPI ∩ (:Sod,)
+    else
+        test_cases = TEST_CASES_MPI
+    end
+
+    use_threading &= Armon.Communications.is_thread_safe(comm_model)
+    use_cache_blocking = Armon.Communications.is_async(comm_model)
+    async_cycle = use_cache_blocking
+
+    opts = (; use_threading, use_cache_blocking, async_cycle, comm_model, global_comm=comm)
+
+    @testset "Halo exchange" begin
+        test_halo_exchange(P, comm; opts...)
+    end
+
+    @testset "Reference" begin
+        @testset "$test with $type" for type in TEST_TYPES_MPI, test in test_cases
+            @MPI_test comm begin
+                test_reference("CPU", comm, test, type, P; global_comm=comm, opts...)
+            end skip=!enough_processes || !proc_in_grid
+        end
+    end
+end
+
+
 mpi_precomp_done = false
 function local_precompilation()
     mpi_precomp_done && return
@@ -449,15 +532,72 @@ function local_precompilation()
 end
 
 
+function mpi_local_thread_pinning()
+    rank = MPI.Comm_rank(MPI.COMM_WORLD)
+
+    node_local_comm = MPI.Comm_split_type(MPI.COMM_WORLD, MPI.COMM_TYPE_SHARED, rank)
+    local_size = MPI.Comm_size(node_local_comm)
+    local_rank = MPI.Comm_rank(node_local_comm)
+    is_local_root = local_rank == 0
+
+    if local_size * Threads.nthreads() > ThreadPinning.ncores()
+        # Not enough cores on the node
+        !is_local_root && return
+        println("[$rank] cannot use one Julia thread per CPU core: $local_size ranks on one node with \
+                 $(ThreadPinning.ncores()) cores want to use $(Threads.nthreads()) threads each")
+        MPI.Abort(MPI.COMM_WORLD, 3)
+    end
+
+    cores = (0:Threads.nthreads()-1) .+ local_rank * Threads.nthreads()
+    pinthreads(cores; warn=false)
+
+    # If two threads of different ranks are pinned to the same core, then deadlocks are near unavoidable.
+    rank_cores = collect(cores)
+    all_local_cores = MPI.Gather(rank_cores, node_local_comm)
+    all_local_ranks = MPI.Gather(rank, node_local_comm)  # local to global rank
+    MPI.free(node_local_comm)
+    (!is_local_root || allunique(all_local_cores)) && return
+
+    # Only the local root prints and aborts
+    node_name = gethostname()
+    core_count = maximum(all_local_cores)
+    if core_count > ThreadPinning.ncores()
+        # We are pinning to hyperthreads as there is too many threads per rank: same deadlock issue.
+        print("[$rank] ranks $(join(all_local_ranks, ", ", " and ")) at node '$node_name' \
+               use too many threads and are therefore pinned to hyperthreads.\n")
+    end
+
+    assigned_cores = zeros(Int, core_count)
+    for (i, core) in enumerate(all_local_cores)
+        local_rank = mod1(i, length(rank_cores))
+        if assigned_cores[core] == 0
+            assigned_cores[core] = local_rank
+        else
+            print("[$rank] core n°$core of node '$node_name' is already assigned to rank \
+                   $(all_local_ranks[local_rank])\n")
+        end
+    end
+
+    MPI.Abort(MPI.COMM_WORLD, 3)
+end
+
+
 total_proc_count = MPI.Comm_size(MPI.COMM_WORLD)
-total_core_count = if parse(Bool, get(ENV, "CI", "false"))
+
+if parse(Bool, get(ENV, "CI", "false"))
     # Limit the use of CPU cores only in the CI, as it can only run on a single node, with very
-    # limited resources. Using more cores than available can cause deadlocks.
-    Sys.CPU_THREADS
-elseif (core_limit = parse(Int, get(ENV, "TEST_MPI_CORE_LIMIT", "0")); core_limit > 0)
-    core_limit
+    # limited resources, which forces us to use hyperthreads. However, using more CPU-threads than
+    # available will cause deadlocks.
+    total_core_count = Sys.CPU_THREADS
 else
-    typemax(Int)
+    mpi_local_thread_pinning()
+
+    core_limit = parse(Int, get(ENV, "TEST_MPI_CORE_LIMIT", "0"))
+    if core_limit > 0
+        total_core_count = core_limit
+    else
+        total_core_count = typemax(Int)
+    end
 end
 
 
@@ -471,7 +611,7 @@ end
         (4, 4),
         (5, 2),
         (2, 5),
-        (5, 5)
+        (5, 5),
     )
         enough_processes = prod(P) ≤ total_proc_count
         if enough_processes
@@ -509,6 +649,13 @@ end
             end skip=!enough_processes || !proc_in_grid
         end
 
+        @testset "Match neighbours" begin
+            @testset "$threads - $grid_size" for threads in (1, 3, 8, 37), grid_size in ((4, 4), (8, 1), (16, 15))
+                (!enough_processes || !proc_in_grid) && continue
+                test_matched_distribution(P, comm, threads, grid_size)
+            end
+        end
+
         @testset "CPU" begin
             @testset "Reference" begin
                 @testset "$test with $type" for type in TEST_TYPES_MPI, test in TEST_CASES_MPI
@@ -531,9 +678,11 @@ end
             end
 
             @testset "Async cycle" begin
-                @MPI_test comm begin
-                    test_reference("CPU", comm, :Sod_circ, Float64, P; use_threading, async_cycle=true)
-                end skip=!enough_processes || !proc_in_grid
+                @testset "Reference" begin
+                    @MPI_test comm begin
+                        test_reference("CPU", comm, :Sod_circ, Float64, P; use_threading, async_cycle=true)
+                    end skip=!enough_processes || !proc_in_grid
+                end
 
                 @testset "No patience" begin
                     @MPI_test comm begin
@@ -544,6 +693,15 @@ end
                 @testset "Conservation" begin
                     @MPI_test comm begin
                         test_conservation(:Sod_circ, P, (100, 100); use_threading, async_cycle=true, global_comm=comm)
+                    end skip=!enough_processes || !proc_in_grid
+                end
+
+                @testset "Thread split comm" begin
+                    @MPI_test comm begin
+                        test_reference("CPU", comm, :Sod_circ, Float64, P;
+                            use_threading, async_cycle=true, global_comm=comm,
+                            thread_split_comm=true, workload_distribution=:weighted_sorted_scotch
+                        )
                     end skip=!enough_processes || !proc_in_grid
                 end
             end
@@ -557,6 +715,22 @@ end
                     @MPI_test comm begin
                         test_conservation(:Sod_circ, P, domain; use_threading, maxcycle=100, global_comm=comm)
                     end skip=!enough_processes || !proc_in_grid
+                end
+            end
+
+            @testset "Communication models" begin
+                @testset "$(comm_model_name)" for (comm_model_name, comm_model_kwargs) in (
+                    (:async_safe, (;)),
+                    (:async, (;)),
+                    (:sync, (;)),
+                    (:rma, (;)),
+                    (:partitioned, (; partition_size=56*4)),  # "default real cells in a block per axis" * "default number of ghost cells"
+                    (:no_comms, (;)),
+                )
+                    test_communication_model(
+                        comm, P, comm_model_name, comm_model_kwargs,
+                        use_threading, enough_processes, proc_in_grid
+                    )
                 end
             end
         end

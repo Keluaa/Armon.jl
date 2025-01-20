@@ -1,15 +1,15 @@
 
 @enumx TimeStepState::UInt32 begin
-    "`current_dt` is up-to-date and blocks can contribute to `next_dt`"
-    Ready
-    "All blocks contributed to `next_dt`, one thread will start the MPI reduction"
-    AllContributed
-    "The MPI reduction has started"
-    DoingMPI
-    "One thread is waiting for the MPI reduction to complete"
-    WaitingForMPI
-    "MPI is done: `current_dt` is up-to-date"
-    Done
+    "Blocks can to contribute to the next cycle's time step"
+    LocalReady
+    "One thread is starting the global reduction for the next cycle's time step"
+    GlobalStart
+    "The global reduction is in progress"
+    GlobalInProgress
+    "The global reduction is complete"
+    GlobalDone
+    "The next cycle's time step is available"
+    AllDone
 end
 
 
@@ -19,12 +19,13 @@ end
 Holds all information about the current time and time step for the current solver cycle. This struct
 is global and shared among all blocks.
 
-When reaching `next_time_step`, blocks will contribute to the calculation of the next time step. The
-last block doing so will start the MPI reduction. The first block reaching the start of the next
-cycle will wait until this reduction is completed, updating the `GlobalTimeStep` when so.
+When reaching `next_time_step`, blocks will contribute to the calculation of the time step for the
+next cycle. Once it is done, the global reduction among all MPI processes will start. Starting and
+completing the MPI reduction is done only by the main thread if `params.thread_split_comm == true`.
 """
 mutable struct GlobalTimeStep{T}
     state          :: Atomic{TimeStepState.T}
+    state_lock     :: Atomic{Int}
     cycle          :: Int
     time           :: T
     current_dt     :: T
@@ -32,31 +33,26 @@ mutable struct GlobalTimeStep{T}
     next_dt        :: Atomic{T}  # Time step accumulator
     contributions  :: Atomic{Int}
     expected_count :: Int
-    MPI_reduction  :: MPI.AbstractRequest
-    MPI_buffer     :: MPI.RBuffer
+    reduction_data :: AbstractCommunication{Vector{T}}
 
-    function GlobalTimeStep{T}() where {T}
+    function GlobalTimeStep{T}(params::ArmonParameters) where {T}
+        # TODO: wrap the model with a Communications.ThreadCollective, then remove most atomic/thread related logic
+        model = params.use_MPI ? params.reduc_model : Communications.NoCommunicationModel()
+        reduc_data = Communications.init_reduce_broadcast(model, MPI.MIN, Vector{T}, 1)
         return new{T}(
-            Atomic(TimeStepState.Ready),
-            0, zero(T),
-            zero(T), typemax(T), Atomic(typemax(T)),
+            Atomic(TimeStepState.LocalReady), Atomic(0),
+            0, zero(T), params.cst_dt ? params.Dt : zero(T),
+            typemax(T), Atomic(typemax(T)),
             Atomic(0), 0,
-            MPI.Request(), MPI.RBuffer(Ref{T}(), Ref{T}())
+            reduc_data
         )
     end
 end
 
 
-time_step_state(global_dt::GlobalTimeStep) = @atomic global_dt.state.x
-time_step_state!(global_dt::GlobalTimeStep, state::TimeStepState.T) = @atomic global_dt.state.x = state
-function replace_time_step_state!(global_dt::GlobalTimeStep, transition::Pair{TimeStepState.T, TimeStepState.T})
-    _, ok = @atomicreplace global_dt.state.x transition
-    return ok
-end
-
-
 function reset!(global_dt::GlobalTimeStep{T}, params::ArmonParameters{T}, block_count) where {T}
-    time_step_state!(global_dt, TimeStepState.Ready)
+    @atomic global_dt.state.x = TimeStepState.LocalReady
+    @atomic global_dt.state_lock.x = 0
     global_dt.cycle = 0
     global_dt.time = zero(T)
     global_dt.current_dt = params.cst_dt ? params.Dt : zero(T)
@@ -67,100 +63,189 @@ function reset!(global_dt::GlobalTimeStep{T}, params::ArmonParameters{T}, block_
 end
 
 
-function contribute_to_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}, dt::T; all_blocks=false) where {T}
+function can_touch_global_mpi_time_step(params::ArmonParameters)
+    # `thread_split_comm` imposes that all communications started by a thread are tested and completed
+    # by the same thread. For simplicity, the main thread is in charge of handling the global MPI
+    # reduction for the time step.
+    return !params.use_MPI || !params.thread_split_comm || Threads.threadid() == 1
+end
+
+
+function advance_time_step_state!(
+    params::ArmonParameters{T}, global_dt::GlobalTimeStep{T};
+    wait_until_global_done=false, force=false
+) where {T}
+    # We use a state machine to control the time step state transitions and actions, as it has a bit
+    # of complex logic to be thread-safe, MPI-safe, and support additional constraints enforced by
+    # `params.thread_split_comm`.
+
+    # The global lock ensures that only a single thread updates the state. Most MPI operations on the
+    # same request are thread-unsafe, so the lock has two purposes.
+    if force
+        Communications.wait_acquire_atomic_lock!(global_dt.state_lock)
+    else
+        # Always use non-blocking locks by default
+        locked = Communications.try_acquire_atomic_lock!(global_dt.state_lock)
+        !locked && return (@atomic global_dt.state.x)
+    end
+
+    state = @atomic global_dt.state.x
+
+    @label next_state
+    new_state = state
+
+    if state == TimeStepState.LocalReady
+        contributions = @atomic global_dt.contributions.x
+        if contributions == global_dt.expected_count
+            # All blocks have contributed: the local (block-wise) reduction is done
+            if params.use_MPI
+                new_state = TimeStepState.GlobalStart
+            else
+                global_dt.next_cycle_dt = @atomic global_dt.next_dt.x
+                new_state = TimeStepState.GlobalDone
+            end
+        end
+
+    elseif state == TimeStepState.GlobalStart
+        if can_touch_global_mpi_time_step(params)
+            send_buf = Communications.acquire_send_buffer!(global_dt.reduction_data)
+            send_buf[1] = @atomic global_dt.next_dt.x
+            Communications.release_send_buffer!(global_dt.reduction_data)
+            new_state = TimeStepState.GlobalInProgress
+        end
+
+    elseif state == TimeStepState.GlobalInProgress
+        if can_touch_global_mpi_time_step(params)
+            global_done = Communications.recv_completed(global_dt.reduction_data)
+            if wait_until_global_done
+                Communications.wait_recv_completed(global_dt.reduction_data)
+                global_done = true
+            end
+
+            if global_done
+                recv_buf = Communications.acquire_recv_buffer!(global_dt.reduction_data)
+                global_dt.next_cycle_dt = recv_buf[1]
+                Communications.release_recv_buffer!(global_dt.reduction_data)
+                new_state = TimeStepState.GlobalDone
+            end
+        end
+
+    elseif state == TimeStepState.GlobalDone
+        # Apply the CFL condition
+        prev_Δt = global_dt.current_dt
+        next_Δt = global_dt.next_cycle_dt
+
+        if (!isfinite(next_Δt) || next_Δt ≤ 0)
+            solver_error(:time, "Invalid next time step for cycle $(global_dt.cycle): $next_Δt")
+        elseif prev_Δt == 0
+            # First cycle time step initialization
+            next_Δt = params.cfl * next_Δt
+        else
+            # CFL condition and maximum increase per cycle of the time step
+            next_Δt = convert(T, min(params.cfl * next_Δt, 1.05 * prev_Δt))
+        end
+
+        global_dt.next_cycle_dt = next_Δt
+
+        if global_dt.current_dt == 0
+            # The current time step needs to be initialized (first cycle)
+            global_dt.current_dt = global_dt.next_cycle_dt
+        end
+
+        # Reset the local contributions
+        @atomic global_dt.next_dt.x = typemax(T)
+        @atomic global_dt.contributions.x = 0
+
+        new_state = TimeStepState.AllDone
+
+    elseif state == TimeStepState.AllDone
+        # Nothing more to do. It is now up to `next_cycle!` to reset the state.
+
+    else
+        error("unknown state: $state")
+    end
+
+    if new_state != state
+        @atomic global_dt.state.x = new_state
+        state = new_state
+        @goto next_state
+    end
+
+    Communications.release_atomic_lock!(global_dt.state_lock)
+    return state
+end
+
+
+function loop_until_time_step_available(params::ArmonParameters, global_dt::GlobalTimeStep)
+    !can_touch_global_mpi_time_step(params) && return 0
+
+    # This exist only to avoid a very specific and rare deadlock, where the main thread doesn't
+    # contribute to the local time step (as it has no assigned blocks), and we are in the first
+    # cycle, where we must wait for the time step to be available before finishing the cycle.
+    # Not my proudest lines of code...
+
+    Δt_state = advance_time_step_state!(params, global_dt; force=true, wait_until_global_done=true)
+    loop_count = 1
+    while Δt_state ≠ TimeStepState.AllDone
+        GC.safepoint()
+        µs_to_wait = 2^clamp(loop_count, 1, 13)
+        # Avoid to use Julia's `sleep` as this is supposed to be called in a multithreaded loop
+        Libc.systemsleep(µs_to_wait * 1e-6)
+        loop_count += 1
+        Δt_state = advance_time_step_state!(params, global_dt; force=true, wait_until_global_done=true)
+    end
+
+    return loop_count
+end
+
+
+function contribute_to_local_time_step!(params::ArmonParameters, global_dt::GlobalTimeStep{T}, dt::T; all_blocks=false) where {T}
     @atomic global_dt.next_dt.x min dt  # Atomic reduction
 
+    # Either the whole grid or a single block contributed
     contributed_blocks = all_blocks ? global_dt.expected_count : 1
     contributions = @atomic global_dt.contributions.x += contributed_blocks
+
     if contributions == global_dt.expected_count
-        if !replace_time_step_state!(global_dt, TimeStepState.Ready => TimeStepState.AllContributed)
-            return TimeStepState.AllContributed
-        end
-
-        # All blocks have contributed, therefore `global_dt.current_dt` is outdated: we can update
-        # it safely.
-        return update_dt!(params, global_dt)
+        # Try to advance the state only when all local blocks have contributed
+        return advance_time_step_state!(params, global_dt)
     else
-        return TimeStepState.Ready
+        return TimeStepState.LocalReady
     end
 end
 
 
-function wait_for_dt!(params::ArmonParameters, global_dt::GlobalTimeStep)
-    if !replace_time_step_state!(global_dt, TimeStepState.DoingMPI => TimeStepState.WaitingForMPI)
-        return TimeStepState.WaitingForMPI
+function can_contribute_to_local_time_step(params::ArmonParameters, global_dt::GlobalTimeStep, current_cycle)
+    global_dt.cycle != current_cycle && return false
+
+    dt_state = @atomic global_dt.state.x
+    if dt_state != TimeStepState.LocalReady
+        # The time step state is maybe not up-to-date with the MPI state, etc...
+        dt_state = wait_for_time_step!(params, global_dt)
     end
 
-    # Since this thread started working on a block without the time step for the new cycle, we
-    # consider that all blocks of that thread are in the same state, therefore loosing no time by
-    # using a blocking wait here. Only a single thread will wait.
-    params.use_MPI && wait(global_dt.MPI_reduction)
-    return update_dt!(params, global_dt)
+    return dt_state == TimeStepState.LocalReady
 end
 
 
-function update_dt!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where {T}
-    state = time_step_state(global_dt)
-    if state == TimeStepState.AllContributed
-        local_dt = @atomicswap global_dt.next_dt.x = typemax(T)
-        if params.use_MPI
-            global_dt.MPI_buffer.senddata[] = local_dt
-            global_dt.MPI_buffer.recvdata[] = typemax(T)
-            IAllreduce!(global_dt.MPI_buffer, MPI.MIN, params.cart_comm, global_dt.MPI_reduction)
-            time_step_state!(global_dt, TimeStepState.DoingMPI)
-            return TimeStepState.DoingMPI
-        else
-            new_dt = local_dt
-        end
-    elseif state == TimeStepState.WaitingForMPI
-        new_dt = global_dt.MPI_buffer.recvdata[]
-    else
-        error("unexpected time step state: $state")
-    end
-
-    previous_dt = global_dt.current_dt
-
-    if (!isfinite(new_dt) || new_dt ≤ 0)
-        solver_error(:time, "Invalid time step for cycle $(global_dt.cycle): $new_dt")
-    elseif previous_dt == 0
-        new_dt = params.cfl * new_dt
-    else
-        # CFL condition and maximum increase per cycle of the time step
-        new_dt = convert(T, min(params.cfl * new_dt, 1.05 * previous_dt))
-    end
-
-    global_dt.next_cycle_dt = new_dt
-
-    if global_dt.current_dt == 0
-        # The current time step needs to be initialized
-        global_dt.current_dt = global_dt.next_cycle_dt
-    end
-
-    @atomic global_dt.contributions.x = 0
-    time_step_state!(global_dt, TimeStepState.Done)
-    return TimeStepState.Done
-end
+wait_for_time_step!(params, global_dt) = advance_time_step_state!(params, global_dt; wait_until_global_done=true)
 
 
 function next_cycle!(params::ArmonParameters, global_dt::GlobalTimeStep{T}) where {T}
-    global_dt.cycle += 1
-    global_dt.time += global_dt.current_dt
-
     if params.cst_dt
         global_dt.current_dt = global_dt.next_cycle_dt = params.Dt
-        return
+    else
+        time_step_state = wait_for_time_step!(params, global_dt)
+        if time_step_state != TimeStepState.AllDone
+            error("expected time step to be done, got: $time_step_state")
+        end
     end
 
-    if time_step_state(global_dt) == TimeStepState.DoingMPI
-        wait_for_dt!(params, global_dt)
-    end
+    global_dt.time += global_dt.current_dt
+    global_dt.cycle += 1
 
-    dt_state = time_step_state(global_dt)
-    if dt_state != TimeStepState.Done
-        error("expected time step to be done, got: $dt_state")
-    end
-
-    time_step_state!(global_dt, TimeStepState.Ready)
+    # Reset the time step reduction state
+    @atomic global_dt.state.x = TimeStepState.LocalReady
     global_dt.current_dt = global_dt.next_cycle_dt
     global_dt.next_cycle_dt = typemax(T)
 end
@@ -181,7 +266,8 @@ Enumeration of each state a [`LocalTaskBlock`](@ref) can be in.
     Exchange
     Fluxes
     CellUpdate
-    Remap
+    RemapAdvection
+    RemapProjection
     EndCycle
     ErrorState
 end
@@ -213,17 +299,18 @@ const STEPS_VARS_FLAGS = (;
 # axis.
 # TODO: deduce them from kernel + steps definitions?
 const SOLVER_STEPS_VARS = Dict{SolverStep.T, Tuple{Bool, UInt16}}(
-    SolverStep.NewCycle     => (false, 0),
-    SolverStep.TimeStep     => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
-    SolverStep.InitTimeStep => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
-    SolverStep.NewSweep     => (false, 0),
-    SolverStep.EOS          => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
-    SolverStep.Exchange     => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
-    SolverStep.Fluxes       => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
-    SolverStep.CellUpdate   => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
-    SolverStep.Remap        => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4),
-    SolverStep.EndCycle     => (false, 0),
-    SolverStep.ErrorState   => (false, 0),
+    SolverStep.NewCycle        => (false, 0),
+    SolverStep.TimeStep        => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
+    SolverStep.InitTimeStep    => (false, STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.c),
+    SolverStep.NewSweep        => (false, 0),
+    SolverStep.EOS             => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
+    SolverStep.Exchange        => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.g),
+    SolverStep.Fluxes          => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.p | STEPS_VARS_FLAGS.c | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
+    SolverStep.CellUpdate      => (true,  STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.pˢ),
+    SolverStep.RemapAdvection  => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4),
+    SolverStep.RemapProjection => (false, STEPS_VARS_FLAGS.ρ | STEPS_VARS_FLAGS.E | STEPS_VARS_FLAGS.u | STEPS_VARS_FLAGS.v | STEPS_VARS_FLAGS.uˢ| STEPS_VARS_FLAGS.work_1 | STEPS_VARS_FLAGS.work_2 | STEPS_VARS_FLAGS.work_3 | STEPS_VARS_FLAGS.work_4),
+    SolverStep.EndCycle        => (false, 0),
+    SolverStep.ErrorState      => (false, 0),
 )
 
 
@@ -264,6 +351,38 @@ end
 
 
 """
+    SolverSchemes
+
+The different numerical schemes to use in the solver, and their parameters.
+"""
+struct SolverSchemes{Splitting, Riemann, RiemannLimiter, Projection, TestCase}
+    splitting         :: Splitting
+    riemann_scheme    :: Riemann
+    riemann_limiter   :: RiemannLimiter
+    projection_scheme :: Projection
+    test_case         :: TestCase
+
+    function SolverSchemes(
+        splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC
+    ) where {
+        S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
+    }
+        return new{S, R, RL, P, TC}(splitting, riemann, limiter, projection, test_case)
+    end
+end
+
+
+function SolverSchemes(params::ArmonParameters)
+    return SolverSchemes(
+        params.axis_splitting,
+        params.riemann_scheme, params.riemann_limiter,
+        params.projection_scheme,
+        params.test
+    )
+end
+
+
+"""
     SolverState
 
 Object containing all non-constant parameters needed to run the solver, as well as type-parameters
@@ -272,47 +391,42 @@ needed to avoid runtime dispatch.
 This object is local to a block (or set of blocks): multiple blocks could be at different steps of
 the solver at once.
 """
-mutable struct SolverState{T, Splitting, Riemann, RiemannLimiter, Projection, TestCase}
+mutable struct SolverState{T, Schemes <: SolverSchemes, StepsRangesArray <: AbstractArray{StepsRanges}, Queue <: AbstractStepQueue}
     step               :: SolverStep.T  # Solver step the associated block is at. Unused if `params.async_cycle == false`
     dx                 :: T    # Space step along the current axis
     dt                 :: T    # Scaled time step for the current cycle
     axis               :: Axis.T
     axis_splitting_idx :: Int
     cycle              :: Int  # Local cycle of the block
-    splitting          :: Splitting
-    riemann_scheme     :: Riemann
-    riemann_limiter    :: RiemannLimiter
-    projection_scheme  :: Projection
-    test_case          :: TestCase
+    schemes            :: Schemes
     global_dt          :: GlobalTimeStep{T}
-    steps_ranges       :: StepsRanges
+    steps_ranges       :: Vector{StepsRanges}
+    device_ranges      :: StepsRangesArray
+    queue              :: Queue  # Queue to schedule the solver steps to the device
     blk_logs           :: Vector{BlockLogEvent}
     total_stalls       :: Int
 
-    function SolverState{T}(
-        splitting::S, riemann::R, limiter::RL, projection::P, test_case::TC, global_dt, steps_ranges, log_size
-    ) where {
-        T, S <: SplittingMethod, R <: RiemannScheme, RL <: Limiter, P <: ProjectionScheme, TC <: TestCase
-    }
+    function SolverState{T}(schemes::Schemes, global_dt, steps_ranges, device_steps_ranges, queue::Queue, log_size) where {T, Schemes, Queue}
         blk_logs = Vector{BlockLogEvent}()
         log_size > 0 && sizehint!(blk_logs, log_size)
-        return new{T, S, R, RL, P, TC}(
+        return new{T, Schemes, typeof(device_steps_ranges), Queue}(
             SolverStep.NewCycle, zero(T), zero(T), Axis.X, 1, 0,
-            splitting, riemann, limiter, projection, test_case,
-            global_dt, steps_ranges, blk_logs, 0
+            schemes, global_dt, steps_ranges, device_steps_ranges, queue,
+            blk_logs, 0
         )
     end
 end
 
 
 function SolverState(params::ArmonParameters{T}, global_dt::GlobalTimeStep{T}) where {T}
+    schemes = SolverSchemes(params)
+    if params.use_step_queue
+        queue = StepQueue(params.device, params.step_queue_capacity)
+    else
+        queue = NoQueue(params.device)
+    end
     return SolverState{T}(
-        params.axis_splitting,
-        params.riemann_scheme, params.riemann_limiter,
-        params.projection_scheme,
-        params.test,
-        global_dt,
-        first(params.steps_ranges),
+        schemes, global_dt, params.steps_ranges, params.device_steps_ranges, queue,
         params.estimated_blk_log_size
     )
 end
@@ -341,7 +455,17 @@ function update_solver_state!(params::ArmonParameters, state::SolverState, axis:
     state.dx = params.domain_size[i_ax] / params.global_grid[i_ax]
     state.dt = state.global_dt.current_dt * dt_factor
     state.axis = axis
-    state.steps_ranges = params.steps_ranges[i_ax]
+end
+
+
+function need_to_update_time_step(params::ArmonParameters, state::SolverState)
+    params.cst_dt && return false
+    state.dt == 0 && return true  # first cycle
+    if params.dt_on_even_cycles
+        return iseven(state.global_dt.cycle)
+    else
+        return true
+    end
 end
 
 
@@ -370,6 +494,28 @@ function reset!(state::SolverState{T}) where {T}
     empty!(state.blk_logs)
     state.total_stalls = 0
 end
+
+
+"""
+    BasicSolverState
+
+Immutable version of a lightweight [`SolverState`](@ref), for use in GPU kernels.
+"""
+struct BasicSolverState{T, Schemes <: SolverSchemes, StepsRangesArray <: AbstractArray{StepsRanges}}
+    dx                :: T
+    dt                :: T
+    axis              :: Axis.T
+    schemes           :: Schemes
+    steps_ranges      :: StepsRangesArray
+end
+
+BasicSolverState(solver_state::SolverState) =
+    BasicSolverState(solver_state.dx, solver_state.dt, solver_state.axis, solver_state.schemes, solver_state.device_ranges)
+
+Base.eltype(::ObjOrType{BasicSolverState{T}}) where {T} = T
+
+Adapt.adapt_structure(to, bss::BasicSolverState) =
+    BasicSolverState(bss.dx, bss.dt, bss.axis, bss.schemes, Adapt.adapt(to, bss.steps_ranges))
 
 
 """

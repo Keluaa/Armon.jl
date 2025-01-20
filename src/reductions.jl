@@ -23,7 +23,7 @@ end
 @fast function dtCFL_kernel(params::ArmonParameters{T, CPU_HP}, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2, T}) where {T}
     # CPU reduction
     (; u, v, c) = block_device_data(blk)
-    range = block_domain_range(blk.size, state.steps_ranges.real_domain)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
@@ -35,7 +35,7 @@ end
         return res
     else
         # Reduction using explicit multithreading, since the caller isn't multithreaded
-        threads_res = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_res = Vector{T}(undef, params.nthreads)
         threads_res .= typemax(T)
 
         @threaded for j in range.col
@@ -64,7 +64,7 @@ end
 
 function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, Δx::NTuple{2})
     # GPU generic reduction
-    range = block_domain_range(blk.size, state.steps_ranges.full_domain)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].full_domain)
     blk_data = block_device_data(blk)
 
     if params.use_two_step_reduction
@@ -83,7 +83,12 @@ function dtCFL_kernel(params::ArmonParameters, state::SolverState, blk::LocalTas
         u_v    = @view blk_data.u[lin_range]
         v_v    = @view blk_data.v[lin_range]
         mask_v = @view blk_data.mask[lin_range]
-        return mapreduce(dtCFL_kernel_reduction, min, u_v, v_v, c_v, mask_v, Δx...)  # TODO: check if the mismatched dimensions are correctly handled on GPU (`dx` and `dy` are scalars)
+
+        # Since GPUArrays.jl doesn't define a clean way of reducing with arrays and scalars, we must
+        # put `Δx` in a closure.
+        dtCFL_kernel_reduction_func(u, v, c, mask) = dtCFL_kernel_reduction(u, v, c, mask, Δx...)
+
+        return mapreduce(dtCFL_kernel_reduction_func, min, u_v, v_v, c_v, mask_v)
     end
 end
 
@@ -96,7 +101,7 @@ end
 
 function local_time_step(params::ArmonParameters{T}, state::SolverState, grid::BlockGrid) where {T}
     mt_reduction = params.use_threading && params.use_cache_blocking
-    threads_res = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
+    threads_res = Vector{T}(undef, mt_reduction ? params.nthreads : 1)
     threads_res .= typemax(T)
 
     @iter_blocks for blk in grid
@@ -127,56 +132,40 @@ initial cycle.
 
 If `blk` is given, its contribution is only added to the `state.global_dt` (the [`GlobalTimeStep`](@ref)).
 Passing the whole block `grid` will block until the new time step is computed.
+
+Return if the time step for the next cycle cannot be computed, and we must wait before doing so.
 """
-function next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock; already_contributed=false)
-    if params.cst_dt
-        state.dt = params.Dt
-        return false
-    elseif params.dt_on_even_cycles && !iseven(state.global_dt.cycle) && state.dt != 0
-        return false  # No time step to compute
-    end
+function next_time_step(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
+    !need_to_update_time_step(params, state) && return false
 
-    dt_state = time_step_state(state.global_dt)
-    if dt_state == TimeStepState.DoingMPI
-        dt_state = wait_for_dt!(params, state.global_dt)
-    end
+    # We may need to wait for other blocks/sub-domains beforehand
+    !can_contribute_to_local_time_step(params, state.global_dt, state.cycle) && return true
 
-    if dt_state == TimeStepState.Done
-        already_contributed = true
-    elseif dt_state != TimeStepState.Ready
-        return true
-    end
+    # Compute this block's contribution to the next cycle's time step
+    local_dt = local_time_step(params, state, blk)
+    contribute_to_local_time_step!(params, state.global_dt, local_dt)
 
-    if !already_contributed
-        # Compute this block's contribution to the next cycle's time step
-        local_dt = local_time_step(params, state, blk)
-        contribute_to_dt!(params, state.global_dt, local_dt)
-    end
-
-    # Update the time step for this cycle
+    # Update the time step for the current cycle
     state.dt = state.global_dt.current_dt
 
-    # If the time step is 0, we must wait for a new global time step (happens at initialization)
-    return state.dt == 0
+    return false
+end
+
+
+function fetch_time_step(params::ArmonParameters, state::SolverState, ::LocalTaskBlock)
+    # The block already contributed, and we were waiting for a new time step. Is it available?
+    !need_to_update_time_step(params, state) && return true
+    if (@atomic state.global_dt.state.x) == TimeStepState.AllDone
+        state.dt = state.global_dt.current_dt
+        return true
+    else
+        return false
+    end
 end
 
 
 function next_time_step(params::ArmonParameters, state::SolverState, grid::BlockGrid)
-    if params.cst_dt
-        state.dt = params.Dt
-        return false
-    elseif params.dt_on_even_cycles && !iseven(state.global_dt.cycle) && state.dt != 0
-        return false  # No time step to compute
-    end
-
-    dt_state = time_step_state(state.global_dt)
-    if dt_state == TimeStepState.DoingMPI
-        dt_state = wait_for_dt!(params, state.global_dt)
-    end
-
-    if dt_state != TimeStepState.Ready
-        return true
-    end
+    !need_to_update_time_step(params, state) && return false
 
     # Compute the contribution of all blocks to the next cycle's time step
     @section "local_time_step" begin
@@ -184,16 +173,16 @@ function next_time_step(params::ArmonParameters, state::SolverState, grid::Block
     end
 
     @section "time_step_reduction" begin
-        contribute_to_dt!(params, state.global_dt, local_dt; all_blocks=true)
+        contribute_to_local_time_step!(params, state.global_dt, local_dt; all_blocks=true)
     end
 
     if state.dt == 0
-        wait_for_dt!(params, state.global_dt)
-        state.dt = state.global_dt.current_dt = state.global_dt.next_cycle_dt
-    else
-        # Update the time step for this cycle
-        state.dt = state.global_dt.current_dt
+        # Force a blocking wait for the first cycle's time step
+        wait_for_time_step!(params, state.global_dt)
     end
+
+    # Update the time step for this cycle
+    state.dt = state.global_dt.current_dt
 
     return false
 end
@@ -219,7 +208,7 @@ end
 @fast function conservation_vars(params::ArmonParameters{T, CPU_HP}, blk::LocalTaskBlock) where {T}
     # CPU reduction
     (; ρ, E) = block_device_data(blk)
-    range = block_domain_range(blk.size, blk.state.steps_ranges.real_domain)
+    range = block_domain_range(blk.size, blk.state.steps_ranges[Int(blk.state.axis)].real_domain)
 
     if params.use_cache_blocking
         # Reduction exploiting multithreading from the caller
@@ -230,8 +219,8 @@ end
         end
     else
         # Reduction using explicit multithreading, since the caller isn't multithreaded
-        threads_mass   = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
-        threads_energy = Vector{T}(undef, params.use_threading ? Threads.nthreads() : 1)
+        threads_mass   = Vector{T}(undef, params.nthreads)
+        threads_energy = Vector{T}(undef, params.nthreads)
         threads_mass   .= 0
         threads_energy .= 0
 
@@ -270,7 +259,7 @@ end
 
 function conservation_vars(params::ArmonParameters{T}, blk::LocalTaskBlock) where {T}
     # GPU generic reduction
-    range = block_domain_range(blk.size, blk.state.steps_ranges.full_domain)
+    range = block_domain_range(blk.size, blk.state.steps_ranges[Int(blk.state.axis)].full_domain)
     blk_data = block_device_data(blk)
 
     if params.use_two_step_reduction
@@ -300,23 +289,36 @@ end
 
 function conservation_vars(params::ArmonParameters{T}, grid::BlockGrid) where {T}
     mt_reduction = params.use_threading && params.use_cache_blocking
-    threads_mass   = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
-    threads_energy = Vector{T}(undef, mt_reduction ? Threads.nthreads() : 1)
+    threads_mass   = Vector{T}(undef, mt_reduction ? params.nthreads : 1)
+    threads_energy = Vector{T}(undef, mt_reduction ? params.nthreads : 1)
     threads_mass   .= 0
     threads_energy .= 0
 
+    # Sum the energy and mass over all blocks of each thread
     @iter_blocks for blk in grid
         tid = mt_reduction ? Threads.threadid() : 1
         (threads_mass[tid], threads_energy[tid]) =
             (threads_mass[tid], threads_energy[tid]) .+ conservation_vars(params, blk)
     end
 
+    # Local reduction over all threads
     total_mass   = sum(threads_mass)
     total_energy = sum(threads_energy)
 
+    # Global reduction over all MPI processes
+    # TODO: this is wrong! we MUST ensure that the right thread associated with the communicator
+    #  of `params.reduc_model` is doing the reduction
+    #  => how do we run a task on a specific thread in Julia ?
     if params.use_MPI
-        total_mass   = MPI.Allreduce(total_mass,   MPI.SUM, params.cart_comm)
-        total_energy = MPI.Allreduce(total_energy, MPI.SUM, params.cart_comm)
+        global_reduction = Communications.init_reduce_broadcast(params.reduc_model, +, Vector{T}, 2)
+
+        send_buf = Communications.acquire_send_buffer!(global_reduction)
+        send_buf .= (total_mass, total_energy)
+        Communications.release_send_buffer!(global_reduction)
+
+        recv_buf = Communications.acquire_recv_buffer!(global_reduction)
+        (total_mass, total_energy) = recv_buf
+        Communications.release_recv_buffer!(global_reduction)
     end
 
     return total_mass, total_energy

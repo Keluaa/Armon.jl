@@ -149,20 +149,20 @@ end
 #
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, tc::TestCase)
-    range = block_domain_range(blk.size, state.steps_ranges.EOS)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].EOS)
     gamma = eltype(blk)(specific_heat_ratio(tc))
     return perfect_gas_EOS!(params, block_device_data(blk), range, gamma)
 end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock, ::Bizarrium)
-    range = block_domain_range(blk.size, state.steps_ranges.EOS)
+    range = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].EOS)
     return bizarrium_EOS!(params, block_device_data(blk), range)
 end
 
 
 function update_EOS!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    return update_EOS!(params, state, blk, state.test_case)
+    return update_EOS!(params, state, blk, state.schemes.test_case)
 end
 
 
@@ -195,13 +195,13 @@ function init_test(params::ArmonParameters, blk::LocalTaskBlock)
         # currently cannot be used by other threads.
         target_numa_node = NUMA.current_numa_node()
         move_pages(blk, target_numa_node)
-        params.lock_memory && lock_pages(blk)
+        params.lock_memory && lock_pages(params.device, blk)
 
         # Do the exact same with the MPI buffers associated with the block
         for neighbour in blk.neighbours
             !(neighbour isa RemoteTaskBlock) && continue
             move_pages(neighbour, target_numa_node)
-            params.lock_memory && lock_pages(neighbour)
+            params.lock_memory && lock_pages(params.device, neighbour)
         end
     end
 end
@@ -215,7 +215,7 @@ end
 
 
 function cell_update!(params::ArmonParameters, state::SolverState, blk::LocalTaskBlock)
-    blk_domain = block_domain_range(blk.size, state.steps_ranges.cell_update)
+    blk_domain = block_domain_range(blk.size, state.steps_ranges[Int(state.axis)].cell_update)
     blk_data = block_device_data(blk)
     u = state.axis == Axis.X ? blk_data.u : blk_data.v
     s = stride_along(blk.size, state.axis)

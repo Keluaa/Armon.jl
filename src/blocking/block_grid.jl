@@ -27,13 +27,17 @@ struct BlockGrid{
     Ghost,
     BS          <: StaticBSize{<:Any, Ghost},
     SState      <: SolverState,
-    Device
-}
+    Device,
+    DeviceGrid  <: Union{DeviceBlockGrid, Nothing},
+    DeviceGridRef <: Union{AbstractArray{<:DeviceBlockGrid, 0}, Nothing},
+} <: AbstractBlockGrid{T, Ghost, BS, Device}
     grid_size          :: NTuple{2, Int}  # Size of the grid, including all local blocks
     static_sized_grid  :: NTuple{2, Int}  # Size of the grid of statically sized local blocks
     cell_size          :: NTuple{2, Int}  # Number of real cells in each direction
     edge_size          :: NTuple{2, Int}  # Number of real cells in edge blocks in each direction (only along non-edge directions)
     device             :: Device
+    device_grid        :: DeviceGrid      # Device mirror of this structure, or `nothing` if disabled
+    device_grid_ref    :: DeviceGridRef   # Device pointer to `device_grid`
     global_dt          :: GlobalTimeStep{T}
     blocks             :: Vector{LocalTaskBlock{DeviceArray, HostArray, BS, SState}}
     edge_blocks        :: Vector{LocalTaskBlock{DeviceArray, HostArray, DynamicBSize{Ghost}, SState}}
@@ -41,6 +45,14 @@ struct BlockGrid{
     threads_workload   :: Vector{Vector{CartesianIndex{2}}}  # `tid => block index` map for all threads, distributing each block to each thread
     threads_logs       :: Vector{Vector{ThreadLogEvent}}
 end
+
+
+device(grid::BlockGrid) = grid.device
+grid_sizes(grid::BlockGrid) =
+    (; grid=grid.grid_size, static_grid=grid.static_sized_grid, real_cells=grid.cell_size, edge=grid.edge_size)
+device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
+host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
+buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
 
 
 function BlockGrid(params::ArmonParameters{T}) where {T}
@@ -56,7 +68,7 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     device_array = Core.Compiler.return_type(device_array, Tuple{UndefInitializer, Int})
     host_array = Core.Compiler.return_type(host_array, Tuple{UndefInitializer, Int})
 
-    global_dt = GlobalTimeStep{T}()
+    global_dt = GlobalTimeStep{T}(params)
     state_type = typeof(SolverState(params, global_dt))
 
     ghost = params.nghost
@@ -66,39 +78,73 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
     blocks = Vector{LocalTaskBlock{device_array, host_array, typeof(static_size), state_type}}(undef, static_sized_block_count)
 
     # Container for blocks on the edges, with a non-uniform size
+    edge_size = remainder_block_size .- 2*ghost
     edge_blocks = Vector{LocalTaskBlock{device_array, host_array, DynamicBSize{ghost}, state_type}}(undef, dyn_sized_block_count)
 
     # Container for remote blocks, neighbours of blocks on the edges. Corners are excluded.
-    buffer_array = params.gpu_aware ? device_array : host_array
+    base_buffer_array = params.gpu_aware ? device_array : host_array
+    # TODO: what if we have different models per thread, with different buffer types?
+    buffer_array = Communications.buffer_type(first(params.comm_models), base_buffer_array)
     grid_perimeter = sum(grid_size) * length(grid_size)  # (nx+ny) * 2
     remote_blocks = Vector{RemoteTaskBlock{buffer_array}}(undef, grid_perimeter)
+
+    if !Communications.is_async(first(params.comm_models))
+        # TODO: enable support for sync comms when there is only a single block per grid
+        #   then the "only" thing to do is impose an order for left/right exchanges (e.g. even ranks
+        #   do the left xchg first, odd ranks do the right one first)
+        solver_error(:config, "synchronous communications are not supported")
+    end
 
     threads_workload = thread_workload_distribution(params)
 
     log_size = params.log_blocks ? min(params.maxcycle, 1000) : 0
-    threads_logs = map(1:Threads.nthreads()) do _
+    threads_logs = map(1:params.nthreads) do _
         logs = Vector{ThreadLogEvent}()
         sizehint!(logs, log_size)
         return logs
     end
 
+    # TODO: enabling device-side grid should be broader than this condition
+    if params.use_tiled_state_machine
+        # `dev_block_grid` is the `DeviceBlockGrid` object manipulable only from the host
+        dev_block_grid = DeviceBlockGrid(
+            eltype(blocks), eltype(edge_blocks), eltype(remote_blocks), params.device,
+            (; grid=grid_size, static_grid=static_sized_grid, real_cells=cell_size, edge=edge_size),
+            (; static=static_sized_block_count, edge=dyn_sized_block_count, remote=grid_perimeter)
+        )
+        # `dev_block_grid_ref` is a pointer to a `DeviceBlockGrid` object manipulable from the device
+        dev_block_grid_ref = put_block_grid_on_device(dev_block_grid)
+    else
+        dev_block_grid = nothing
+        dev_block_grid_ref = nothing
+    end
+
     # Main grid container
-    edge_size = remainder_block_size .- 2*ghost
     grid = BlockGrid{
         T, device_array, host_array, buffer_array,
         ghost, typeof(static_size),
-        state_type, typeof(params.device)
+        state_type, typeof(params.device), typeof(dev_block_grid), typeof(dev_block_grid_ref)
     }(
-        grid_size, static_sized_grid, cell_size, edge_size, params.device, global_dt,
+        grid_size, static_sized_grid, cell_size, edge_size,
+        params.device, dev_block_grid, dev_block_grid_ref, global_dt,
         blocks, edge_blocks, remote_blocks, threads_workload, threads_logs
     )
+
+    # Compute the total amount of cells in remote buffers for each axis. Since both sides of an axis
+    # share the same dimensions, they will have the same size.
+    total_side_buffer_sizes = map(instances(Axis.T)) do axis
+        # Total buffer size is the amount of real cells along other axes, times the number of ghost
+        # cells (for the current axis/side, which is always `nghost`).
+        side_size = ifelse.(instances(Axis.T) .== axis, params.nghost, cell_size)
+        return prod(side_size)
+    end
 
     # Allocate all local and remote blocks
     # Non-static (edge) blocks are placed on the right and top sides.
     # Remote blocks are placed on the edge of the grid.
     # Multithreading is necessary here in order to guarentee that no array is shared between two
     # NUMA node (when we move the pages afterward), which can happen when allocations are done
-    # sequentially.
+    # sequentially, as well as for properly initializing MPI communications.
     inner_grid = CartesianIndices(static_sized_grid)
     device_kwargs = alloc_device_kwargs(params)
     host_kwargs = alloc_host_kwargs(params)
@@ -140,7 +186,13 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
                     neighbour = neighbour_at(params, side)  # MPI rank
                     global_pos = CartesianIndex(params.cart_coords .+ offset_to(side))  # pos in the cart_comm
 
-                    RemoteTaskBlock{buffer_array}(buffer_size, remote_blk_pos, neighbour, global_pos, params.cart_comm, side)
+                    total_side_buffer_size = total_side_buffer_sizes[Integer(axis_of(side))]
+
+                    comm_model = params.comm_models[tid]
+                    RemoteTaskBlock{buffer_array}(
+                        comm_model, neighbour, global_pos, remote_blk_pos,
+                        base_buffer_array, buffer_size, side, total_side_buffer_size
+                    )
                 else
                     # "Fake" remote block for non-existant neighbour at the edge of the global domain
                     RemoteTaskBlock{buffer_array}(remote_blk_pos)
@@ -151,32 +203,53 @@ function BlockGrid(params::ArmonParameters{T}) where {T}
         end
     end
 
-    # Initialize all block neighbours references and exchanges
-    for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
-        left_idx   = idx + CartesianIndex(offset_to(Side.Left))
-        right_idx  = idx + CartesianIndex(offset_to(Side.Right))
-        bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom))
-        top_idx    = idx + CartesianIndex(offset_to(Side.Top))
+    try
+        # Initialize all block neighbours references and exchanges
+        for idx in CartesianIndex(1, 1):CartesianIndex(grid_size)
+            left_idx   = idx + CartesianIndex(offset_to(Side.Left))
+            right_idx  = idx + CartesianIndex(offset_to(Side.Right))
+            bottom_idx = idx + CartesianIndex(offset_to(Side.Bottom))
+            top_idx    = idx + CartesianIndex(offset_to(Side.Top))
 
-        this_block   = block_at(grid, idx)
-        left_block   = block_at(grid, left_idx)
-        right_block  = block_at(grid, right_idx)
-        bottom_block = block_at(grid, bottom_idx)
-        top_block    = block_at(grid, top_idx)
-        this_block.neighbours = Neighbours{TaskBlock}((left_block, right_block, bottom_block, top_block))
+            this_block   = block_at(grid, idx)
+            left_block   = block_at(grid, left_idx)
+            right_block  = block_at(grid, right_idx)
+            bottom_block = block_at(grid, bottom_idx)
+            top_block    = block_at(grid, top_idx)
+            this_block.neighbours = Neighbours{TaskBlock}((left_block, right_block, bottom_block, top_block))
 
-        # Blocks sharing a side must share the same `BlockInterface`
-        this_block.exchanges = Neighbours{BlockInterface}((
-            isdefined(left_block,   :exchanges) ? left_block.exchanges[Int(Side.Right)] : BlockInterface(),
-            isdefined(right_block,  :exchanges) ? right_block.exchanges[Int(Side.Left)] : BlockInterface(),
-            isdefined(bottom_block, :exchanges) ? bottom_block.exchanges[Int(Side.Top)] : BlockInterface(),
-            isdefined(top_block,    :exchanges) ? top_block.exchanges[Int(Side.Bottom)] : BlockInterface(),
-        ))
+            # Blocks sharing a side must share the same `BlockInterface`
+            this_block.exchanges = Neighbours{BlockInterface}((
+                isdefined(left_block,   :exchanges) ? left_block.exchanges[Int(Side.Right)] : BlockInterface(),
+                isdefined(right_block,  :exchanges) ? right_block.exchanges[Int(Side.Left)] : BlockInterface(),
+                isdefined(bottom_block, :exchanges) ? bottom_block.exchanges[Int(Side.Top)] : BlockInterface(),
+                isdefined(top_block,    :exchanges) ? top_block.exchanges[Int(Side.Bottom)] : BlockInterface(),
+            ))
 
-        for blk in this_block.neighbours
-            blk isa RemoteTaskBlock || continue
-            blk.neighbour = this_block
+            for blk in this_block.neighbours
+                blk isa RemoteTaskBlock || continue
+                blk.neighbour = this_block
+            end
         end
+    catch e
+        !(e isa UndefRefError) && rethrow(e)
+        # In case some threads where not running for some reason when initializing blocks, some of
+        # them will remain unassigned. This can happen if Polyester.jl was previously interrupted
+        # in a parallel region, and threads need to be reset.
+        unassigned_blocks      = count(i -> !isassigned(grid.blocks,      i), eachindex(grid.blocks))
+        unassigned_edge_blocks = count(i -> !isassigned(grid.edge_blocks, i), eachindex(grid.edge_blocks))
+        if unassigned_blocks + unassigned_edge_blocks > 0
+            Polyester.reset_threads!()
+            error("$unassigned_blocks blocks and $unassigned_edge_blocks \
+                edge blocks are unassigned, this is likely a multi-threading problem.\n\
+                Call `Polyester.reset_threads!()` if using Polyester.jl, as it may solve the issue.")
+        else
+            rethrow(e)
+        end
+    end
+
+    if !isnothing(grid.device_grid)
+        init_device_block_grid!(grid.device_grid, grid)
     end
 
     return grid
@@ -342,7 +415,7 @@ of size `domain_size`.
     `block_size`.
 
 !!! note
-    
+
     In case `domain_size` is smaller than `block_size .- 2*ghost` along any axis, the grid will
     contain only edge blocks.
 """
@@ -517,14 +590,6 @@ function block_size_at(idx, grid_size, static_sized_grid, block_size, remainder_
 end
 
 
-device_array_type(::ObjOrType{BlockGrid{<:Any, D}}) where {D} = D
-host_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, H}}) where {H} = H
-buffer_array_type(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, B}}) where {B} = B
-ghosts(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, Ghost}}) where {Ghost} = Ghost
-static_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = block_size(BS)
-real_block_size(::ObjOrType{BlockGrid{<:Any, <:Any, <:Any, <:Any, G, BS}}) where {G, BS} = real_block_size(BS)
-
-
 """
     all_blocks(grid::BlockGrid)
 
@@ -554,6 +619,7 @@ buffers_on_device(::ObjOrType{BlockGrid{<:Any, D, H, B}}) where {D, H, B} = D ==
 
 function reset!(grid::BlockGrid, params::ArmonParameters)
     reset!(grid.global_dt, params, prod(grid.grid_size))
+    !isnothing(grid.device_grid) && reset!(grid.device_grid)
     foreach(empty!, grid.threads_logs)
     for blk in all_blocks(grid)
         reset!(blk)
@@ -591,7 +657,7 @@ push_log!(grid::BlockGrid, tid, thread_log::ThreadLogEvent) = push!(grid.threads
 `(device_memory, host_memory)` required for `params`.
 
 MPI buffers size are included in the appropriate field depending on `params.gpu_aware`.
-`params.use_MPI` and `params.neighbours` is taken into account.
+`params.use_MPI` and `params.neighbours` are taken into account.
 
 If `device_is_host`, then, `device_memory` only includes memory required by data arrays and MPI buffers.
 """
@@ -703,7 +769,7 @@ end
 memory_required(N::Tuple, block_size::Tuple, ghost::Int, device_array, host_array, buffer_array) =
     memory_required(N, block_size, ghost, device_array, host_array, buffer_array,
         # Default `SolverState` for a good enough estimation
-        SolverState{T, GodunovSplitting, RiemannGodunov, MinmodLimiter, EulerProjection, Sod})
+        SolverState{T, SolverSchemes{GodunovSplitting, RiemannGodunov, MinmodLimiter, EulerProjection, Sod}})
 
 memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
     memory_required(N, block_size, ghost, Vector{T}, Vector{T}, Vector{T})
@@ -715,7 +781,7 @@ memory_required(N::Tuple, block_size::Tuple, ghost::Int, ::Type{T}) where {T} =
 Copies device data of all blocks to the host data. A no-op if the device is the host.
 """
 function device_to_host!(grid::BlockGrid{<:Any, D, H}) where {D, H}
-    for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         device_to_host!(blk)
     end
 end
@@ -729,7 +795,7 @@ device_to_host!(::BlockGrid{<:Any, D, D}) where {D} = nothing
 Copies host data of all blocks to the device data. A no-op if the device is the host.
 """
 function host_to_device!(grid::BlockGrid{<:Any, D, H}) where {D, H}
-    for blk in all_blocks(grid)
+    @iter_blocks for blk in grid
         host_to_device!(blk)
     end
 end
@@ -745,9 +811,8 @@ which is in charge of working on that block.
 """
 function move_pages(grid::BlockGrid)
     numa_map = tid_to_numa_node_map()
-    for (tid, blks_pos) in enumerate(grid.threads_workload), blk_pos in blks_pos
-        target_numa = numa_map[tid]
-        blk = block_at(grid, blk_pos)
+    @iter_blocks for blk in grid
+        target_numa = numa_map[Threads.threadid()]
         move_pages(blk, target_numa)
 
         # Make sure the MPI buffers are as close as the data they will be interacting with
@@ -760,14 +825,14 @@ end
 
 
 """
-    lock_pages(grid::BlockGrid)
+    lock_pages(device, grid::BlockGrid)
 
 Locks the pages of all blocks of the `grid`, including remote blocks.
 """
-function lock_pages(grid::BlockGrid)
-    foreach(lock_pages, grid.blocks)
-    foreach(lock_pages, grid.edge_blocks)
-    foreach(lock_pages, grid.remote_blocks)
+function lock_pages(device, grid::BlockGrid)
+    foreach(Base.Fix1(lock_pages, device), grid.blocks)
+    foreach(Base.Fix1(lock_pages, device), grid.edge_blocks)
+    foreach(Base.Fix1(lock_pages, device), grid.remote_blocks)
 end
 
 
@@ -820,6 +885,10 @@ function block_origin(grid::BlockGrid, pos, include_ghosts=false)
         )
     end
 end
+
+
+write_workload_distribution(filename, params::ArmonParameters, grid::BlockGrid; kwargs...) =
+    write_workload_distribution(filename, params, grid.grid_size, grid.threads_workload; kwargs...)
 
 
 function print_grid_dimensions(
@@ -898,7 +967,8 @@ function Base.show(io::IO, ::MIME"text/plain", grid::BlockGrid{T, D, H, B, Ghost
     print_parameter(io, pad, "remote buffers", "stored on the $remote_dev_str")
     print_parameter(io, pad, "device", grid.device)
     print_parameter(io, pad, "device array", D)
-    print_parameter(io, pad, "host array", D == H ? "same as device" : H; nl=false)
+    print_parameter(io, pad, "host array", D == H ? "same as device" : H)
+    print_parameter(io, pad, "device mirror", !isnothing(grid.device_grid); nl=false)
 end
 
 
