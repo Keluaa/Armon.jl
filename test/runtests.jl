@@ -85,7 +85,7 @@ function do_tests(tests_to_do)
 
     run_file(file_name) = include(joinpath(@__DIR__, file_name))
 
-    ts = @testset "Armon.jl" begin
+    ts = @testset "Armon.jl" verbose=true begin
         for test in tests_to_do
             if !is_root
                 if     test === :mpi        run_file("mpi.jl")

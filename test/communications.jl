@@ -2,7 +2,7 @@
 using MPI
 using ThreadPinning
 
-DEADLOCK_CHECK = parse(Bool, get(ENV, "DEADLOCK_CHECK", "true"))
+include("deadlock_watcher.jl")
 
 if !MPI.Initialized()
     MPI.Init(; threadlevel=:multiple)
@@ -31,7 +31,17 @@ function check_for_core_overlaps()
     is_local_root = MPI.Comm_rank(node_local_comm) == 0
     all_local_cores = MPI.Gather(rank_cores, node_local_comm)
     all_local_ranks = MPI.Gather(global_rank, node_local_comm)  # local to global rank
-    (!is_local_root || allunique(all_local_cores)) && return
+    !is_local_root && return
+
+    if allunique(all_local_cores)
+        if is_root && length(all_local_cores) == ncores()
+            # All cores of the node with the root rank are used. This is problematic as the deadlock
+            # watcher process could have trouble having enough CPU time to do its job correctly.
+            DeadlockWatcher.setup_test_suite()
+            DeadlockWatcher.lower_process_priority()  # make the root rank have lower priority over the deadlock process
+        end
+        return
+    end
 
     node_name = gethostname()
     core_count = maximum(all_local_cores)
@@ -74,74 +84,6 @@ function print_backtrace_and_abort(error, bt=backtrace())
 end
 
 
-function detect_deadlock(f; label=nothing, timeout=2)
-    # `f` can use multiple Julia threads, but must leave 1 (or 2?) available. `timeout` is in seconds.
-    # TODO: for some very obscure reason, I get deadlocks with `timedwait` (and IO like `println`)
-    #   when I only have 2 threads. 3 threads seems to be the minimum for this to work.
-    if Threads.nthreads() < 3 || !DEADLOCK_CHECK
-        is_root && if DEADLOCK_CHECK
-            @warn "cannot detect deadlocks: 3 Julia threads or more are required" maxlog=1
-        else
-            @warn "deadlock detection disabled" maxlog=1
-        end
-        f()
-        return
-    end
-
-    # The interesting backtrace is here, not in the deadlock guard task.
-    # It would also be interesting to print the backtrace of the worker task, but it is not possible
-    # as it may be in Julia or C code. When using GDB, `jl_backtracet` can print to `stdout` the
-    # backtrace of any task, but it calls `printf` for each line, which is not ideal for MPI, and is
-    # unsafe if any Julia code is running, which we cannot know.
-    bt = backtrace()
-
-    # We must disable the GC as if the guard task starts a GC pass while the other is waiting
-    # forever in some C code, we will never get out of the deadlock.
-    GC.enable(false)
-
-    ok = Armon.Atomic{Bool}(false)
-    guard_started = Threads.Event()
-    @sync begin
-        worker_task = Threads.@spawn begin
-            wait(guard_started)
-            f()
-            @atomic ok.x = true
-        end
-
-        Threads.@spawn begin
-            notify(guard_started)
-
-            # In order to prevent this task from ever yielding to the Julia's scheduler, we cannot
-            # use any task-programing construct here, as it would create an opportunity for the
-            # scheduler to place only worker tasks on all threads. If this happens, there is no
-            # longer any guard which can trigger the abort when too much time has elapsed.
-            # This also includes all IO operations, such as `print`, as they involve a global stream
-            # lock, which can yield to the scheduler.
-            ns_timeout = timeout * 1e9
-            start = time_ns()
-            timed_out = true
-            while true
-                if (@atomic ok.x) || istaskfailed(worker_task)
-                    timed_out = false
-                    break
-                elseif (time_ns() - start) > ns_timeout
-                    break
-                end
-            end
-
-            if timed_out
-                label_str = isnothing(label) ? "" : (" at '" * label * "'")
-                print_backtrace_and_abort(ErrorException("deadlock$label_str"), bt)
-            end
-        end
-    end
-
-    GC.enable(true)
-
-    return
-end
-
-
 function MPI_try(f)
     try
         return f()
@@ -151,14 +93,53 @@ function MPI_try(f)
 end
 
 
-function test_point_to_point(model, test_name)
+THREAD_BARRIER_VAR = Comms.Atomic{Int}(0)
+BARRIER_CYCLE = Comms.Atomic{Int}(0)
+
+function thread_barrier(tid, nthreads)
+    cycle = @atomic BARRIER_CYCLE.x
+    @atomic THREAD_BARRIER_VAR.x += 1
+
+    guard = 0
+    while (@atomic THREAD_BARRIER_VAR.x) != nthreads && (@atomic BARRIER_CYCLE.x) == cycle
+        ccall(:jl_cpu_pause, Cvoid, ())
+        GC.safepoint()
+        guard += 1
+        if guard % 1_000_000 == 0
+            @error "stuck in barrier n°$cycle: $(@atomic THREAD_BARRIER_VAR.x)"
+            exit(1)
+        end
+    end
+
+    # reset
+    if tid == 1
+        @atomic THREAD_BARRIER_VAR.x = 0
+        @atomic BARRIER_CYCLE.x += 1
+    else
+        guard = 0
+        while (@atomic BARRIER_CYCLE.x) == cycle
+            ccall(:jl_cpu_pause, Cvoid, ())
+            GC.safepoint()
+            guard += 1
+            if guard % 1_000_000 == 0
+                @error "stuck in post barrier n°$cycle: $(@atomic THREAD_BARRIER_VAR.x)"
+                exit(1)
+            end
+        end
+    end
+end
+
+
+test_point_to_point(model, test_name) = test_point_to_point(model, test_name, 1, 1)
+
+function test_point_to_point(model, test_name, tid, nthreads)
     # Basic 2-way ring exchange. Should work with any number of ranks ≥ 1
     prev_rank = mod(global_rank - 1, global_size)
     next_rank = mod(global_rank + 1, global_size)
-    side_pos = 1
+    side_pos = tid
     array_type = Vector{Int}
     buffer_size = 10
-    total_buffer_size = buffer_size
+    total_buffer_size = buffer_size * nthreads
     tmp_buf_prev = Vector{Int}(undef, buffer_size)
     tmp_buf_next = Vector{Int}(undef, buffer_size)
     tmp_buf_prev .= -1
@@ -175,7 +156,7 @@ function test_point_to_point(model, test_name)
 
     xchgs = Any[nothing, nothing]
 
-    detect_deadlock(; label="exchange init of $test_name") do
+    @detect_deadlocks "exchange init of $test_name" 1 begin
         xchgs[1] = Comms.init_exchange(model, prev_rank, side_1, side_pos, array_type, buffer_size, total_buffer_size)
         xchgs[2] = Comms.init_exchange(model, next_rank, side_2, side_pos, array_type, buffer_size, total_buffer_size)
     end
@@ -191,86 +172,148 @@ function test_point_to_point(model, test_name)
         xchg_prev,    xchg_next    = xchg_next,    xchg_prev
     end
 
-    @test all(length.(Comms.unsafe_send_buffer(xchg_prev)) .== buffer_size)
-    @test all(length.(Comms.unsafe_recv_buffer(xchg_prev)) .== buffer_size)
-    @test all(length.(Comms.unsafe_send_buffer(xchg_next)) .== buffer_size)
-    @test all(length.(Comms.unsafe_recv_buffer(xchg_next)) .== buffer_size)
+    expected_size = Comms.uses_global_buffers(model) ? total_buffer_size : buffer_size
+    @test all(length.(Comms.unsafe_send_buffer(xchg_prev)) .== expected_size)
+    @test all(length.(Comms.unsafe_recv_buffer(xchg_prev)) .== expected_size)
+    @test all(length.(Comms.unsafe_send_buffer(xchg_next)) .== expected_size)
+    @test all(length.(Comms.unsafe_recv_buffer(xchg_next)) .== expected_size)
 
-    @test Comms.send_completed(xchg_prev)
-    @test Comms.send_completed(xchg_next)
+    if nthreads == 1
+        # `send_completed` may return `false` if another thread acquired a global lock, so those tests
+        # are single-thread only
+        @test Comms.send_completed(xchg_prev)
+        @test Comms.send_completed(xchg_next)
+    end
+
     if !Comms.is_async(model)
         # `recv_completed` is expected to work the same as `send_completed` only for synchronous communications
         @test Comms.recv_completed(xchg_prev)
         @test Comms.recv_completed(xchg_next)
     end
 
-    # Note: it is expected that receives are always preceded by a send.
-    detect_deadlock(; label="send to rank prev $prev_rank for $test_name") do
-        buf = Comms.acquire_send_buffer!(xchg_prev)
-        buf .= global_rank
-        Comms.release_send_buffer!(xchg_prev)
+    for rep in 1:10
+        # Note: it is expected that receives are always preceded by a send.
+        @detect_deadlocks "send to rank prev $prev_rank for $test_name" 1 begin
+            buf = Comms.acquire_send_buffer!(xchg_prev)
+            buf .= global_rank + (tid - 1) * 1000 + rep * 100000
+            Comms.release_send_buffer!(xchg_prev)
+        end
+
+        @detect_deadlocks "send to rank next $next_rank for $test_name" 1 begin
+            while (buf = Comms.try_acquire_send_buffer!(xchg_next); isnothing(buf))
+                ccall(:jl_cpu_pause, Cvoid, ())
+                GC.safepoint()
+            end
+            buf .= global_rank + (tid - 1) * 1000 + rep * 100000
+            Comms.release_send_buffer!(xchg_next)
+        end
+
+        @detect_deadlocks "receive from prev rank $prev_rank for $test_name" 1 begin
+            # deadlock
+            # mpiexec -np 2 --oversubscribe -- julia --project=.. -t 7 --color=yes ./runtests.jl comms
+            buf = Comms.acquire_recv_buffer!(xchg_prev)
+            tmp_buf_prev .= buf
+            Comms.release_recv_buffer!(xchg_prev)
+        end
+
+        @detect_deadlocks "receive from next rank $next_rank for $test_name" 1 begin
+            while (buf = Comms.try_acquire_recv_buffer!(xchg_next); isnothing(buf))
+                ccall(:jl_cpu_pause, Cvoid, ())
+                GC.safepoint()
+            end
+            tmp_buf_next .= buf
+            Comms.release_recv_buffer!(xchg_next)
+        end
+
+        expected_buf_prev = zeros(Int, size(tmp_buf_prev))
+        expected_buf_next = zeros(Int, size(tmp_buf_next))
+        if model isa Comms.NoCommunicationModel
+            # Here we receive the data we sent
+            expected_buf_prev .= global_rank + (tid - 1) * 1000 + rep * 100000
+            expected_buf_next .= global_rank + (tid - 1) * 1000 + rep * 100000
+        else
+            expected_buf_prev .= prev_rank + (tid - 1) * 1000 + rep * 100000
+            expected_buf_next .= next_rank + (tid - 1) * 1000 + rep * 100000
+        end
+
+        @test tmp_buf_prev == expected_buf_prev
+        @test tmp_buf_next == expected_buf_next
+
+        @detect_deadlocks "wait send completed for prev rank $prev_rank" 1 begin
+            guard = 0
+            while !Comms.send_completed(xchg_prev)
+                ccall(:jl_cpu_pause, Cvoid, ())
+                GC.safepoint()
+                guard += 1
+                if guard % 1_000_000 == 0
+                    # deadlock
+                    # mpiexec -np 2 --oversubscribe -- julia --project=.. -t 7 --color=yes ./runtests.jl comms
+                    Comms.log("stuck waiting send (1)"; extra=Comms.part_state_str(xchg_prev))
+                end
+            end
+        end
+
+        if nthreads > 1
+            # `send_completed` may return `false` if another thread acquired a global lock
+            @detect_deadlocks "test send completed for prev rank $prev_rank" 1 begin
+                guard = 0
+                while !Comms.send_completed(xchg_prev)
+                    ccall(:jl_cpu_pause, Cvoid, ())
+                    GC.safepoint()
+                    guard += 1
+                    if guard % 1_000_000 == 0
+                        Comms.log("stuck waiting send (2)"; extra=Comms.part_state_str(xchg_prev))
+                    end
+                end
+            end
+        else
+            @test Comms.send_completed(xchg_prev)
+        end
+
+        @detect_deadlocks "wait send completed for next rank $next_rank" 1 begin
+            Comms.wait_send_completed(xchg_next)
+        end
+
+        if nthreads > 1
+            # `send_completed` may return `false` if another thread acquired a global lock
+            @detect_deadlocks "test send completed for next rank $next_rank" 1 begin
+                while !Comms.send_completed(xchg_next)
+                    ccall(:jl_cpu_pause, Cvoid, ())
+                    GC.safepoint()
+                end
+            end
+        else
+            @test Comms.send_completed(xchg_next)
+        end
+
+        if !Comms.is_async(model)
+            # Trivial for synchronous models, so no deadlock detection needed
+            @test Comms.recv_completed(xchg_prev)
+            @test Comms.recv_completed(xchg_next)
+        end
+
+        thread_barrier(tid, nthreads)
     end
 
-    detect_deadlock(; label="send to rank next $next_rank for $test_name") do
-        while (buf = Comms.try_acquire_send_buffer!(xchg_next); isnothing(buf)) end
-        buf .= global_rank
-        Comms.release_send_buffer!(xchg_next)
-    end
-
-    detect_deadlock(; label="receive from prev rank $prev_rank for $test_name") do
-        buf = Comms.acquire_recv_buffer!(xchg_prev)
-        tmp_buf_prev .= buf
-        Comms.release_recv_buffer!(xchg_prev)
-    end
-
-    detect_deadlock(; label="receive from next rank $next_rank for $test_name") do
-        while (buf = Comms.try_acquire_recv_buffer!(xchg_next); isnothing(buf)) end
-        tmp_buf_next .= buf
-        Comms.release_recv_buffer!(xchg_next)
-    end
-
-    # TODO: wait_recv_completed (but NOT for the test before the last recv_completed, as receive request might be permanent)
-
-    expected_buf_prev = zeros(Int, size(tmp_buf_prev))
-    expected_buf_next = zeros(Int, size(tmp_buf_next))
-    if model isa Comms.NoCommunicationModel
-        # Here we receive the data we sent
-        expected_buf_prev .= global_rank
-        expected_buf_next .= global_rank
-    else
-        expected_buf_prev .= prev_rank
-        expected_buf_next .= next_rank
-    end
-
-    @test tmp_buf_prev == expected_buf_prev
-    @test tmp_buf_next == expected_buf_next
-
-    detect_deadlock(; label="wait send completed for prev rank $prev_rank") do
-        Comms.wait_send_completed(xchg_prev)
-    end
-    @test Comms.send_completed(xchg_prev)
-    
-    detect_deadlock(; label="wait send completed for next rank $next_rank") do
-        Comms.wait_send_completed(xchg_next)
-    end
-    @test Comms.send_completed(xchg_next)
-
-    if !Comms.is_async(model)
-        # Trivial for synchronous models, so no deadlock detection needed
-        @test Comms.recv_completed(xchg_prev)
-        @test Comms.recv_completed(xchg_next)
-    end
-
-    # Important: since we keep the same tags for each exchange, the next MPI exchange might collide
-    # with this one if it uses permanently active receive requests (or similar).
-    # By finalizing the object, any active request will be cancelled.
-    finalize(xchg_prev)
-    finalize(xchg_next)
+    return xchg_prev, xchg_next
 end
 
 
 function test_point_to_point_multithreaded(model, test_name)
-    # TODO
+    @detect_deadlocks "parallel $test_name with $(Threads.nthreads()) threads" 20 :no_gc begin
+        Threads.@threads :static for tid in 1:Threads.nthreads()
+            MPI_try() do
+                xchgs = test_point_to_point(model, test_name, tid, Threads.nthreads())
+
+                thread_barrier(tid, Threads.nthreads())
+
+                # Important: since we keep the same tags for each exchange, the next MPI exchange
+                # might collide with this one if it uses permanently active receive requests (or similar).
+                Comms.finalize_comm!.(xchgs)
+                # Comms.finalize_comm!(xchgs)
+            end
+        end
+    end
 end
 
 
@@ -283,7 +326,7 @@ function test_collective(model, test_name)
     tmp_buf .= -1
 
     reduc = nothing
-    detect_deadlock(; label="exchange init of $test_name") do
+    @detect_deadlocks "exchange init of $test_name" 1 begin
         reduc = Comms.init_reduce_broadcast(model, reduction_op, array_type, buffer_size)
     end
     @test !isnothing(reduc)
@@ -300,14 +343,14 @@ function test_collective(model, test_name)
     end
 
     # Note: it is expected that receives are always preceded by a send.
-    detect_deadlock(; label="collective send for $test_name") do
+    @detect_deadlocks "collective send for $test_name" 1 begin
         buf = Comms.acquire_send_buffer!(reduc)
         buf .= 0
         buf[global_rank + 1] = global_rank
         Comms.release_send_buffer!(reduc)
     end
 
-    detect_deadlock(; label="collective recv for $test_name") do
+    @detect_deadlocks "collective recv for $test_name" 1 begin
         buf = Comms.acquire_recv_buffer!(reduc)
         tmp_buf .= buf
         Comms.release_recv_buffer!(reduc)
@@ -323,14 +366,14 @@ function test_collective(model, test_name)
 
     @test tmp_buf == expected_buf
 
-    detect_deadlock(; label="collective (try) send for $test_name") do
+    @detect_deadlocks "collective (try) send for $test_name" 1 begin
         while (buf = Comms.try_acquire_send_buffer!(reduc); isnothing(buf)) end
         buf .= 0
         buf[global_rank + 1] = global_rank
         Comms.release_send_buffer!(reduc)
     end
 
-    detect_deadlock(; label="collective (try) recv for $test_name") do
+    @detect_deadlocks "collective (try) recv for $test_name" 1 begin
         while (buf = Comms.try_acquire_recv_buffer!(reduc); isnothing(buf)) end
         tmp_buf .= buf
         Comms.release_recv_buffer!(reduc)
@@ -340,7 +383,7 @@ function test_collective(model, test_name)
 
     # TODO: wait_recv_completed (but NOT for the test before the last recv_completed, as receive request might be permanent)
 
-    detect_deadlock(; label="collective wait send completed") do
+    @detect_deadlocks "collective wait send completed" 1 begin
         Comms.wait_send_completed(reduc)
     end
     @test Comms.send_completed(reduc)
@@ -350,10 +393,7 @@ function test_collective(model, test_name)
         @test Comms.recv_completed(reduc)
     end
 
-    # Important: since we keep the same tags for each exchange, the next MPI exchange might collide
-    # with this one if it uses permanently active receive requests (or similar).
-    # By finalizing the object, any active request will be cancelled.
-    finalize(reduc)
+    return reduc
 end
 
 
@@ -365,7 +405,10 @@ end
 function test_model(comm_model, comm_model_name)
     if Comms.supports_point_to_point(comm_model)
         MPI_try() do
-            test_point_to_point(comm_model, comm_model_name)
+            xchgs = test_point_to_point(comm_model, comm_model_name)
+            # Important: since we keep the same tags for each exchange, the next MPI exchange might
+            # collide with this one if it uses permanently active receive requests (or similar).
+            Comms.finalize_comm!.(xchgs)
         end
 
         if Comms.is_thread_safe(comm_model)
@@ -377,7 +420,8 @@ function test_model(comm_model, comm_model_name)
 
     if Comms.supports_collectives(comm_model)
         MPI_try() do
-            test_collective(comm_model, comm_model_name)
+            xchg = test_collective(comm_model, comm_model_name)
+            Comms.finalize_comm!(xchg)
         end
 
         if Comms.is_thread_safe(comm_model)
@@ -389,10 +433,10 @@ function test_model(comm_model, comm_model_name)
 end
 
 
-@testset "Communications" begin
+@testset "Communications" verbose=true begin
     check_for_core_overlaps()
 
-    @testset "$comm_model_name model" for (comm_model_name, comm_model_kwargs) in (
+    @testset "$comm_model_name model" verbose=true for (comm_model_name, comm_model_kwargs) in (
         (:no_comms, (;)),
         (:sync, (;)),
         (:async, (;)),
