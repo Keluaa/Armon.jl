@@ -114,9 +114,11 @@ function MPI_Parrived(req::PartitionedRequest, partition::Integer)
         # progress call in `MPI_Parrived`, leading to systematic deadlocks in receive loops.
         # See https://github.com/open-mpi/ompi/pull/10077
         # The fix here is the same fix as in `MPI_Parrived` in the above PR.
-        if flag[] == 0
-            ccall((:opal_progress, MPI.API.libmpi), Cint, ())
-        end
+        # if flag[] == 0
+        #     ccall((:opal_progress, MPI.API.libmpi), Cint, ())
+        # end
+        # ...but there is still some race-condition
+        # @warn "MPI partitioned communications are available but very unstable in OpenMPI v4.1" maxlog=1
     end
 
     return flag[] != 0

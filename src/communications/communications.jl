@@ -112,6 +112,13 @@ The exchange would use buffers of `array_type` and `buffer_size`.
 The sum of all `buffer_size`s of the exchanges along `side` is `total_side_buffer_size`.
 
 Returns a [`AbstractCommunication`](@ref), whose exact concrete type depends on `model`.
+
+!!! info
+
+    The order of operations in an exchange is important, as it is expected that sends are always
+    followed by a receive:
+     - first [`try_acquire_send_buffer!`](@ref) (or [`acquire_send_buffer!`](@ref)), then [`release_send_buffer!`](@ref)
+     - second [`try_acquire_recv_buffer!`](@ref) (or [`acquire_recv_buffer!`](@ref)), then [`release_recv_buffer!`](@ref)
 """
 function init_exchange end
 

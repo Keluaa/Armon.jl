@@ -533,6 +533,11 @@ function init_MPI(params::ArmonParameters;
         params.thread_comms = fill(params.cart_comm, Threads.nthreads())
     end
 
+    # TODO: change how `partition_size` works, in order to scale it automatically by the size of
+    #   the block, number of ghost cells, and the number of communicated variables. We could simply
+    #   compute it for the user instead of letting them do it.
+    #   but since the block size is set afterwards... could  we change the order of initialization?
+
     # Communication model initialisation
     # Use the communicator of the main thread for the reduction model and basic error checking.
     main_comm_model = Communications.communication_model(comm_model, params.thread_comms[1]; comm_model_kwargs...)

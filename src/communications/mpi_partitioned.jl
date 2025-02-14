@@ -6,7 +6,7 @@ mutable struct MPIPartitionedP2PGlobalInfo{A}
     send_request     :: PartitionedRequest
     recv_request     :: PartitionedRequest
     send_lock        :: Atomic{Int}   # Restricts the access to `send_request` to a single thread
-    send_started     :: Atomic{Bool}  # If `MPI_Start` was called on `send_request`, and it did not complete yet
+    send_count       :: Atomic{Int}   # Number of partitions marked as ready
     recv_count       :: Atomic{Int}   # Number of partitions which acknowledged the arrival of their partition.
     send_cycle       :: Atomic{Int}   # Global cycle of the send request. Incremented every time `MPI_Start` is called.
     recv_cycle       :: Atomic{Int}   # Global cycle of the recv request. Incremented every time `MPI_Start` is called.
@@ -16,6 +16,8 @@ mutable struct MPIPartitionedP2PGlobalInfo{A}
     buffer_size      :: Int
     tag              :: Int
 end
+
+# TODO: option to use a single partition (or less) on the receiving side (as recommended by the spec, advice 4.2)
 
 
 """
@@ -115,17 +117,18 @@ function build_partitioned_communication(model::MPIPartitionedCommunicationModel
     send_req = MPI_Psend_init(send_buffer, model.comm; partitions=total_partitions, count=partition_size, dest=rank, tag)
     recv_req = MPI_Precv_init(recv_buffer, model.comm; partitions=total_partitions, count=partition_size, source=rank, tag)
 
-    # The receive request is always active, until we need to access the receive buffer
+    # As the intented usage of partitioned communications does not involve starting and ending the
+    # request from a parallel region, the easiest way of using them that way is to make both the
+    # send and receive requests always active, even outside of parallel regions.
+    # When a `MPI_Test` or `MPI_Wait` completes a request, it is started once again.
+    MPI.Start(send_req)
     MPI.Start(recv_req)
 
     global_c_info = MPIPartitionedP2PGlobalInfo{array_type}(
         model,
         send_buffer, recv_buffer,
         send_req, recv_req,
-        Atomic{Int}(0),
-        Atomic{Bool}(false),
-        Atomic{Int}(0),
-        Atomic{Int}(0), Atomic{Int}(0),
+        Atomic{Int}(0), Atomic{Int}(0), Atomic{Int}(0), Atomic{Int}(0), Atomic{Int}(0),
         total_partitions, rank, side, required_buffer_size, tag
     )
 
@@ -191,10 +194,12 @@ function try_acquire_send_buffer!(c::MPIPartitionedP2P)
     ok = atomic_lock!(c.global_info.send_lock) do  # non-blocking lock
         # Another thread could have done the job while we were acquiring the lock, so we must check again
         (@atomic c.global_info.send_cycle.x) == c.send_cycle && return true
+        (@atomic c.global_info.send_count.x) != c.global_info.total_partitions && return false
         completed = MPI.Test(c.global_info.send_request)
         if completed
+            MPI.Start(c.global_info.send_request)
+            @atomic c.global_info.send_count.x = 0
             @atomic c.global_info.send_cycle.x += 1
-            @atomic c.global_info.send_started.x = false
         end
         return completed
     end
@@ -208,30 +213,18 @@ function acquire_send_buffer!(c::MPIPartitionedP2P)
     wait_for_atomic_lock!(c.global_info.send_lock) do
         (@atomic c.global_info.send_cycle.x) == c.send_cycle && return c.local_send_buffer
         MPI.Wait(c.global_info.send_request)
+        MPI.Start(c.global_info.send_request)
+        @atomic c.global_info.send_count.x = 0
         @atomic c.global_info.send_cycle.x += 1
-        @atomic c.global_info.send_started.x = false
     end
     return c.local_send_buffer
 end
 
 
 function release_send_buffer!(c::MPIPartitionedP2P)
-    # The request needs to be started before we can call `MPI_Pready`
-    if !(@atomic c.global_info.send_started.x)
-        # We impose a wait here for convenience.
-        # Note that as per the MPI spec, we cannot simplify things by immediately starting the
-        # request after it completed, as a requirement for proper call to `MPI_Finalize`, ALL
-        # requests must be inactive. This could also cause implementation (MPI-side) problems if
-        # several calls to the solver would be made in the same Julia session, as some requests
-        # would remain active forever.
-        wait_for_atomic_lock!(c.global_info.send_lock) do 
-            (@atomic c.global_info.send_started.x) && return  # thread-safety, etc...
-            MPI.Start(c.global_info.send_request)
-            @atomic c.global_info.send_started.x = true
-        end
-    end
-
+    # Since the send request is always active, this is always correct
     MPI_Pready!(c.global_info.send_request, c.partitions)
+    @atomic c.global_info.send_count.x += length(c.partitions)
     c.send_cycle += 1  # Now this partition must wait for the request to complete before contributing again
     return nothing
 end
@@ -239,38 +232,31 @@ end
 
 wait_send_completed(c::MPIPartitionedP2P) = send_completed(c, true)
 function send_completed(c::MPIPartitionedP2P, wait=false)
-    if !(@atomic c.global_info.send_started.x)
-        # `MPI.Test` will return `true` in all cases as the request is inactive, but:
-        #   - if `c.global_info.send_cycle == c.send_cycle` => all partitions contributed and the
-        #     MPI send has already completed
-        #   - if `c.global_info.send_cycle != c.send_cycle` => this partition must have started the
-        #     request before calling `MPI_Pready`: this isn't a possible scenario
-        # Therefore it makes sense to always return `true`.
-        return true
-    end
-
+    (@atomic c.global_info.send_cycle.x) == c.send_cycle && return true
     return atomic_lock!(c.global_info.send_lock) do  # non-blocking lock
-        # Another thread could have done the job while we were acquiring the lock, so we must check again
-        !(@atomic c.global_info.send_started.x) && return true
+        (@atomic c.global_info.send_cycle.x) == c.send_cycle && return true
 
-        previously_not_completed = (@atomic c.global_info.send_cycle.x) != c.send_cycle
-        if !previously_not_completed
-            # If another thread completed the request and started the next one, we mustn't test it as
-            # the result wouldn't be relevant for this partition.
-            return true
-        end
+        # TODO: cleanup
+        # The MPI spec is a bit unclear about this, but it seems (4.2, "followed by a call to a
+        # completing procedure") that it is disallowed to call `MPI_Test` or `MPI_Wait` unless all
+        # partitions are ready.
+        # (@atomic c.global_info.send_count.x) != c.global_info.total_partitions && return false
 
         if wait
+            # TODO: return false instead of waiting?
             MPI.Wait(c.global_info.send_request)
             completed = true
         else
+            (@atomic c.global_info.send_count.x) != c.global_info.total_partitions && return false
+
             completed = MPI.Test(c.global_info.send_request)
         end
 
         if completed
             # Begin a new communication cycle
+            MPI.Start(c.global_info.send_request)
+            @atomic c.global_info.send_count.x = 0
             @atomic c.global_info.send_cycle.x += 1
-            @atomic c.global_info.send_started.x = false
         end
 
         return completed
@@ -287,8 +273,7 @@ end
 
 function acquire_recv_buffer!(c::MPIPartitionedP2P)
     # We could use `MPI_Wait` on the whole partitioned request, but this would enforce the use of a
-    # global lock in `release_recv_buffer!` to prevent concurrent access to the request, plus one
-    # global lock here to make sure only a single thread waits on the request.
+    # global lock in `release_recv_buffer!` to prevent concurrent access to the request.
     # This is too heavy, and stupid given that `MPI_Parrived` is thread-safe (unlike most MPI
     # functions using requests): instead we call `MPI_Parrived` repeatedly until it returns true.
     wait_recv_completed(c)
@@ -325,12 +310,11 @@ end
 
 
 function wait_recv_completed(c::MPIPartitionedP2P)
-    # Wait 10s max, poll every 1ms. Very suboptimal, but waiting by design is suboptimal.
-    # There is a fast path in `timedwait` if the condition is already `true`.
-    res = timedwait(10.0; pollint=0.001) do
-        return recv_completed(c)
+    # Busy loop, amortized by a pause. Suboptimal, but calling `MPI_Wait` would be much worse.
+    while !recv_completed(c)
+        ccall(:jl_cpu_pause, Cvoid, ())
+        GC.safepoint()
     end
-    res === :time_out && timeout_error && wait_lock_timeout(10.0)  # unhelpful error
     return true
 end
 
@@ -348,6 +332,12 @@ function finalize_comm!(gi::MPIPartitionedP2PGlobalInfo)
     end
 
     !MPI.Test(gi.recv_request) && MPI.Cancel!(gi.recv_request)
+    if !MPI.Test(gi.send_request)
+        # Since `MPI_Cancel` is invalid on send requests, we simply mark all partitions as ready.
+        # This way the request will complete, but with garbage data, and the receiving rank can
+        # simply cancel the request.
+        MPI_Pready!(gi.send_request, 1:gi.total_partitions)
+    end
 
     lock(gi.model.lock) do
         partition_key = (gi.rank, gi.side, gi.buffer_size)
