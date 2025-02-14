@@ -44,5 +44,6 @@ include("halo_exchange.jl")
 include("io.jl")
 include("logging.jl")
 include("solver.jl")
+include("debugging.jl")
 
 end

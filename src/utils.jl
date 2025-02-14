@@ -115,9 +115,3 @@ end
 function Base.showerror(io::IO, ex::SolverException)
     print(io, "SolverException ($(ex.category)): ", ex.msg)
 end
-
-
-disp_blk(blk, var; on_device=true) = reshape(getfield(block_data(blk; on_device), var), block_size(blk))'
-disp_real_blk(blk, var; on_device=true) = view(disp_blk(blk, var; on_device)', (.+).(Base.oneto.(real_block_size(blk.size)), ghosts(blk.size))...)'
-disp_grid_state(grid) = permutedims(reshape(solver_step.(solver_state.(all_blocks(grid))), grid.grid_size))
-disp_mirror_y(A) = view(A, size(A, 1):-1:1, :)  # places the bottom-left cell at the bottom-left of the display
