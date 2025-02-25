@@ -1,5 +1,6 @@
 module Communications
 
+using Random
 using MPI
 using ..Armon: Atomic, ObjOrType
 
@@ -320,6 +321,7 @@ function finalize_comm! end
 include("mpi_extra.jl")
 include("empty_communication.jl")
 include("no_communications.jl")
+include("rand_communications.jl")
 include("mpi_sync_communications.jl")
 include("mpi_async_communications.jl")
 include("mpi_async_thread_safe.jl")
@@ -342,6 +344,7 @@ Possible values for `name`:
  - `:rma`          [`RMACommunicationModel`](@ref)
  - `:partitioned`  [`MPIPartitionedCommunicationModel`](@ref)
  - `:no_comms`     [`NoCommunicationModel`](@ref)
+ - `:rand_comms`   [`RandCommunicationModel`](@ref)
 """
 function communication_model(name::Symbol, comm::MPI.Comm; kwargs...)
     if name === :async_safe
@@ -359,6 +362,8 @@ function communication_model(name::Symbol, comm::MPI.Comm; kwargs...)
         return MPIPartitionedCommunicationModel(comm; kwargs...)
     elseif name === :no_comms
         return NoCommunicationModel()
+    elseif name === :rand_comms
+        return RandCommunicationModel(; kwargs...)
     else
         error("Unknown communication model type: $name")
     end
