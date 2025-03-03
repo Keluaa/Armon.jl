@@ -230,8 +230,14 @@ function start_exchange(
     params::ArmonParameters,
     blk::LocalTaskBlock{D, H}, other_blk::RemoteTaskBlock{B}, side::Side.T
 ) where {D, H, B}
-    send_buffer = Communications.try_acquire_send_buffer!(other_blk.comm_data)
-    isnothing(send_buffer) && return false
+    send_buffer = Communications.unsafe_send_buffer(other_blk.comm_data) |> only
+
+    # TODO: This causes a MAJOR PERFORMANCE SLOWDOWN for some very obscure reason (e.g. it slashes perfs in two at ~1e8 cells)
+    #       Somehow, this is unrelated to user MPI time?? We need to check the system time too.
+    #       Even worse: the fix is to move this check later, in `finish_exchange`, right after another MPI_Test on the receive request...
+    #       Test if it also happens on Infiniband (it does on BXI)
+    # send_buffer = Communications.try_acquire_send_buffer!(other_blk.comm_data)
+    # isnothing(send_buffer) && return false
 
     buffer_are_on_device = D == B
     if !buffer_are_on_device
@@ -268,6 +274,8 @@ function finish_exchange(
     # Finish the exchange between one local block and a remote block from another sub-domain
     recv_buffer = Communications.try_acquire_recv_buffer!(other_blk.comm_data)
     isnothing(recv_buffer) && return false
+    send_buffer = Communications.try_acquire_send_buffer!(other_blk.comm_data)
+    isnothing(send_buffer) && return false
 
     recv_domain = ghost_domain(blk.size, side; single_strip=false)
     buffer_are_on_device = D == B
